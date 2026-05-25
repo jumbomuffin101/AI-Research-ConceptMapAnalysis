@@ -1,0 +1,4 @@
+openai==1.82.0
+python-dotenv==1.1.0
+pymupdf==1.26.0
+pillow==11.2.1
