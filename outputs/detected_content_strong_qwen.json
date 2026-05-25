@@ -1,0 +1,254 @@
+
+{
+  "map_file": "ConceptMapStrong.pdf",
+  "central_or_top_level_concepts": [
+    "Clinical Presentation",
+    "Differential Diagnosis",
+    "Pathophysiology",
+    "Diagnosis Specific",
+    "Prevention, Appropriate Management"
+  ],
+  "detected_concepts": [
+    "Patient is John Seale",
+    "70-year-old male",
+    "Shortness of breath",
+    "Palpitations",
+    "Irregularly irregular rhythm",
+    "Tachycardia",
+    "Peripheral edema",
+    "Diminished pulses",
+    "Cardiogenic shock",
+    "Atrial fibrillation",
+    "Exercise intolerance",
+    "Chest pain",
+    "Sweating",
+    "Smoking history",
+    "Alcohol use",
+    "Past medical history",
+    "Social history",
+    "Review of systems",
+    "Physical exam",
+    "General appearance",
+    "Respiratory",
+    "Cardiovascular",
+    "Neurological",
+    "Endocrine",
+    "Peripheral edema",
+    "Diminished pulses",
+    "Patient was cold and clammy",
+    "Crackles heard upon lung exam",
+    "Elevated pressure can cause because of the heart failure",
+    "The patient was cool and clammy because of decreased cardiac output",
+    "The crackles from the fluid buildup causes cap distention",
+    "HSS Relation",
+    "Prevalence",
+    "Incidence",
+    "Pathophysiology of Atrial Fibrillation and Cardiogenic shock",
+    "Prevention, Appropriate Management",
+    "Monitor patient visits",
+    "Counsel patient on smoking cessation",
+    "Counsel patient on medication adherence",
+    "Give heparin for anticoagulation",
+    "Give furosemide for pulmonary edema and peripheral edema"
+  ],
+  "detected_relationships": [
+    {
+      "source": "Clinical Presentation",
+      "relationship_label": "includes",
+      "target": "Patient is John Seale"
+    },
+    {
+      "source": "Clinical Presentation",
+      "relationship_label": "includes",
+      "target": "70-year-old male"
+    },
+    {
+      "source": "Clinical Presentation",
+      "relationship_label": "includes",
+      "target": "Shortness of breath"
+    },
+    {
+      "source": "Clinical Presentation",
+      "relationship_label": "includes",
+      "target": "Palpitations"
+    },
+    {
+      "source": "Differential Diagnosis",
+      "relationship_label": "includes",
+      "target": "Cardiogenic shock"
+    },
+    {
+      "source": "Differential Diagnosis",
+      "relationship_label": "includes",
+      "target": "Atrial fibrillation"
+    },
+    {
+      "source": "Pathophysiology",
+      "relationship_label": "includes",
+      "target": "Irregularly irregular rhythm"
+    },
+    {
+      "source": "Pathophysiology",
+      "relationship_label": "includes",
+      "target": "Tachycardia"
+    },
+    {
+      "source": "Pathophysiology",
+      "relationship_label": "includes",
+      "target": "Peripheral edema"
+    },
+    {
+      "source": "Pathophysiology",
+      "relationship_label": "includes",
+      "target": "Diminished pulses"
+    },
+    {
+      "source": "Diagnosis Specific",
+      "relationship_label": "includes",
+      "target": "Exercise intolerance"
+    },
+    {
+      "source": "Diagnosis Specific",
+      "relationship_label": "includes",
+      "target": "Chest pain"
+    },
+    {
+      "source": "Diagnosis Specific",
+      "relationship_label": "includes",
+      "target": "Sweating"
+    },
+    {
+      "source": "Diagnosis Specific",
+      "relationship_label": "includes",
+      "target": "Smoking history"
+    },
+    {
+      "source": "Diagnosis Specific",
+      "relationship_label": "includes",
+      "target": "Alcohol use"
+    },
+    {
+      "source": "Diagnosis Specific",
+      "relationship_label": "includes",
+      "target": "Past medical history"
+    },
+    {
+      "source": "Diagnosis Specific",
+      "relationship_label": "includes",
+      "target": "Social history"
+    },
+    {
+      "source": "Diagnosis Specific",
+      "relationship_label": "includes",
+      "target": "Review of systems"
+    },
+    {
+      "source": "Diagnosis Specific",
+      "relationship_label": "includes",
+      "target": "Physical exam"
+    },
+    {
+      "source": "Physical exam",
+      "relationship_label": "includes",
+      "target": "General appearance"
+    },
+    {
+      "source": "Physical exam",
+      "relationship_label": "includes",
+      "target": "Respiratory"
+    },
+    {
+      "source": "Physical exam",
+      "relationship_label": "includes",
+      "target": "Cardiovascular"
+    },
+    {
+      "source": "Physical exam",
+      "relationship_label": "includes",
+      "target": "Neurological"
+    },
+    {
+      "source": "Physical exam",
+      "relationship_label": "includes",
+      "target": "Endocrine"
+    },
+    {
+      "source": "Physical exam",
+      "relationship_label": "includes",
+      "target": "Peripheral edema"
+    },
+    {
+      "source": "Physical exam",
+      "relationship_label": "includes",
+      "target": "Diminished pulses"
+    },
+    {
+      "source": "Physical exam",
+      "relationship_label": "includes",
+      "target": "Patient was cold and clammy"
+    },
+    {
+      "source": "Physical exam",
+      "relationship_label": "includes",
+      "target": "Crackles heard upon lung exam"
+    },
+    {
+      "source": "Physical exam",
+      "relationship_label": "includes",
+      "target": "Elevated pressure can cause because of the heart failure"
+    },
+    {
+      "source": "Physical exam",
+      "relationship_label": "includes",
+      "target": "The patient was cool and clammy because of decreased cardiac output"
+    },
+    {
+      "source": "Physical exam",
+      "relationship_label": "includes",
+      "target": "The crackles from the fluid buildup causes cap distention"
+    },
+    {
+      "source": "HSS Relation",
+      "relationship_label": "includes",
+      "target": "Prevalence"
+    },
+    {
+      "source": "HSS Relation",
+      "relationship_label": "includes",
+      "target": "Incidence"
+    },
+    {
+      "source": "Pathophysiology of Atrial Fibrillation and Cardiogenic shock",
+      "relationship_label": "includes",
+      "target": "Pathophysiology of Atrial Fibrillation and Cardiogenic shock"
+    },
+    {
+      "source": "Prevention, Appropriate Management",
+      "relationship_label": "includes",
+      "target": "Monitor patient visits"
+    },
+    {
+      "source": "Prevention, Appropriate Management",
+      "relationship_label": "includes",
+      "target": "Counsel patient on smoking cessation"
+    },
+    {
+      "source": "Prevention, Appropriate Management",
+      "relationship_label": "includes",
+      "target": "Counsel patient on medication adherence"
+    },
+    {
+      "source": "Prevention, Appropriate Management",
+      "relationship_label": "includes",
+      "target": "Give heparin for anticoagulation"
+    },
+    {
+      "source": "Prevention, Appropriate Management",
+      "relationship_label": "includes",
+      "target": "Give furosemide for pulmonary edema and peripheral edema"
+    }
+  ],
+  "hierarchy_detected": "Central concept with branching sub-concepts and relationships",
+  "layout_notes": "Concept map is complex with multiple branches and detailed information.",
+  "uncertain_items": []
+}

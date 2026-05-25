@@ -1,0 +1,132 @@
+{
+  "map_file": "ConceptMapStrong.pdf",
+  "central_or_top_level_concepts": ["Clinical Presentation"],
+  "detected_concepts": [
+    "Clinical Presentation",
+    "Physical exam",
+    "Social history",
+    "Past Surgical History",
+    "Review of Systems",
+    "Differential Diagnosis",
+    "Diagnosis Specifics",
+    "Treatment",
+    "Unstable angina",
+    "Myocardial infarction",
+    "Thyroid crisis",
+    "Aortic dissection",
+    "HSS",
+    "HSS Relation",
+    "Patient",
+    "Symptoms",
+    "Risk factors",
+    "Medications",
+    "Tests",
+    "Findings",
+    "Interventions"
+  ],
+  "detected_relationships": [
+    {
+      "source": "Clinical Presentation",
+      "relationship_label": "includes",
+      "target": "Physical exam"
+    },
+    {
+      "source": "Clinical Presentation",
+      "relationship_label": "includes",
+      "target": "Social history"
+    },
+    {
+      "source": "Clinical Presentation",
+      "relationship_label": "includes",
+      "target": "Past Surgical History"
+    },
+    {
+      "source": "Clinical Presentation",
+      "relationship_label": "includes",
+      "target": "Review of Systems"
+    },
+    {
+      "source": "Clinical Presentation",
+      "relationship_label": "includes",
+      "target": "Differential Diagnosis"
+    },
+    {
+      "source": "Clinical Presentation",
+      "relationship_label": "includes",
+      "target": "Diagnosis Specifics"
+    },
+    {
+      "source": "Clinical Presentation",
+      "relationship_label": "includes",
+      "target": "Treatment"
+    },
+    {
+      "source": "Physical exam",
+      "relationship_label": "observes",
+      "target": "Patient was tachydcardic"
+    },
+    {
+      "source": "Social history",
+      "relationship_label": "includes",
+      "target": "Patient has history of hypertension"
+    },
+    {
+      "source": "Past Surgical History",
+      "relationship_label": "includes",
+      "target": "Thyroidectomy"
+    },
+    {
+      "source": "Review of Systems",
+      "relationship_label": "includes",
+      "target": "General Aches"
+    },
+    {
+      "source": "Differential Diagnosis",
+      "relationship_label": "includes",
+      "target": "Unstable angina"
+    },
+    {
+      "source": "Diagnosis Specifics",
+      "relationship_label": "specifies",
+      "target": "Aortic dissection that led to cardiogenic shock"
+    },
+    {
+      "source": "Treatment",
+      "relationship_label": "includes",
+      "target": "Prevention, Diagnosis, Management"
+    },
+    {
+      "source": "Unstable angina",
+      "relationship_label": "leads to",
+      "target": "Myocardial infarction"
+    },
+    {
+      "source": "Thyroid crisis",
+      "relationship_label": "can lead to",
+      "target": "HSS"
+    },
+    {
+      "source": "HSS",
+      "relationship_label": "has",
+      "target": "HSS Relation"
+    },
+    {
+      "source": "HSS Relation",
+      "relationship_label": "relates to",
+      "target": "Patient"
+    },
+    {
+      "source": "Patient",
+      "relationship_label": "states",
+      "target": "I want to give heparin"
+    }
+  ],
+  "hierarchy_detected": "Clinical Presentation is the top-level concept, branching into main categories (Physical exam, Social history, Past Surgical History, Review of Systems, Differential Diagnosis, Diagnosis Specifics, Treatment), which further branch into detailed sub-concepts (e.g., Physical exam → specific findings, Social history → patient history details).",
+  "layout_notes": "The map is structured hierarchically with 'Clinical Presentation' at the top, followed by primary concept branches. Each primary branch has detailed sub-nodes connected by clear directional arrows, indicating relationships such as 'includes', 'observes', 'specifies', and 'leads to'.",
+  "uncertain_items": [
+    "Patient is a 76-year-old man who presents with irregular heartbeat and shortness of breath and palpitations",
+    "Patient had to leave the party because of the pain that was sharp and they were short of breath",
+    "Patient was sweating and lightheaded",
+    "Patient is lightly sweating because of increased sympathetic nervous system activation to the brain. When CO is present, it does not receive enough oxygen in the blood, which can cause damage to the brain."
+  ]
+}

@@ -1,0 +1,111 @@
+
+{
+  "map_file": "ConceptMapStrong.pdf",
+  "central_or_top_level_concepts": [
+    "John Swift is a 76 year-old male presenting with shortness of breath and palpitations"
+  ],
+  "detected_concepts": [
+    "prolonged capillary refill time",
+    "rapid heart rate => inadequate ventricular filling and decreased stroke volume",
+    "HR 150 bpm",
+    "uncoordinated atrial contractions --> random conduction to ventricles --> irregular ventricular rhythm",
+    "irregularly irregular rhythm - R/R interval",
+    "ECG: atrial fibrillation",
+    "supports arrhythmia",
+    "narrow QRS complex",
+    "disorganized electrical activity in atria => no coordinated atrial depolarization",
+    "absent p waves",
+    "palpitations, SOB, lightheadedness and sweating => sx of poor cardiac output",
+    "PE",
+    "temp 98.9F pulse 115 respiratory rate 20 bp 110/70 O2 saturation 98% on RA",
+    "pulse 115bpm: tachycardia",
+    "high respiratory rate: compensation for decreased cardiac output",
+    "capillary refill time > 5s",
+    "thin pulses",
+    "shortness of breath",
+    "reduced preload",
+    "decreased perfusion to head",
+    "lightheadedness",
+    "HPI"
+  ],
+  "detected_relationships": [
+    {
+      "source": "prolonged capillary refill time",
+      "relationship_label": "",
+      "target": "rapid heart rate => inadequate ventricular filling and decreased stroke volume"
+    },
+    {
+      "source": "rapid heart rate => inadequate ventricular filling and decreased stroke volume",
+      "relationship_label": "",
+      "target": "HR 150 bpm"
+    },
+    {
+      "source": "uncoordinated atrial contractions --> random conduction to ventricles --> irregular ventricular rhythm",
+      "relationship_label": "",
+      "target": "irregularly irregular rhythm - R/R interval"
+    },
+    {
+      "source": "irregularly irregular rhythm - R/R interval",
+      "relationship_label": "",
+      "target": "ECG: atrial fibrillation"
+    },
+    {
+      "source": "supports arrhythmia",
+      "relationship_label": "",
+      "target": "narrow QRS complex"
+    },
+    {
+      "source": "disorganized electrical activity in atria => no coordinated atrial depolarization",
+      "relationship_label": "",
+      "target": "absent p waves"
+    },
+    {
+      "source": "palpitations, SOB, lightheadedness and sweating => sx of poor cardiac output",
+      "relationship_label": "",
+      "target": "HPI"
+    },
+    {
+      "source": "PE",
+      "relationship_label": "",
+      "target": "temp 98.9F pulse 115 respiratory rate 20 bp 110/70 O2 saturation 98% on RA"
+    },
+    {
+      "source": "temp 98.9F pulse 115 respiratory rate 20 bp 110/70 O2 saturation 98% on RA",
+      "relationship_label": "",
+      "target": "pulse 115bpm: tachycardia"
+    },
+    {
+      "source": "temp 98.9F pulse 115 respiratory rate 20 bp 110/70 O2 saturation 98% on RA",
+      "relationship_label": "",
+      "target": "high respiratory rate: compensation for decreased cardiac output"
+    },
+    {
+      "source": "temp 98.9F pulse 115 respiratory rate 20 bp 110/70 O2 saturation 98% on RA",
+      "relationship_label": "",
+      "target": "capillary refill time > 5s"
+    },
+    {
+      "source": "temp 98.9F pulse 115 respiratory rate 20 bp 110/70 O2 saturation 98% on RA",
+      "relationship_label": "",
+      "target": "thin pulses"
+    },
+    {
+      "source": "shortness of breath",
+      "relationship_label": "",
+      "target": "reduced preload"
+    },
+    {
+      "source": "reduced preload",
+      "relationship_label": "",
+      "target": "decreased perfusion to head"
+    },
+    {
+      "source": "decreased perfusion to head",
+      "relationship_label": "",
+      "target": "lightheadedness"
+    }
+  ],
+  "hierarchy_detected": "Central concept with branching relationships",
+  "layout_notes": "Radial layout with central concept and multiple branches extending outward.",
+  "uncertain_items": []
+}

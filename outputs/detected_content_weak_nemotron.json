@@ -1,0 +1,139 @@
+{
+  "map_file": "ConceptMapStrong.pdf",
+  "central_or_top_level_concepts": [
+    "John Swift is a 76 year-old male presenting with shortness of breath and palpitations"
+  ],
+  "detected_concepts": [
+    "John Swift is a 76 year-old male presenting with shortness of breath and palpitations",
+    "ECG: atrial fibrillation",
+    "irregularly irregular rhythm - R/R interval",
+    "disorganized electrical activity in atria => no coordinated atrial depolarization",
+    "absent p waves",
+    "narrow QRS complex",
+    "supports arrhythmia",
+    "HR 150 bpm",
+    "prolonged capillary refill time",
+    "uncoordinated atrial contractions --> random conduction to ventricles --> irregular ventricular rhythm",
+    "HPI",
+    "palpitations, SOB, lightheadedness and sweating => sx of poor cardiac output",
+    "PE",
+    "temp 98.9F",
+    "pulse 115",
+    "pulse 115bpm: tachycardia",
+    "respiratory rate 20",
+    "bp 110/70",
+    "O2 saturation 98% on RA",
+    "high respiratory rate: compensation for decreased cardiac output",
+    "capillary refill time > 5s",
+    "thin pulses",
+    "shortness of breath",
+    "reduced preload",
+    "decreased perfusion to head",
+    "lightheadedness"
+  ],
+  "detected_relationships": [
+    {
+      "source": "John Swift is a 76 year-old male presenting with shortness of breath and palpitations",
+      "relationship_label": "presents with",
+      "target": "ECG: atrial fibrillation"
+    },
+    {
+      "source": "John Swift is a 76 year-old male presenting with shortness of breath and palpitations",
+      "relationship_label": "has",
+      "target": "HPI"
+    },
+    {
+      "source": "John Swift is a 76 year-old male presenting with shortness of breath and palpitations",
+      "relationship_label": "has",
+      "target": "PE"
+    },
+    {
+      "source": "John Swift is a 76 year-old male presenting with shortness of breath and palpitations",
+      "relationship_label": "has",
+      "target": "shortness of breath"
+    },
+    {
+      "source": "ECG: atrial fibrillation",
+      "relationship_label": "shows",
+      "target": "irregularly irregular rhythm - R/R interval"
+    },
+    {
+      "source": "ECG: atrial fibrillation",
+      "relationship_label": "shows",
+      "target": "disorganized electrical activity in atria => no coordinated atrial depolarization"
+    },
+    {
+      "source": "HR 150 bpm",
+      "relationship_label": "correlates with",
+      "target": "irregularly irregular rhythm - R/R interval"
+    },
+    {
+      "source": "HR 150 bpm",
+      "relationship_label": "causes",
+      "target": "rapid heart rate => inadequate ventricular filling and decreased stroke volume"
+    },
+    {
+      "source": "prolonged capillary refill time",
+      "relationship_label": "related to",
+      "target": "rapid heart rate => inadequate ventricular filling and decreased stroke volume"
+    },
+    {
+      "source": "PE",
+      "relationship_label": "assesses",
+      "target": "temp 98.9F"
+    },
+    {
+      "source": "PE",
+      "relationship_label": "assesses",
+      "target": "pulse 115"
+    },
+    {
+      "source": "PE",
+      "relationship_label": "assesses",
+      "target": "respiratory rate 20"
+    },
+    {
+      "source": "PE",
+      "relationship_label": "assesses",
+      "target": "bp 110/70"
+    },
+    {
+      "source": "PE",
+      "relationship_label": "assesses",
+      "target": "O2 saturation 98% on RA"
+    },
+    {
+      "source": "PE",
+      "relationship_label": "shows",
+      "target": "capillary refill time > 5s"
+    },
+    {
+      "source": "PE",
+      "relationship_label": "shows",
+      "target": "thin pulses"
+    },
+    {
+      "source": "shortness of breath",
+      "relationship_label": "leads to",
+      "target": "reduced preload"
+    },
+    {
+      "source": "reduced preload",
+      "relationship_label": "leads to",
+      "target": "decreased perfusion to head"
+    },
+    {
+      "source": "decreased perfusion to head",
+      "relationship_label": "causes",
+      "target": "lightheadedness"
+    },
+    {
+      "source": "HPI",
+      "relationship_label": "describes",
+      "target": "palpitations, SOB, lightheadedness and sweating => sx of poor cardiac output"
+    }
+  ],
+  "hierarchy_detected": "Central node: Patient Presentation. Branches: ECG findings, History of Present Illness, Physical Exam, Pathophysiology (SOB -> Reduced Preload).",
+  "layout_notes": "Radial layout with a central blue node. Three main branches extending outwards (ECG, HPI, PE) and a side branch for pathophysiology.",
+  "uncertain_items": []
+}
