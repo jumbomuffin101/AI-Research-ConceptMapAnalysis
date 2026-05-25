@@ -1,6 +1,6 @@
 # AI Research Concept Map Analysis
 
-This project investigates how multimodal AI models analyze medical concept maps and how model outputs differ in concept identification, relationship extraction, and hierarchy detection.
+This project investigates how AI-generated concept map evaluations differ from human-generated grading and how collaborative grading strategies compare across multiple AI and human evaluators. The current implementation uses multimodal AI models to analyze concept maps through concept extraction, relationship detection, and hierarchy identification as an initial step toward automated rubric-based evaluation.
 
 Current models:
 
