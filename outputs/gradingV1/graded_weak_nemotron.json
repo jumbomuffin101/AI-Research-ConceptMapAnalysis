@@ -1,0 +1,35 @@
+{
+  "map_file":"",
+  "model": "",
+  "scores": {
+    "knowledge_acquisition": {
+      "score": 3,
+      "reasoning": "Identifies relevant basic, health systems, and clinical science and extracts key patient information, but omits determinants of health such as hypertension, tobacco/alcohol use, and thyroid disease."
+    },
+    "integration": {
+      "score": 3,
+      "reasoning": "Connects patient data to illness scripts and pathophysiology, but the differential diagnosis is not clearly prioritized and some expected illness script elements are missing."
+    },
+    "application": {
+      "score": 4,
+      "reasoning": "Provides clear explanations of pathophysiology for both atrial fibrillation and pulmonary embolism, and links key data (e.g., shortness of breath) to underlying mechanisms."
+    },
+    "transfer": {
+      "score": 4,
+      "reasoning": "Effectively uses prior basic science (physiology of preload and perfusion) and clinical knowledge to deepen understanding of the case."
+    }
+  },
+  "overall_meets_expectations": "No",
+  "strengths": [
+    "Clear linkage of symptoms to physiological changes (e.g., shortness of breath → reduced preload → decreased perfusion).",
+    "Includes ECG findings and vital sign interpretations.",
+    "Explains pathophysiology of both atrial fibrillation and pulmonary embolism."
+  ],
+  "areas_for_improvement": [
+    "Missing social/behavioral determinants (hypertension, tobacco use, alcohol use, thyroid disease).",
+    "Does not mention shock findings (clammy skin, poor pulses) or need for immediate DC shock.",
+    "Lacks explicit discussion of pulmonary edema, anticoagulation, and other case‑specific expectations.",
+    "Differential diagnosis is present but not clearly prioritized."
+  ],
+  "grading_notes": "The map demonstrates strong integration of pathophysiology and clinical data, earning high application and transfer scores. However, it falls short on the knowledge acquisition criterion due to omission of key health‑related determinants and on integration because the differential is not prioritized and several case‑specific elements are absent, resulting in an overall failure to meet all expectations."
+}

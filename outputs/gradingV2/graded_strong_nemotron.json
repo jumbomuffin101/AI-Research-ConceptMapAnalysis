@@ -1,0 +1,101 @@
+{
+"map_file": "ConceptMapStrong.pdf",
+  "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "knowledge_acquisition": {
+    "basic_science": {
+      "score": 3,
+      "reasoning": "Relevant and mostly synthesized knowledge of cardiovascular physiology and disease mechanisms."
+    },
+    "health_system_science": {
+      "score": 3,
+      "reasoning": "Relevant knowledge of social and medical history influencing care."
+    },
+    "clinical_science": {
+      "score": 4,
+      "reasoning": "Detailed, synthesized, and comprehensive clinical knowledge including diagnosis, differential, and management."
+    },
+    "patient_case_information": {
+      "score": 4,
+      "reasoning": "Comprehensive synthesis of patient data, history, exam, and labs."
+    },
+    "determinants_of_health": {
+      "score": 4,
+      "reasoning": "Multiple determinants (social, behavioral, medical) comprehensively represented with clear impact."
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The map includes key knowledge from the case and content learned during this unit."
+    }
+  },
+  "integration": {
+    "prioritized_differential_diagnosis": {
+      "score": 4,
+      "reasoning": "DDx appropriately focused, relevant, and correctly prioritized."
+    },
+    "illness_scripts": {
+      "score": 4,
+      "reasoning": "Illness scripts accurately reflected in prioritized connections for multiple diagnoses."
+    },
+    "basic_to_foundational_science": {
+      "score": 4,
+      "reasoning": "Accurate, logical, and comprehensive connections from basic to foundational science."
+    },
+    "patient_data_to_clinical_information": {
+      "score": 4,
+      "reasoning": "Accurate, logical, and comprehensive flow from patient data to clinical information."
+    },
+    "patient_data_to_basic_science": {
+      "score": 4,
+      "reasoning": "Accurate, logical, and comprehensive connections from data to molecular/cellular basis."
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The learner connected key knowledge accurately and comprehensively."
+    }
+  },
+  "application": {
+    "working_diagnosis_pathophysiology": {
+      "score": 4,
+      "reasoning": "Flow of concepts explains pathophysiology including basic, clinical, and health system sciences."
+    },
+    "patient_data_pathophysiology": {
+      "score": 4,
+      "reasoning": "Flow explains pathophysiology of multiple components of patient data and/or plan of care."
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The learner explained key clinical data with relevant basic science."
+    }
+  },
+  "transfer": {
+    "prior_basic_science": {
+      "score": 4,
+      "reasoning": "Synthesized and detailed prior basic science knowledge."
+    },
+    "prior_clinical_concepts": {
+      "score": 4,
+      "reasoning": "Synthesized and detailed prior clinical concepts."
+    },
+    "deepens_understanding": {
+      "score": 4,
+      "reasoning": "Synthesized and detailed knowledge connecting patient data and basic science."
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The learner used previously learned content to deepen understanding."
+    }
+  },
+  "overall_map_meets_expectations": "Yes",
+  "strengths": [
+    "Comprehensive inclusion of patient history, social determinants, and past surgical history",
+    "Clear differentiation and prioritization of multiple potential diagnoses",
+    "Detailed connections showing pathophysiology from atrial fibrillation to heart failure and poor perfusion",
+    "Integration of illness scripts across several diagnoses",
+    "Strong linkage of basic science concepts to clinical findings"
+  ],
+  "areas_for_improvement": [
+    "Could include more explicit epidemiology data (e.g., prevalence of atrial fibrillation)",
+    "Some sections could be more visually organized for easier navigation"
+  ],
+  "grading_notes": "The concept map demonstrates a high level of integration, accurate synthesis of patient data with clinical reasoning, and thorough coverage of required case-specific expectations. Scores reflect comprehensive understanding across all evaluated domains."
+}

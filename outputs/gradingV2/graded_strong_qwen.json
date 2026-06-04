@@ -1,0 +1,101 @@
+
+{
+  "map_file": "ConceptMapStrong.pdf",
+  "model": "qwen/qwen2.5-vl-72b-instruct",
+  "knowledge_acquisition": {
+    "basic_science": {
+      "score": 3,
+      "reasoning": "The map includes relevant and mostly synthesized knowledge about the pathophysiology of atrial fibrillation, heart failure, and their connection to poor perfusion. However, it lacks detailed integration of foundational sciences like anatomy, histology, and biochemistry."
+    },
+    "health_system_science": {
+      "score": 2,
+      "reasoning": "The map touches on health system science by mentioning patient education and counseling but does not provide comprehensive details or integrate this knowledge across multiple sessions."
+    },
+    "clinical_science": {
+      "score": 3,
+      "reasoning": "The map demonstrates relevant and mostly synthesized knowledge of clinical science, including symptoms, signs, diagnostics, and treatments related to atrial fibrillation and cardiogenic shock. However, it could be more detailed."
+    },
+    "patient_case_information": {
+      "score": 3,
+      "reasoning": "The map includes relevant and mostly synthesized information from the patient's data, such as history, physical exam findings, and social history. It covers key aspects like smoking, alcohol use, and past medical history."
+    },
+    "determinants_of_health": {
+      "score": 3,
+      "reasoning": "Multiple determinants of health (DoH) are included across various areas of the map, such as tobacco use, alcohol consumption, and lack of support systems. These have a clear impact on the patient's condition and care plan."
+    },
+    "overall": {
+      "meets_expectations": "No",
+      "reasoning": "While the map includes key knowledge from the case and content learned during the unit, it lacks comprehensive detail and integration across all domains."
+    }
+  },
+  "integration": {
+    "prioritized_differential_diagnosis": {
+      "score": 3,
+      "reasoning": "The differential diagnosis is appropriately focused and relevant to the patient, including atrial fibrillation and cardiogenic shock. However, prioritization could be clearer."
+    },
+    "illness_scripts": {
+      "score": 3,
+      "reasoning": "Illness scripts are reflected in accurate connections between patient data, but they could be more detailed and prioritized for multiple diagnoses."
+    },
+    "basic_to_foundational_science": {
+      "score": 2,
+      "reasoning": "Connections are mostly accurate but simplistic, with some errors. The map does not fully integrate basic science into a comprehensive understanding of the molecular and cellular basis of disease."
+    },
+    "patient_data_to_clinical_information": {
+      "score": 3,
+      "reasoning": "Connections are accurate and logically flow from patient data to relevant clinical information, covering symptoms, signs, and diagnostics. However, it could be more comprehensive."
+    },
+    "patient_data_to_basic_science": {
+      "score": 2,
+      "reasoning": "Connections are mostly accurate but simplistic, with some errors. The map does not fully integrate patient data into a comprehensive understanding of the molecular and cellular basis of disease."
+    },
+    "overall": {
+      "meets_expectations": "No",
+      "reasoning": "The learner connects key knowledge accurately but lacks comprehensive integration across all domains."
+    }
+  },
+  "application": {
+    "working_diagnosis_pathophysiology": {
+      "score": 3,
+      "reasoning": "Connections form a flow of concepts that explains the pathophysiology of atrial fibrillation and cardiogenic shock. However, it could include more basic, clinical, and health system sciences."
+    },
+    "patient_data_pathophysiology": {
+      "score": 3,
+      "reasoning": "Connections form a flow of concepts that explains the pathophysiology of multiple components of patient data and plan of care. However, it could be more detailed."
+    },
+    "overall": {
+      "meets_expectations": "No",
+      "reasoning": "The learner explains key clinical data with relevant basic science but lacks comprehensive detail."
+    }
+  },
+  "transfer": {
+    "prior_basic_science": {
+      "score": 2,
+      "reasoning": "The map shows partly relevant knowledge and is too general in transferring prior basic science knowledge to the current case."
+    },
+    "prior_clinical_concepts": {
+      "score": 2,
+      "reasoning": "The map shows partly relevant knowledge and is too general in transferring prior clinical concepts to the current case."
+    },
+    "deepens_understanding": {
+      "score": 2,
+      "reasoning": "The map shows partly relevant knowledge and is too general in deepening understanding by connecting patient data and basic science knowledge."
+    },
+    "overall": {
+      "meets_expectations": "No",
+      "reasoning": "The learner uses previously learned content but lacks comprehensive detail and integration."
+    }
+  },
+  "overall_map_meets_expectations": "No",
+  "strengths": [
+    "Relevant and mostly synthesized knowledge of clinical science and patient case information.",
+    "Inclusion of multiple determinants of health impacting the patient's condition.",
+    "Accurate connections between patient data and clinical information."
+  ],
+  "areas_for_improvement": [
+    "Increase detail and comprehensiveness in integrating basic and foundational sciences.",
+    "Improve prioritization and clarity in differential diagnosis.",
+    "Enhance transfer of prior knowledge to deepen understanding of the current case."
+  ],
+  "grading_notes": "The concept map demonstrates a good foundation of knowledge but requires further development in detail, integration, and comprehensive application of learned content."
+}

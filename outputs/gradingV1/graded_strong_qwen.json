@@ -1,0 +1,34 @@
+
+{
+  "map_file": "",
+  "model": "",
+  "scores": {
+    "knowledge_acquisition": {
+      "score": 4,
+      "reasoning": "The concept map comprehensively identifies relevant basic science knowledge (e.g., pathophysiology of atrial fibrillation), health systems science knowledge (e.g., HSS relation to prevalence and incidence), clinical science knowledge (e.g., patient's symptoms and signs), extracts key patient case information (e.g., history of hypertension, tobacco use), and identifies determinants of health (e.g., social determinants impacting healthcare access)."
+    },
+    "integration": {
+      "score": 4,
+      "reasoning": "The map includes a prioritized differential diagnosis (e.g., atrial fibrillation, cardiogenic shock), connects patient data to illness scripts (e.g., pathophysiology linking AFib to heart failure), connects basic science to foundational science (e.g., sympathetic nervous system activation), connects patient data to clinical information (e.g., ECG findings), and connects patient data to basic science (e.g., RAA system compensation)."
+    },
+    "application": {
+      "score": 4,
+      "reasoning": "The concept map thoroughly explains the pathophysiology of the working diagnosis (atrial fibrillation leading to cardiogenic shock) and explains the pathophysiology underlying key patient data (e.g., how AFib causes decreased cardiac output and subsequent poor perfusion)."
+    },
+    "transfer": {
+      "score": 4,
+      "reasoning": "The map effectively uses prior basic science knowledge (e.g., understanding of the sympathetic nervous system), prior clinical knowledge (e.g., recognizing shock findings), and uses previous knowledge to deepen understanding (e.g., integrating pathophysiology with clinical presentation)."
+    }
+  },
+  "overall_meets_expectations": "Yes",
+  "strengths": [
+    "Comprehensive coverage of all case-specific expectations.",
+    "Detailed integration of basic, clinical, and health systems science.",
+    "Clear explanation of pathophysiology linking atrial fibrillation, heart failure, and poor perfusion.",
+    "Effective use of prior knowledge to enhance understanding."
+  ],
+  "areas_for_improvement": [
+    "None identified; the concept map meets all criteria comprehensively."
+  ],
+  "grading_notes": "The concept map demonstrates a high level of understanding and integration across all domains, meeting all case-specific expectations with detailed and accurate information."
+}

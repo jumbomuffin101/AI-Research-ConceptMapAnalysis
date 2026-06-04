@@ -1,0 +1,102 @@
+{
+  "map_file": "ConceptMapWeak.pdf",
+  "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "knowledge_acquisition": {
+    "basic_science": {
+      "score": 3,
+      "reasoning": "Includes physiologic mechanisms (HR 150 → inadequate ventricular filling, disorganized atrial activity) showing synthesized knowledge."
+    },
+    "health_system_science": {
+      "score": 1,
+      "reasoning": "No health system or policy information is present."
+    },
+    "clinical_science": {
+      "score": 3,
+      "reasoning": "Contains ECG interpretation, physical exam findings, and pathophysiologic links, demonstrating relevant and mostly synthesized clinical knowledge."
+    },
+    "patient_case_information": {
+      "score": 3,
+      "reasoning": "Provides core patient data (age, gender, symptoms, vitals) and some history but omits many risk factors and full exam findings."
+    },
+    "determinants_of_health": {
+      "score": 1,
+      "reasoning": "No social, economic, or environmental determinants are included."
+    },
+    "overall": {
+      "meets_expectations": "No",
+      "reasoning": "The map fails to address numerous case‑specific expectations (HTN, tobacco/alcohol use, thyroid disease, shock findings, pulmonary edema, DC shock, anticoagulation, differential diagnosis, illness scripts, comprehensive pathophysiology) and omits health system and DoH components, so it does not meet expectations."
+    }
+  },
+  "integration": {
+    "prioritized_differential_diagnosis": {
+      "score": 2,
+      "reasoning": "Differential diagnosis is not explicitly listed or prioritized; only atrial fibrillation is mentioned, making the DDx narrow and not clearly connected to patient data."
+    },
+    "illness_scripts": {
+      "score": 3,
+      "reasoning": "Illness scripts are present (e.g., palpitations/SOB → poor cardiac output; dyspnea → reduced preload → decreased perfusion), showing accurate connections."
+    },
+    "basic_to_foundational_science": {
+      "score": 3,
+      "reasoning": "Connections from patient data to basic physiologic concepts (e.g., tachycardia → inadequate filling) are accurate and logically flow from cellular to systemic level."
+    },
+    "patient_data_to_clinical_information": {
+      "score": 3,
+      "reasoning": "Symptoms and signs are correctly linked to clinical findings (e.g., shortness of breath → reduced preload → lightheadedness), showing accurate and logical flow."
+    },
+    "patient_data_to_basic_science": {
+      "score": 3,
+      "reasoning": "Data such as HR 150 and absent P waves are correctly linked to underlying electrophysiologic and hemodynamic mechanisms."
+    },
+    "overall": {
+      "meets_expectations": "No",
+      "reasoning": "Although there are accurate connections within each domain, the map omits many required elements (risk factors, health system, full DDx, comprehensive illness scripts), so it does not fully meet expectations."
+    }
+  },
+  "application": {
+    "working_diagnosis_pathophysiology": {
+      "score": 3,
+      "reasoning": "The map forms a logical flow explaining how atrial fibrillation leads to tachycardia, reduced cardiac output, and poor perfusion, integrating basic and clinical science."
+    },
+    "patient_data_pathophysiology": {
+      "score": 3,
+      "reasoning": "Symptoms are accurately linked to pathophysiologic mechanisms (e.g., dyspnea → reduced preload → lightheadedness), demonstrating clear explanation of clinical data."
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The learner successfully explained key clinical data with relevant basic science."
+    }
+  },
+  "transfer": {
+    "prior_basic_science": {
+      "score": 3,
+      "reasoning": "The map includes relevant basic science concepts (cardiac physiology, electrophysiology) that are synthesized from prior learning."
+    },
+    "prior_clinical_concepts": {
+      "score": 3,
+      "reasoning": "Clinical concepts such as ECG findings, physical exam signs, and pathophysiology are appropriately represented, showing synthesized knowledge."
+    },
+    "deepens_understanding": {
+      "score": 3,
+      "reasoning": "Prior knowledge is used to connect patient data to pathophysiologic mechanisms, deepening understanding of the case."
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The map uses prior basic science and clinical concepts to deepen understanding of the patient’s presentation."
+    }
+  },
+  "overall_map_meets_expectations": "No",
+  "strengths": [
+    "Clear pathophysiologic links",
+    "Accurate ECG interpretation",
+    "Logical illness scripts",
+    "Integration of symptoms with signs"
+  ],
+  "areas_for_improvement": [
+    "Missing many case‑specific expectations (HTN, tobacco/alcohol use, thyroid disease, shock findings, pulmonary edema, DC shock, anticoagulation)",
+    "Lacks health system and determinants of health components",
+    "Limited differential diagnosis",
+    "Not comprehensive"
+  ],
+  "grading_notes": "The concept map demonstrates solid understanding of atrial fibrillation pathophysiology and appropriate clinical connections, but is incomplete regarding required case details, health system considerations, and comprehensive differential diagnosis, resulting in a failing overall rating."
+}

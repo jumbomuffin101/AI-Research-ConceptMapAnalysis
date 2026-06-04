@@ -1,0 +1,123 @@
+{
+  "knowledge_acquisition": {
+    "basic_science": {
+      "1": "Little or irrelevant knowledge",
+      "2": "Partly relevant knowledge and/or too general",
+      "3": "Relevant and mostly synthesized knowledge",
+      "4": "Synthesized and detailed knowledge from each session"
+    },
+    "health_system_science": {
+      "1": "Little or irrelevant knowledge",
+      "2": "Partly relevant knowledge and/or too general",
+      "3": "Relevant and mostly synthesized knowledge",
+      "4": "Synthesized and detailed knowledge from multiple sessions"
+    },
+    "clinical_science": {
+      "1": "Little or irrelevant knowledge",
+      "2": "Partly relevant knowledge and/or too general",
+      "3": "Relevant and mostly synthesized knowledge",
+      "4": "Relevant, synthesized, and detailed knowledge from each session"
+    },
+    "patient_case_information": {
+      "1": "Little or irrelevant information",
+      "2": "Partly relevant knowledge and/or limited synthesis",
+      "3": "Relevant and mostly synthesized information from the patient's data",
+      "4": "Synthesized, relevant, and comprehensive patient data"
+    },
+    "determinants_of_health": {
+      "1": "DoH are not included",
+      "2": "At least one DoH is included but not specific to this patient and/or not clinically relevant",
+      "3": "Multiple DoH included across multiple areas of the concept map, with clear impact on the patient's condition and/or plan of care",
+      "4": "DoH are comprehensively represented across different areas of the concept map, with clear impact on condition, care plan, and/or prognosis"
+    },
+    "overall_question": "Does the student's map include key knowledge from the case and content learned during this unit?"
+  },
+  "integration": {
+    "prioritized_differential_diagnosis": {
+      "1": "DDx not explicitly included and/or mostly incorrect",
+      "2": "DDx too narrow or not accurately connected to patient data",
+      "3": "DDx is appropriately focused and relevant to patient",
+      "4": "DDx is appropriately focused and relevant to patient, and correctly prioritized"
+    },
+    "illness_scripts": {
+      "1": "Insufficient data included to create illness scripts",
+      "2": "Illness script is incorrect and/or incomplete",
+      "3": "Illness script is reflected in accurate connections between patient data",
+      "4": "Illness scripts are reflected in accurate and prioritized connections between patient data for multiple diagnoses"
+    },
+    "basic_to_foundational_science": {
+      "1": "Inaccurate and/or illogical connections",
+      "2": "Mostly accurate but simplistic with some errors",
+      "3": "Connections are accurate and logically flow from basic science to molecular and cellular basis of disease",
+      "4": "Connections are accurate, logical, and comprehensive, including anatomy, histology, biochemistry, genetics, physiology, and/or pharmacology"
+    },
+    "patient_data_to_clinical_information": {
+      "1": "Inaccurate and/or illogical connections",
+      "2": "Mostly accurate but simplistic with some errors",
+      "3": "Connections are accurate and logically flow from patient data to relevant clinical information",
+      "4": "Connections are accurate, logical, and comprehensive, including epidemiology, symptoms, signs, diagnostics, treatments, and patient-specific risk factors"
+    },
+    "patient_data_to_basic_science": {
+      "1": "Inaccurate and/or illogical connections",
+      "2": "Mostly accurate but simplistic with some errors",
+      "3": "Connections are accurate and logically flow from patient data to molecular and cellular basis of disease",
+      "4": "Connections are accurate, logical, and comprehensive, including anatomy, histology, biochemistry, genetics, physiology, and/or pharmacology"
+    },
+    "overall_question": "Did the learner connect key knowledge accurately and comprehensively?"
+  },
+  "application": {
+    "working_diagnosis_pathophysiology": {
+      "1": "Connections to explain the pathophysiology are absent or unclear",
+      "2": "Connections are present but inaccurate and/or too simplistic to explain pathophysiology",
+      "3": "Connections form a flow of concepts that explains the pathophysiology",
+      "4": "Connections form a flow of concepts that explains the pathophysiology and includes basic, clinical, and health system sciences"
+    },
+    "patient_data_pathophysiology": {
+      "1": "Connections to explain the pathophysiology are absent or unclear",
+      "2": "Connections are present but inaccurate and/or too simplistic to explain pathophysiology",
+      "3": "Connections form a flow of concepts that explains the pathophysiology",
+      "4": "Connections form a flow of concepts that explains pathophysiology of multiple components of patient data and/or plan of care"
+    },
+    "overall_question": "Did the learner explain key clinical data with relevant basic science?"
+  },
+  "transfer": {
+    "prior_basic_science": {
+      "1": "Little or irrelevant knowledge",
+      "2": "Partly relevant knowledge and/or too general",
+      "3": "Relevant and mostly synthesized knowledge",
+      "4": "Synthesized and detailed knowledge"
+    },
+    "prior_clinical_concepts": {
+      "1": "Little or irrelevant knowledge",
+      "2": "Partly relevant knowledge and/or too general",
+      "3": "Relevant and mostly synthesized knowledge",
+      "4": "Synthesized and detailed knowledge"
+    },
+    "deepens_understanding": {
+      "1": "Little or irrelevant knowledge",
+      "2": "Partly relevant knowledge and/or too general",
+      "3": "Relevant and mostly synthesized knowledge",
+      "4": "Synthesized and detailed knowledge that connects to both patient data and basic science knowledge"
+    },
+    "overall_question": "Did the learner use previously learned content to deepen understanding?"
+  },
+  "overall": {
+    "question": "This map meets expectations.",
+    "options": ["Yes", "No"]
+  },
+  "case_specific_expectations": [
+    "Atrial fibrillation",
+    "Rapid ventricular response",
+    "History of hypertension",
+    "Tobacco use",
+    "Alcohol use",
+    "History of thyroid disease",
+    "Shock findings including low blood pressure, clammy skin, and poor pulses",
+    "Pulmonary edema on chest x-ray",
+    "Need for immediate DC shock",
+    "Anticoagulation discussion",
+    "Differential diagnosis",
+    "Illness scripts",
+    "Pathophysiology connecting atrial fibrillation, heart failure, and poor perfusion"
+  ]
+}

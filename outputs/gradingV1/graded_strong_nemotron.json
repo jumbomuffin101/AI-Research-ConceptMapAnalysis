@@ -1,0 +1,36 @@
+{
+  "map_file": "",
+  "model": "",
+  "scores": {
+    "knowledge_acquisition": {
+      "score": 4,
+      "reasoning": "The map identifies relevant basic science (e.g., pathophysiology of AFib, catecholamine effects), health systems science (social history, determinants of health), and clinical science (history, vitals, exam findings, differential diagnosis). It also extracts key patient case information and lists determinants of health such as alcohol, tobacco, and hypertension."
+    },
+    "integration": {
+      "score": 4,
+      "reasoning": "The concept map prioritizes a differential diagnosis, connects patient data (vitals, symptoms, history) to illness scripts (pathophysiology of AFib, heart failure, cardiogenic shock), and links basic science (sympathetic activation, thyroid effects) to foundational science and clinical findings. All criteria are well‑synthesized."
+    },
+    "application": {
+      "score": 4,
+      "reasoning": "The map explains the pathophysiology of the working diagnosis (atrial fibrillation leading to cardiogenic shock) and details the pathophysiology underlying key patient data (tachycardia, low output, pulmonary edema, shock findings)."
+    },
+    "transfer": {
+      "score": 4,
+      "reasoning": "The student uses prior basic science knowledge (e.g., sympathetic stimulation, thyroid hormone effects) and clinical knowledge (HTN, hyperthyroidism) to deepen understanding of the case, demonstrating strong transfer abilities."
+    }
+  },
+  "overall_meets_expectations": "Yes",
+  "strengths": [
+    "Comprehensive inclusion of patient history, social history, physical exam, and review of systems.",
+    "Clear differential diagnosis with appropriate prioritization.",
+    "Detailed illness scripts linking pathophysiology of AFib, heart failure, and poor perfusion.",
+    "Integration of basic science (e.g., catecholamine surge, thyroid effects) with clinical findings.",
+    "Presence of all required case-specific expectations."
+  ],
+  "areas_for_improvement": [
+    "Some nodes are densely packed; breaking them into smaller, more distinct concepts could improve readability.",
+    "The map could explicitly label the 'need for immediate DC shock' as a management step rather than an afterthought.",
+    "Adding brief citations or references for key pathophysiology statements would strengthen academic rigor."
+  ],
+  "grading_notes": "The concept map demonstrates high-level understanding and integration of multiple domains, meeting all rubric criteria and case-specific expectations with a score of 4 in each category."
+}

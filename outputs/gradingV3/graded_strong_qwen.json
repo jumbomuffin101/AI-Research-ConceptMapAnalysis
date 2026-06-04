@@ -1,0 +1,99 @@
+
+{
+  "map_file": "ConceptMapStrong.pdf",
+  "model": "qwen/qwen2.5-vl-72b-instruct",
+  "knowledge_acquisition": {
+    "basic_science": {
+      "score": 4,
+      "reasoning": "The concept map demonstrates synthesized and detailed knowledge from each session, covering topics like pathophysiology of atrial fibrillation, cardiac output, and the sympathetic nervous system."
+    },
+    "health_system_science": {
+      "score": 3,
+      "reasoning": "The map includes relevant and mostly synthesized knowledge about health system science, such as patient education and counseling on smoking cessation and medication adherence."
+    },
+    "clinical_science": {
+      "score": 4,
+      "reasoning": "The map shows relevant, synthesized, and detailed knowledge from each session, including clinical presentation, differential diagnosis, and management plans."
+    },
+    "patient_case_information": {
+      "score": 4,
+      "reasoning": "The map provides synthesized, relevant, and comprehensive patient data, including history, physical examination, and diagnostic results."
+    },
+    "determinants_of_health": {
+      "score": 4,
+      "reasoning": "Determinants of health are comprehensively represented across different areas of the concept map, with clear impacts on the patient's condition, care plan, and prognosis."
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The student's map includes key knowledge from the case and content learned during this unit, meeting all expectations."
+    }
+  },
+  "integration": {
+    "prioritized_differential_diagnosis": {
+      "score": 4,
+      "reasoning": "The differential diagnosis is appropriately focused and relevant to the patient, and correctly prioritized based on the clinical presentation and patient data."
+    },
+    "illness_scripts": {
+      "score": 4,
+      "reasoning": "Illness scripts are reflected in accurate and prioritized connections between patient data for multiple diagnoses, such as atrial fibrillation and cardiogenic shock."
+    },
+    "basic_to_foundational_science": {
+      "score": 4,
+      "reasoning": "Connections are accurate, logical, and comprehensive, including anatomy, histology, biochemistry, genetics, physiology, and pharmacology."
+    },
+    "patient_data_to_clinical_information": {
+      "score": 4,
+      "reasoning": "Connections are accurate, logical, and comprehensive, including epidemiology, symptoms, signs, diagnostics, treatments, and patient-specific risk factors."
+    },
+    "patient_data_to_basic_science": {
+      "score": 4,
+      "reasoning": "Connections are accurate, logical, and comprehensive, including anatomy, histology, biochemistry, genetics, physiology, and pharmacology."
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The learner connected key knowledge accurately and comprehensively."
+    }
+  },
+  "application": {
+    "working_diagnosis_pathophysiology": {
+      "score": 4,
+      "reasoning": "Connections form a flow of concepts that explains the pathophysiology and includes basic, clinical, and health system sciences."
+    },
+    "patient_data_pathophysiology": {
+      "score": 4,
+      "reasoning": "Connections form a flow of concepts that explains the pathophysiology of multiple components of patient data and/or plan of care."
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The learner explained key clinical data with relevant basic science."
+    }
+  },
+  "transfer": {
+    "prior_basic_science": {
+      "score": 4,
+      "reasoning": "Synthesized and detailed knowledge is demonstrated, connecting prior basic science to the current case."
+    },
+    "prior_clinical_concepts": {
+      "score": 4,
+      "reasoning": "Synthesized and detailed knowledge is shown, connecting prior clinical concepts to the current case."
+    },
+    "deepens_understanding": {
+      "score": 4,
+      "reasoning": "Synthesized and detailed knowledge that connects to both patient data and basic science knowledge, deepening understanding."
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The learner used previously learned content to deepen understanding."
+    }
+  },
+  "overall_map_meets_expectations": "Yes",
+  "strengths": [
+    "Comprehensive coverage of basic, clinical, and health system sciences.",
+    "Accurate and detailed integration of patient data and pathophysiology.",
+    "Effective use of prior knowledge to deepen understanding."
+  ],
+  "areas_for_improvement": [
+    "Could further elaborate on the impact of determinants of health on long-term prognosis."
+  ],
+  "grading_notes": "The concept map is well-structured and demonstrates a strong understanding of the case and related scientific concepts. The student effectively integrates various types of knowledge and applies them to the patient scenario."
+}

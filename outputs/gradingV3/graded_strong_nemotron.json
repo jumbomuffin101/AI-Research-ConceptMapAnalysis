@@ -1,0 +1,94 @@
+{
+  "map_file": "ConceptMapStrong.pdf",
+  "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "knowledge_acquisition": {
+    "basic_science": {
+      "score": 3,
+      "reasoning": "Relevant and mostly synthesized knowledge from sessions, including SDOH, SDoH, and clinical concepts, but not fully detailed from each session."
+    },
+    "health_system_science": {
+      "score": 3,
+      "reasoning": "Relevant and mostly synthesized knowledge including social history, past surgical history, and system-level factors impacting health."
+    },
+    "clinical_science": {
+      "score": 3,
+      "reasoning": "Relevant and mostly synthesized knowledge including differential diagnosis, illness scripts, and pathophysiology connections."
+    },
+    "patient_case_information": {
+      "score": 3,
+      "reasoning": "Relevant and mostly synthesized information from the patient's data, including past surgical history, social history, and physical exam findings."
+    },
+    "determinants_of_health": {
+      "score": 4,
+      "reasoning": "DoH are comprehensively represented across different areas of the concept map, with clear impact on condition, care plan, and/or prognosis."
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The map includes key knowledge from the case (atrial fibrillation, rapid ventricular response, hypertension, tobacco/alcohol use, thyroid disease, shock findings, pulmonary edema, need for immediate DC shock, anticoagulation, differential diagnosis, illness scripts, pathophysiology) and content learned during the unit, with comprehensive synthesis and integration."
+    }
+  },
+  "integration": {
+    "prioritized_differential_diagnosis": {
+      "score": 4,
+      "reasoning": "DDx is appropriately focused and relevant to patient, and correctly prioritized with appropriate connections to patient data and clinical findings."
+    },
+    "illness_scripts": {
+      "score": 4,
+      "reasoning": "Illness scripts are reflected in accurate and prioritized connections between patient data for multiple diagnoses, including atrial fibrillation, heart failure, and poor perfusion."
+    },
+    "basic_to_foundational_science": {
+      "score": 4,
+      "reasoning": "Connections are accurate, logical, and comprehensive, including anatomy, histology, biochemistry, genetics, physiology, and/or pharmacology through the integration of social determinants, clinical findings, and pathophysiology."
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The map demonstrates comprehensive understanding with accurate and logical connections from patient data to clinical information and basic science, with well-integrated synthesis across all domains."
+    }
+  },
+  "application": {
+    "working_diagnosis_pathophysiology": {
+      "score": 4,
+      "reasoning": "Connections form a flow of concepts that explains the pathophysiology and includes basic, clinical, and health system sciences, including the relationship between atrial fibrillation, heart failure, and poor perfusion."
+    },
+    "patient_data_pathophysiology": {
+      "score": 4,
+      "reasoning": "Connections form a flow of concepts that explains the pathophysiology of multiple components of patient data and/or plan of care, including the pathophysiology of atrial fibrillation, heart failure, and shock findings."
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The learner accurately explained key clinical data with relevant basic science, including the pathophysiology connecting atrial fibrillation, heart failure, and poor perfusion."
+    }
+  },
+  "transfer": {
+    "prior_basic_science": {
+      "score": 4,
+      "reasoning": "Synthesized and detailed knowledge including anatomy, histology, biochemistry, genetics, physiology, and/or pharmacology through comprehensive integration of case data and learned concepts."
+    },
+    "prior_clinical_concepts": {
+      "score": 4,
+      "reasoning": "Synthesized and detailed knowledge that connects to both patient data and basic science knowledge, demonstrating deep understanding of prior clinical concepts."
+    },
+    "deepens_understanding": {
+      "score": 4,
+      "reasoning": "Synthesized and detailed knowledge that connects to both patient data and basic science knowledge, deepening understanding of the clinical presentation and its underlying mechanisms."
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The learner used previously learned content to deepen understanding, with comprehensive integration of prior knowledge with case-specific data and clinical concepts."
+    }
+  },
+  "overall_map_meets_expectations": "Yes",
+  "strengths": [
+    "Comprehensive coverage of key case elements including atrial fibrillation, hypertension, tobacco/alcohol use, thyroid disease, shock findings, pulmonary edema, and need for DC shock",
+    "Well-structured integration of determinants of health across multiple domains",
+    "Accurate and prioritized differential diagnosis with appropriate clinical connections",
+    "Comprehensive illness scripts that reflect accurate connections between patient data for multiple diagnoses",
+    "Thorough explanation of pathophysiology connecting atrial fibrillation, heart failure, and poor perfusion"
+  ],
+  "areas_for_improvement": [
+    "Some statements are overly general (e.g., 'Patient may have a lack of knowledge regarding medication adherence') and could be more specific about impact on health outcomes",
+    "Some connections could be more specific about mechanisms (e.g., 'Patient is lightly intoxicated because of suspected CO in the brain' could elaborate on the physiological mechanism)",
+    "Some areas could benefit from more explicit connections between social determinants and specific clinical findings"
+  ],
+  "grading_notes": "The map demonstrates comprehensive understanding with accurate synthesis of patient data, clinical information, and basic science. The differential diagnosis is appropriately prioritized, illness scripts are accurately reflected, and pathophysiology is comprehensively explained. Minor improvements could be made by making some statements more specific and avoiding overly general statements while maintaining the high level of integration and synthesis."
+}

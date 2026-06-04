@@ -1,0 +1,35 @@
+
+{
+  "map_file": "",
+  "model": "",
+  "scores": {
+    "knowledge_acquisition": {
+      "score": 3,
+      "reasoning": "The concept map identifies relevant basic science knowledge (e.g., ECG findings for atrial fibrillation), clinical science knowledge (e.g., symptoms like shortness of breath and palpitations), and extracts key patient case information (e.g., age, presenting symptoms). However, it lacks explicit mention of determinants of health and health systems science."
+    },
+    "integration": {
+      "score": 3,
+      "reasoning": "The map connects patient data to illness scripts (e.g., linking ECG findings to atrial fibrillation) and clinical information (e.g., relating symptoms to poor cardiac output). It also connects basic science concepts (e.g., uncoordinated atrial contractions leading to irregular ventricular rhythm). However, it does not fully prioritize a differential diagnosis or connect all aspects comprehensively."
+    },
+    "application": {
+      "score": 3,
+      "reasoning": "The concept map explains the pathophysiology of atrial fibrillation and how it relates to the patient's symptoms (e.g., inadequate ventricular filling leading to decreased stroke volume). However, it could provide more detailed explanations of the underlying pathophysiology of specific patient data points."
+    },
+    "transfer": {
+      "score": 2,
+      "reasoning": "The map uses some prior basic science knowledge (e.g., understanding of atrial fibrillation) but lacks clear evidence of using prior clinical knowledge or deepening understanding through previous knowledge. There is room for improvement in integrating prior knowledge more effectively."
+    }
+  },
+  "overall_meets_expectations": "Partially",
+  "strengths": [
+    "Clear identification of atrial fibrillation and its ECG characteristics.",
+    "Good connection between patient symptoms and underlying pathophysiology.",
+    "Effective extraction of key patient case information."
+  ],
+  "areas_for_improvement": [
+    "Incorporate determinants of health and health systems science knowledge.",
+    "Prioritize a differential diagnosis and connect it more thoroughly with patient data.",
+    "Enhance the application of prior clinical knowledge and deepen understanding through previous knowledge."
+  ],
+  "grading_notes": "The concept map demonstrates a good understanding of the core concepts related to atrial fibrillation and its impact on the patient. However, there are opportunities to strengthen the integration of various types of knowledge and improve the depth of clinical reasoning."
+}

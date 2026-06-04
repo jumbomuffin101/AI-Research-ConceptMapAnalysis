@@ -1,0 +1,104 @@
+{
+  "map_file": "ConceptMapWeak.pdf",
+  "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "knowledge_acquisition": {
+    "basic_science": {
+      "score": 3,
+      "reasoning": "Includes pathophysiology of atrial fibrillation (tachycardia → inadequate ventricular filling → decreased stroke volume) and links to poor cardiac output."
+    },
+    "health_system_science": {
+      "score": 2,
+      "reasoning": "Limited to clinical presentation; no discussion of health system factors."
+    },
+    "clinical_science": {
+      "score": 3,
+      "reasoning": "Accurately presents ECG findings, vital signs, and clinical signs related to AF and PE."
+    },
+    "patient_case_information": {
+      "score": 3,
+      "reasoning": "Provides age, sex, presenting symptoms, vitals, and HPI details."
+    },
+    "determinants_of_health": {
+      "score": 1,
+      "reasoning": "No social or environmental determinants of health are included."
+    },
+    "overall": {
+      "meets_expectations": "No",
+      "reasoning": "Missing several key case-specific expectations such as hypertension, substance use, thyroid disease, shock findings, pulmonary edema, and anticoagulation discussion."
+    }
+  },
+  "integration": {
+    "prioritized_differential_diagnosis": {
+      "score": 3,
+      "reasoning": "Differential includes atrial fibrillation and pulmonary embolism, which are relevant, but prioritization is not explicit."
+    },
+    "illness_scripts": {
+      "score": 2,
+      "reasoning": "Illness scripts are not clearly articulated; connections are present but not fully developed."
+    },
+    "basic_to_foundational_science": {
+      "score": 3,
+      "reasoning": "Connections from basic physiology (tachycardia, preload) to clinical findings are accurate and logical."
+    },
+    "patient_data_to_clinical_information": {
+      "score": 3,
+      "reasoning": "Patient data (SOB, palpitations) logically flow to clinical signs (reduced preload, lightheadedness)."
+    },
+    "patient_data_to_basic_science": {
+      "score": 3,
+      "reasoning": "Data such as tachycardia and reduced preload are linked to underlying molecular/cellular mechanisms."
+    },
+    "overall": {
+      "meets_expectations": "No",
+      "reasoning": "While many connections are accurate, the map lacks comprehensive synthesis of all case-specific expectations and prioritization."
+    }
+  },
+  "application": {
+    "working_diagnosis_pathophysiology": {
+      "score": 3,
+      "reasoning": "Explains pathophysiology of AF and PE with flow from tachycardia to decreased perfusion."
+    },
+    "patient_data_pathophysiology": {
+      "score": 3,
+      "reasoning": "Connects patient data (SOB, palpitations) to pathophysiology of reduced preload and poor perfusion."
+    },
+    "overall": {
+      "meets_expectations": "No",
+      "reasoning": "Map does not fully satisfy case-specific expectations such as shock findings, need for DC shock, anticoagulation, and broader differential."
+    }
+  },
+  "transfer": {
+    "prior_basic_science": {
+      "score": 3,
+      "reasoning": "Uses prior knowledge of tachycardia effects and preload to explain current findings."
+    },
+    "prior_clinical_concepts": {
+      "score": 3,
+      "reasoning": "Applies knowledge of SOB, palpitations, and lightheadedness appropriately."
+    },
+    "deepens_understanding": {
+      "score": 3,
+      "reasoning": "Integrates prior knowledge with current case to deepen understanding of AF and PE pathophysiology."
+    },
+    "overall": {
+      "meets_expectations": "No",
+      "reasoning": "Although prior knowledge is used, the map does not fully deepen understanding of all case-specific elements."
+    }
+  },
+  "overall_map_meets_expectations": "No",
+  "strengths": [
+    "Clear presentation of ECG findings (irregularly irregular rhythm, absent P waves) and vital signs",
+    "Logical flow from tachycardia to reduced preload and poor perfusion",
+    "Accurate connections between patient symptoms and clinical signs",
+    "Inclusion of capillary refill and pulse quality"
+  ],
+  "areas_for_improvement": [
+    "Missing social determinants of health (hypertension, tobacco/alcohol use, thyroid disease)",
+    "Lack of explicit shock findings (clammy skin, poor pulses) and pulmonary edema",
+    "No mention of need for immediate DC shock or anticoagulation discussion",
+    "Differential diagnosis not clearly prioritized",
+    "Illness scripts not fully developed",
+    "Limited synthesis of pathophysiology connecting AF, heart failure, and poor perfusion"
+  ],
+  "grading_notes": "The concept map demonstrates solid understanding of ECG and hemodynamic concepts but falls short on comprehensive case integration, missing key social and clinical details, and lacks explicit prioritization and treatment considerations."
+}
