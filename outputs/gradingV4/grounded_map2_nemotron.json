@@ -1,0 +1,162 @@
+{
+"map_file": "ConceptMap2.pdf",
+  "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "knowledge_acquisition": {
+    "basic_science": {
+      "score": 3,
+      "reasoning": "Clinical findings and pathophysiology are well presented, but health system and determinants are absent, yielding a moderate overall score.",
+      "evidence_from_map": [
+        "rapid heart rate => inadequate ventricular filling and decreased stroke volume",
+        "disorganized electrical activity in atria => no coordinated atrial depolarization"
+      ]
+    },
+    "health_system_science": {
+      "score": 1,
+      "reasoning": "No health system or social determinants are mentioned in the map.",
+      "evidence_from_map": [
+        "No direct supporting evidence visible."
+      ]
+    },
+    "clinical_science": {
+      "score": 4,
+      "reasoning": "Detailed clinical signs, ECG interpretation, vitals, and physiological links are accurately integrated.",
+      "evidence_from_map": [
+        "ECG: atrial fibrillation",
+        "pulse 115: tachycardia",
+        "high respiratory rate: compensation for decreased cardiac output"
+      ]
+    },
+    "patient_case_information": {
+      "score": 4,
+      "reasoning": "Patient age, sex, presenting symptoms, and key signs are clearly described.",
+      "evidence_from_map": [
+        "John Swift is a 76 year-old male presenting with shortness of breath and palpitations",
+        "palpitations, SOB, lightheadedness and sweating => sx of poor cardiac output"
+      ]
+    },
+    "determinants_of_health": {
+      "score": 1,
+      "reasoning": "No social, environmental, or behavioral determinants are included.",
+      "evidence_from_map": [
+        "No direct supporting evidence visible."
+      ]
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The map covers essential clinical information and pathophysiology but lacks health system and DoH components, resulting in a moderate overall rating."
+    }
+  },
+  "integration": {
+    "prioritized_differential_diagnosis": {
+      "score": 2,
+      "reasoning": "Differential diagnoses (AF, PE) are listed but not explicitly prioritized.",
+      "evidence_from_map": [
+        "ECG: atrial fibrillation",
+        "PE"
+      ]
+    },
+    "illness_scripts": {
+      "score": 4,
+      "reasoning": "Multiple illness scripts accurately connect symptoms to clinical outcomes.",
+      "evidence_from_map": [
+        "palpitations, SOB, lightheadedness and sweating => sx of poor cardiac output",
+        "shortness of breath -> reduced preload -> decreased perfusion to head -> lightheadedness"
+      ]
+    },
+    "basic_to_foundational_science": {
+      "score": 3,
+      "reasoning": "Physiological cause‑effect links are logical but lack deeper molecular or cellular detail.",
+      "evidence_from_map": [
+        "disorganized electrical activity in atria => no coordinated atrial depolarization",
+        "rapid heart rate => inadequate ventricular filling and decreased stroke volume"
+      ]
+    },
+    "patient_data_to_clinical_information": {
+      "score": 4,
+      "reasoning": "Patient data flow to clinical signs and diagnoses is clear and logically structured.",
+      "evidence_from_map": [
+        "shortness of breath -> reduced preload -> decreased perfusion to head -> lightheadedness",
+        "palpitations, SOB, lightheadedness and sweating => sx of poor cardiac output"
+      ]
+    },
+    "patient_data_to_basic_science": {
+      "score": 3,
+      "reasoning": "Connections from symptoms to cellular mechanisms are present but not comprehensive.",
+      "evidence_from_map": [
+        "disorganized electrical activity in atria => no coordinated atrial depolarization",
+        "absent p waves"
+      ]
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The map integrates patient data with clinical findings and pathophysiology effectively, though some depth is missing."
+    }
+  },
+  "application": {
+    "working_diagnosis_pathophysiology": {
+      "score": 4,
+      "reasoning": "Pathophysiological explanations for AF and PE are provided and logically connected.",
+      "evidence_from_map": [
+        "rapid heart rate => inadequate ventricular filling and decreased stroke volume",
+        "high respiratory rate: compensation for decreased cardiac output"
+      ]
+    },
+    "patient_data_pathophysiology": {
+      "score": 4,
+      "reasoning": "Symptoms are linked to physiological changes (preload, perfusion) in a clear flow.",
+      "evidence_from_map": [
+        "shortness of breath -> reduced preload -> decreased perfusion to head -> lightheadedness",
+        "palpitations, SOB, lightheadedness and sweating => sx of poor cardiac output"
+      ]
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The map successfully explains clinical data with relevant basic science and pathophysiology."
+    }
+  },
+  "transfer": {
+    "prior_basic_science": {
+      "score": 3,
+      "reasoning": "Basic physiological concepts are included but not deeply synthesized.",
+      "evidence_from_map": [
+        "rapid heart rate => inadequate ventricular filling and decreased stroke volume",
+        "disorganized electrical activity in atria => no coordinated atrial depolarization"
+      ]
+    },
+    "prior_clinical_concepts": {
+      "score": 3,
+      "reasoning": "Clinical findings are present and generally accurate.",
+      "evidence_from_map": [
+        "ECG: atrial fibrillation",
+        "pulse 115: tachycardia"
+      ]
+    },
+    "deepens_understanding": {
+      "score": 3,
+      "reasoning": "The map uses prior knowledge to link symptoms to disease mechanisms, deepening understanding.",
+      "evidence_from_map": [
+        "shortness of breath -> reduced preload -> decreased perfusion to head -> lightheadedness",
+        "palpitations, SOB, lightheadedness and sweating => sx of poor cardiac output"
+      ]
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "Overall, the learner connects prior concepts to the case, though some areas lack depth."
+    }
+  },
+  "overall_map_meets_expectations": "Yes",
+  "strengths": [
+    "Comprehensive inclusion of clinical findings (ECG, vitals, symptoms)",
+    "Clear pathophysiological connections (HR → inadequate filling, SOB → reduced preload)",
+    "Multiple illness scripts linking symptoms to outcomes",
+    "Appropriate differential diagnosis (AF, PE)"
+  ],
+  "areas_for_improvement": [
+    "Missing health system and determinants of health",
+    "Limited basic science depth (molecular/cellular mechanisms)",
+    "No explicit mention of hypertension, tobacco/alcohol use, thyroid disease",
+    "Lack of explicit prioritization of differential diagnoses",
+    "No discussion of anticoagulation or need for immediate DC shock"
+  ],
+  "grading_notes": "The map scores well in clinical science, patient case information, and application, with solid connections and comprehensive differential diagnosis. Weaknesses include low scores for health system science and determinants of health, limited basic science integration, and lack of explicit prioritization and some case-specific items."
+}

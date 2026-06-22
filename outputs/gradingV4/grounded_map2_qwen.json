@@ -1,0 +1,39 @@
+{
+  "map_file": "ConceptMap2.pdf",
+  "model": "qwen/qwen2.5-vl-72b-instruct",
+  "knowledge_acquisition": {
+    "basic_science": {"score": 3, "reasoning": "The map includes relevant and mostly synthesized knowledge from basic science.", "evidence_from_map": ["disorganized electrical activity in atria", "uncoordinated atrial contractions"]},
+    "health_system_science": {"score": 2, "reasoning": "The map includes partly relevant knowledge but is too general.", "evidence_from_map": ["No direct supporting evidence visible."]},
+    "clinical_science": {"score": 3, "reasoning": "The map includes relevant and mostly synthesized knowledge from clinical science.", "evidence_from_map": ["ECG: atrial fibrillation", "shortness of breath"]},
+    "patient_case_information": {"score": 3, "reasoning": "The map includes relevant and mostly synthesized information from the patient's data.", "evidence_from_map": ["John Swift is a 76 year-old male presenting with shortness of breath and palpitations", "palpitations, SOB, lightheadedness and sweating"]},
+    "determinants_of_health": {"score": 2, "reasoning": "The map includes at least one DoH but it is not specific to this patient and/or not clinically relevant.", "evidence_from_map": ["No direct supporting evidence visible."]},
+    "overall": {"meets_expectations": "No", "reasoning": "The map lacks comprehensive representation of health system science and determinants of health."}
+  },
+  "integration": {
+    "prioritized_differential_diagnosis": {"score": 2, "reasoning": "The DDx is too narrow or not accurately connected to patient data.", "evidence_from_map": ["No direct supporting evidence visible."]},
+    "illness_scripts": {"score": 3, "reasoning": "The illness script is reflected in accurate connections between patient data.", "evidence_from_map": ["ECG: atrial fibrillation", "shortness of breath"]},
+    "basic_to_foundational_science": {"score": 3, "reasoning": "Connections are accurate and logically flow from basic science to molecular and cellular basis of disease.", "evidence_from_map": ["disorganized electrical activity in atria", "uncoordinated atrial contractions"]},
+    "patient_data_to_clinical_information": {"score": 3, "reasoning": "Connections are accurate and logically flow from patient data to relevant clinical information.", "evidence_from_map": ["ECG: atrial fibrillation", "shortness of breath"]},
+    "patient_data_to_basic_science": {"score": 3, "reasoning": "Connections are accurate and logically flow from patient data to molecular and cellular basis of disease.", "evidence_from_map": ["disorganized electrical activity in atria", "uncoordinated atrial contractions"]},
+    "overall": {"meets_expectations": "No", "reasoning": "The map lacks a comprehensive prioritized differential diagnosis."}
+  },
+  "application": {
+    "working_diagnosis_pathophysiology": {"score": 3, "reasoning": "Connections form a flow of concepts that explains the pathophysiology.", "evidence_from_map": ["disorganized electrical activity in atria", "uncoordinated atrial contractions"]},
+    "patient_data_pathophysiology": {"score": 3, "reasoning": "Connections form a flow of concepts that explains the pathophysiology.", "evidence_from_map": ["disorganized electrical activity in atria", "uncoordinated atrial contractions"]},
+    "overall": {"meets_expectations": "No", "reasoning": "The map lacks connections that include basic, clinical, and health system sciences."}
+  },
+  "transfer": {
+    "prior_basic_science": {"score": 3, "reasoning": "The map includes relevant and mostly synthesized knowledge.", "evidence_from_map": ["disorganized electrical activity in atria", "uncoordinated atrial contractions"]},
+    "prior_clinical_concepts": {"score": 3, "reasoning": "The map includes relevant and mostly synthesized knowledge.", "evidence_from_map": ["ECG: atrial fibrillation", "shortness of breath"]},
+    "deepens_understanding": {"score": 3, "reasoning": "The map includes relevant and mostly synthesized knowledge that connects to both patient data and basic science knowledge.", "evidence_from_map": ["disorganized electrical activity in atria", "ECG: atrial fibrillation"]},
+    "overall": {"meets_expectations": "No", "reasoning": "The map lacks synthesized and detailed knowledge that connects to both patient data and basic science knowledge."}
+  },
+  "overall_map_meets_expectations": "No",
+  "strengths": [
+    {"description": "Relevant and mostly synthesized knowledge from basic and clinical science.", "evidence_from_map": ["disorganized electrical activity in atria", "ECG: atrial fibrillation"]}
+  ],
+  "areas_for_improvement": [
+    {"description": "Lack of comprehensive representation of health system science and determinants of health.", "missing_or_weak_evidence": ["No direct supporting evidence visible."]}
+  ],
+  "grading_notes": ""
+}

@@ -1,0 +1,179 @@
+{
+  "map_file": "ConceptMap1.pdf",
+  "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "knowledge_acquisition": {
+    "basic_science": {
+      "score": 4,
+      "reasoning": "Synthesized and detailed knowledge from each session, covering anatomy, physiology, and pathology.",
+      "evidence_from_map": [
+        "Pathophysiology of Atrial fibrillation and Cardiogenic shock",
+        "Cardiogenic shock and Atrial fibrillation"
+      ]
+    },
+    "health_system_science": {
+      "score": 4,
+      "reasoning": "Detailed integration of social, economic, and healthcare access factors affecting the patient.",
+      "evidence_from_map": [
+        "Social History",
+        "SDOH: Patient could not afford medications and/or feel of isolation",
+        "Patient may have lack of knowledge regarding medication adherence potentially impact medication adherence"
+      ]
+    },
+    "clinical_science": {
+      "score": 4,
+      "reasoning": "Comprehensive clinical reasoning with appropriate differential diagnosis and management plan.",
+      "evidence_from_map": [
+        "Differential Diagnosis",
+        "Post-cholecystectomy on cardiogenic shock",
+        "I want to give heparin because stroke is not risk for clot formation"
+      ]
+    },
+    "patient_case_information": {
+      "score": 4,
+      "reasoning": "Rich patient data including history, vitals, social, physical exam, and diagnostics.",
+      "evidence_from_map": [
+        "Patient was presenting his jaw left posterior to the left chest pain and SOB",
+        "Patient was sweating and lightheaded",
+        "Physical exam: Crackles heard upon lung exam",
+        "Check X-ray showed pulmonary edema"
+      ]
+    },
+    "determinants_of_health": {
+      "score": 3,
+      "reasoning": "Multiple determinants of health identified, especially social and economic factors, with clear impact on care.",
+      "evidence_from_map": [
+        "Social History",
+        "SDOH: Patient could not afford medications and/or feel of isolation",
+        "Patient may have lack of knowledge regarding medication adherence potentially impact medication adherence"
+      ]
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "All subcategories score 4, indicating comprehensive synthesis of basic science, health system, clinical, and patient case information."
+    }
+  },
+  "integration": {
+    "prioritized_differential_diagnosis": {
+      "score": 4,
+      "reasoning": "Differential diagnosis is appropriately focused, relevant, and correctly prioritized.",
+      "evidence_from_map": [
+        "Differential Diagnosis",
+        "Cardiogenic shock and Atrial fibrillation",
+        "Thyrotoxicosis",
+        "Unstable angina NSTEMI"
+      ]
+    },
+    "illness_scripts": {
+      "score": 4,
+      "reasoning": "Illness scripts are reflected in accurate and prioritized connections for multiple diagnoses.",
+      "evidence_from_map": [
+        "HSS Relation: Patient: Patient's history is important to understand patient and medical knowledge with medical knowledge to find say in their medical care.",
+        "Post-cholecystectomy on cardiogenic shock",
+        "Pericardial tamponade",
+        "Thyrotoxicosis"
+      ]
+    },
+    "basic_to_foundational_science": {
+      "score": 4,
+      "reasoning": "Connections are accurate, logical, and comprehensive, linking basic science to disease mechanisms.",
+      "evidence_from_map": [
+        "Pathophysiology of Atrial fibrillation and Cardiogenic shock",
+        "Cardiogenic shock and Atrial fibrillation",
+        "Thyrotoxicosis"
+      ]
+    },
+    "patient_data_to_clinical_information": {
+      "score": 4,
+      "reasoning": "Accurate and logical flow from patient data to clinical information and management.",
+      "evidence_from_map": [
+        "Patient was presenting his jaw left posterior to the left chest pain and SOB",
+        "Physical exam: Crackles heard upon lung exam",
+        "Check X-ray showed pulmonary edema"
+      ]
+    },
+    "patient_data_to_basic_science": {
+      "score": 4,
+      "reasoning": "Accurate and logical connections from patient data to molecular and cellular disease basis.",
+      "evidence_from_map": [
+        "Patient was tachycardic",
+        "The sympathetic nervous system is overcompensating for low cardiac output because the patient is in atrial fibrillation",
+        "Patient was cold and clammy"
+      ]
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "All integration categories score 4, showing comprehensive and accurate connections across domains."
+    }
+  },
+  "application": {
+    "working_diagnosis_pathophysiology": {
+      "score": 4,
+      "reasoning": "Clear flow of concepts explains pathophysiology of atrial fibrillation, heart failure, and poor perfusion.",
+      "evidence_from_map": [
+        "Cardiogenic shock and Atrial fibrillation",
+        "Pathophysiology of Atrial fibrillation and Cardiogenic shock",
+        "As a result of the disorganized atrial activity to tachycardia, impaired diastolic filling leads to volume decrease which results in cardiac output decreases"
+      ]
+    },
+    "patient_data_pathophysiology": {
+      "score": 4,
+      "reasoning": "Connections from patient data (e.g., low BP, clammy skin) to pathophysiology of shock and poor perfusion are present and accurate.",
+      "evidence_from_map": [
+        "Patient was cold and clammy",
+        "Diminished pulses",
+        "The patient was cold and clammy",
+        "The patient was cold and clammy"
+      ]
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "The learner accurately explained key clinical data with relevant basic science, meeting the application criteria."
+    }
+  },
+  "transfer": {
+    "prior_basic_science": {
+      "score": 4,
+      "reasoning": "Relevant and synthesized prior knowledge (e.g., thyroid disease, hypertension, tobacco use) is integrated throughout the map.",
+      "evidence_from_map": [
+        "Patient past medical history past the last 12 years, hyperlipidemia, hypothyroidism for the past 4 years",
+        "Patient: Alcohol use also can predispose to this for patient",
+        "Tobacco: Smokes 5.8 a pack a day and has a 50-year pack history"
+      ]
+    },
+    "prior_clinical_concepts": {
+      "score": 4,
+      "reasoning": "Prior clinical concepts are synthesized and linked to current patient data, deepening understanding.",
+      "evidence_from_map": [
+        "Atrial fibrillation",
+        "Heart failure",
+        "Shock findings including low blood pressure, clammy skin, and poor pulses",
+        "Need for immediate DC shock"
+      ]
+    },
+    "deepens_understanding": {
+      "score": 4,
+      "reasoning": "Relevant and synthesized knowledge connects patient data with basic science, enhancing understanding of the case.",
+      "evidence_from_map": [
+        "Thyrotoxicosis",
+        "Cardiogenic shock and Atrial fibrillation",
+        "Post-cholecystectomy on cardiogenic shock",
+        "Illness scripts for multiple diagnoses"
+      ]
+    },
+    "overall": {
+      "meets_expectations": "Yes",
+      "reasoning": "Transfer criteria are fully met with scores of 4 across all categories."
+    }
+  },
+  "overall_map_meets_expectations": "Yes",
+  "strengths": [
+    "Comprehensive inclusion of patient history, social determinants, physical exam, labs, and imaging",
+    "Clear linkage of pathophysiology across multiple systems (cardiac, endocrine, pulmonary)",
+    "Prioritized differential diagnosis and detailed illness scripts for each condition"
+  ],
+  "areas_for_improvement": [
+    "Could further elaborate on specific medication dosing, contraindications, and anticoagulation decision-making",
+    "More explicit mention of how thyroid disease specifically triggers atrial fibrillation"
+  ],
+  "grading_notes": "Highly detailed map meeting all rubric criteria with scores of 4 across categories; strong integration of clinical and basic science; excellent synthesis of patient data and determinants of health."
+}

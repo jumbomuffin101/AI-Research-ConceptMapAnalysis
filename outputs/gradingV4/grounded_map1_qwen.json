@@ -1,0 +1,39 @@
+{
+  "map_file": "ConceptMap1.pdf",
+  "model": "qwen/qwen2.5-vl-72b-instruct",
+  "knowledge_acquisition": {
+    "basic_science": {"score": 3, "reasoning": "The concept map includes relevant and mostly synthesized knowledge from basic science concepts.", "evidence_from_map": ["Heart not pumping effectively because of loss of atrial kick which causes reduced ventricular filling which reduces CO and leads to hypotension", "The LV can not effectively pump which causes backflow to the lungs which causes increased hydrostatic pressure and leakage into the alveoli which leads to pulmonary edema and is heard as crackles"]},
+    "health_system_science": {"score": 2, "reasoning": "The concept map includes partly relevant knowledge and/or too general information from health system science.", "evidence_from_map": ["HSS Relation - Prevalence: 5.3-6.1 million Americans have Afib", "HSS Relation - Incidence: There are about 1.2 million new cases of Afib per year"]},
+    "clinical_science": {"score": 3, "reasoning": "The concept map includes relevant and mostly synthesized knowledge from clinical science.", "evidence_from_map": ["Patient had significant hypotension", "Patient was tachycardic", "Crackles heard upon lung exam"]},
+    "patient_case_information": {"score": 3, "reasoning": "The concept map includes relevant and mostly synthesized information from the patient's data.", "evidence_from_map": ["Patient is John Swift. He is a 76-year-old man who presents to the ED with shortness of breath and palpitations.", "Patient was mowing his lawn yesterday and started to experience chest pain, palpitations and SOB"]},
+    "determinants_of_health": {"score": 3, "reasoning": "The concept map includes multiple determinants of health across multiple areas of the concept map, with clear impact on the patient's condition and/or plan of care.", "evidence_from_map": ["SDOH: Smoking increases patients risk for cardiopulmonary disease and risk for further events of Afib", "SDOH: Although I do not know the patient's living environment, his age can put him at risk for housing quality and adequate food access"]},
+    "overall": {"meets_expectations": "Yes", "reasoning": "The student's map includes key knowledge from the case and content learned during this unit."}
+  },
+  "integration": {
+    "prioritized_differential_diagnosis": {"score": 3, "reasoning": "The concept map includes a differential diagnosis that is appropriately focused and relevant to the patient.", "evidence_from_map": ["Unstable angina/ NSTEMI", "Cardiogenic shock and Atrial fibrillation"]},
+    "illness_scripts": {"score": 3, "reasoning": "The concept map includes illness scripts that are reflected in accurate connections between patient data.", "evidence_from_map": ["Pathophysiology of Atrial Fibrillation and Cardiogenic shock", "As a result of the disorganized atria leading to tachycardia, preload decreases, stroke volume decreases, and as a result CO decreases"]},
+    "basic_to_foundational_science": {"score": 3, "reasoning": "The concept map includes connections that are accurate and logically flow from basic science to molecular and cellular basis of disease.", "evidence_from_map": ["Heart not pumping effectively because of loss of atrial kick which causes reduced ventricular filling which reduces CO and leads to hypotension", "The LV can not effectively pump which causes backflow to the lungs which causes increased hydrostatic pressure and leakage into the alveoli which leads to pulmonary edema and is heard as crackles"]},
+    "patient_data_to_clinical_information": {"score": 3, "reasoning": "The concept map includes connections that are accurate and logically flow from patient data to relevant clinical information.", "evidence_from_map": ["Patient had significant hypotension", "Patient was tachycardic", "Crackles heard upon lung exam"]},
+    "patient_data_to_basic_science": {"score": 3, "reasoning": "The concept map includes connections that are accurate and logically flow from patient data to molecular and cellular basis of disease.", "evidence_from_map": ["Heart not pumping effectively because of loss of atrial kick which causes reduced ventricular filling which reduces CO and leads to hypotension", "The LV can not effectively pump which causes backflow to the lungs which causes increased hydrostatic pressure and leakage into the alveoli which leads to pulmonary edema and is heard as crackles"]},
+    "overall": {"meets_expectations": "Yes", "reasoning": "The learner connected key knowledge accurately and comprehensively."}
+  },
+  "application": {
+    "working_diagnosis_pathophysiology": {"score": 3, "reasoning": "The concept map includes connections that form a flow of concepts that explains the pathophysiology.", "evidence_from_map": ["Heart not pumping effectively because of loss of atrial kick which causes reduced ventricular filling which reduces CO and leads to hypotension", "The LV can not effectively pump which causes backflow to the lungs which causes increased hydrostatic pressure and leakage into the alveoli which leads to pulmonary edema and is heard as crackles"]},
+    "patient_data_pathophysiology": {"score": 3, "reasoning": "The concept map includes connections that form a flow of concepts that explains the pathophysiology of multiple components of patient data and/or plan of care.", "evidence_from_map": ["Patient had significant hypotension", "Patient was tachycardic", "Crackles heard upon lung exam"]},
+    "overall": {"meets_expectations": "Yes", "reasoning": "The learner explained key clinical data with relevant basic science."}
+  },
+  "transfer": {
+    "prior_basic_science": {"score": 3, "reasoning": "The concept map includes relevant and mostly synthesized knowledge from prior basic science.", "evidence_from_map": ["Heart not pumping effectively because of loss of atrial kick which causes reduced ventricular filling which reduces CO and leads to hypotension", "The LV can not effectively pump which causes backflow to the lungs which causes increased hydrostatic pressure and leakage into the alveoli which leads to pulmonary edema and is heard as crackles"]},
+    "prior_clinical_concepts": {"score": 3, "reasoning": "The concept map includes relevant and mostly synthesized knowledge from prior clinical concepts.", "evidence_from_map": ["Patient had significant hypotension", "Patient was tachycardic", "Crackles heard upon lung exam"]},
+    "deepens_understanding": {"score": 3, "reasoning": "The concept map includes synthesized and detailed knowledge that connects to both patient data and basic science knowledge.", "evidence_from_map": ["Heart not pumping effectively because of loss of atrial kick which causes reduced ventricular filling which reduces CO and leads to hypotension", "The LV can not effectively pump which causes backflow to the lungs which causes increased hydrostatic pressure and leakage into the alveoli which leads to pulmonary edema and is heard as crackles"]},
+    "overall": {"meets_expectations": "Yes", "reasoning": "The learner used previously learned content to deepen understanding."}
+  },
+  "overall_map_meets_expectations": "Yes",
+  "strengths": [
+    {"description": "Comprehensive coverage of pathophysiology and patient data.", "evidence_from_map": ["Heart not pumping effectively because of loss of atrial kick which causes reduced ventricular filling which reduces CO and leads to hypotension", "The LV can not effectively pump which causes backflow to the lungs which causes increased hydrostatic pressure and leakage into the alveoli which leads to pulmonary edema and is heard as crackles"]}
+  ],
+  "areas_for_improvement": [
+    {"description": "More detailed health system science information.", "missing_or_weak_evidence": ["HSS Relation - Prevalence: 5.3-6.1 million Americans have Afib", "HSS Relation - Incidence: There are about 1.2 million new cases of Afib per year"]}
+  ],
+  "grading_notes": ""
+}
