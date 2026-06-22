@@ -91,3 +91,23 @@ Structured JSON Output
 * Nemotron generally produces more concise outputs.
 * Both models successfully distinguish Strong and Weak concept maps using the grading rubric.
 * Model agreement was higher during grading than during initial content extraction.
+
+## Web Demo
+
+The Streamlit demo accepts any concept map PDF, runs Qwen, Nemotron, or both through
+OpenRouter, and displays rubric scores, reasoning, evidence, strengths, and areas for
+improvement. Valid results are also saved under `outputs/web_demo/`.
+
+Install the dependencies and configure the OpenRouter API key:
+
+```powershell
+pip install -r requirements.txt
+$env:OPENROUTER_API_KEY="your-api-key"
+```
+
+You can instead place `OPENROUTER_API_KEY=your-api-key` in the project `.env` file.
+Then start the app from the repository root:
+
+```powershell
+streamlit run app.py
+```
