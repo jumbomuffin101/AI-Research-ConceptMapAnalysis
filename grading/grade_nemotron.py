@@ -4,6 +4,7 @@ import os
 import base64
 import fitz
 from pathlib import Path
+import re
 
 load_dotenv()
 
@@ -16,16 +17,16 @@ MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
 
 MAPS = [
     {
-        "label": "strong",
-        "map_file": "ConceptMapStrong.pdf",
-        "path": "maps/ConceptMapStrong.pdf",
-        "output": "outputs/graded_strong_nemotron.json"
+        "label": "Map 1",
+        "map_file": "ConceptMap1.pdf",
+        "path": "maps/ConceptMap1.pdf",
+        "output": "outputs/gradingV4/grounded_map1_nemotron.json"
     },
     {
-        "label": "weak",
-        "map_file": "ConceptMapWeak.pdf",
-        "path": "maps/ConceptMapWeak.pdf",
-        "output": "outputs/graded_weak_nemotron.json"
+        "label": "Map 2",
+        "map_file": "ConceptMap2.pdf",
+        "path": "maps/ConceptMap2.pdf",
+        "output": "outputs/gradingV4/grounded_map2_nemotron.json"
     }
 ]
 
@@ -39,6 +40,19 @@ def pdf_to_base64(pdf_path):
     return base64.b64encode(image_bytes).decode("utf-8")
 
 
+def clean_json_output(text):
+    text = text.strip()
+    text = re.sub(r"^```json\s*", "", text)
+    text = re.sub(r"^```\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        return match.group(0).strip()
+
+    return text
+
+
 rubric = Path("rubric/concept_map_rubric.json").read_text(
     encoding="utf-8"
 )
@@ -49,6 +63,11 @@ You are evaluating a student medical concept map using the rubric provided below
 Review the concept map and assign scores according to the rubric definitions.
 
 Use evidence that is visible in the concept map when assigning scores.
+
+For each scored category, include 1-2 short evidence phrases copied from visible map text in evidence_from_map when possible.
+
+If no visible evidence supports a category, write:
+"No direct supporting evidence visible."
 
 Provide brief reasoning for each score.
 
@@ -69,6 +88,12 @@ Case-specific expectations include:
 - illness scripts
 - pathophysiology connecting atrial fibrillation, heart failure, and poor perfusion
 
+Return ONLY raw valid JSON.
+Do not include markdown.
+Do not include ```json fences.
+Do not include introductory text.
+Do not include any text before or after the JSON object.
+
 Return valid JSON only using this exact structure:
 
 {{
@@ -77,23 +102,28 @@ Return valid JSON only using this exact structure:
   "knowledge_acquisition": {{
     "basic_science": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "health_system_science": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "clinical_science": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "patient_case_information": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "determinants_of_health": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "overall": {{
       "meets_expectations": "",
@@ -103,23 +133,28 @@ Return valid JSON only using this exact structure:
   "integration": {{
     "prioritized_differential_diagnosis": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "illness_scripts": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "basic_to_foundational_science": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "patient_data_to_clinical_information": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "patient_data_to_basic_science": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "overall": {{
       "meets_expectations": "",
@@ -129,11 +164,13 @@ Return valid JSON only using this exact structure:
   "application": {{
     "working_diagnosis_pathophysiology": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "patient_data_pathophysiology": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "overall": {{
       "meets_expectations": "",
@@ -143,15 +180,18 @@ Return valid JSON only using this exact structure:
   "transfer": {{
     "prior_basic_science": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "prior_clinical_concepts": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "deepens_understanding": {{
       "score": 0,
-      "reasoning": ""
+      "reasoning": "",
+      "evidence_from_map": []
     }},
     "overall": {{
       "meets_expectations": "",
@@ -177,8 +217,7 @@ Scoring rules:
 - 4 = detailed, comprehensive, accurate, and well-integrated.
 """
 
-
-Path("outputs").mkdir(exist_ok=True)
+Path("outputs/gradingV4").mkdir(parents=True, exist_ok=True)
 
 for item in MAPS:
     image = pdf_to_base64(item["path"])
@@ -189,36 +228,47 @@ for item in MAPS:
         model=MODEL
     )
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": prompt
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{image}"
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{image}"
+                            }
                         }
-                    }
-                ]
-            }
-        ]
-    )
+                    ]
+                }
+            ]
+        )
 
-    result = response.choices[0].message.content
+        raw_output_path = item["output"].replace(".json", "_raw.txt")
+        with open(raw_output_path, "w", encoding="utf-8") as f:
+            f.write(str(response))
 
-    if result is None:
-      print("No content returned.")
-      print(response)
-      continue
+        result = response.choices[0].message.content
 
-    with open(item["output"], "w", encoding="utf-8") as f:
-      f.write(result)
+        if result is None:
+            print(f"No content returned for {item['label']}")
+            print(response)
+            continue
 
-    print(f"\nSaved {item['output']}")
-    print(result)
+        cleaned_result = clean_json_output(result)
+
+        with open(item["output"], "w", encoding="utf-8") as f:
+            f.write(cleaned_result)
+
+        print(f"\nSaved {item['output']}")
+        print(cleaned_result)
+
+    except Exception as e:
+        print(f"Error processing {item['label']}: {e}")
+        continue
