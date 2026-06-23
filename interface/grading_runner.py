@@ -40,11 +40,11 @@ MODEL_SELECTION_ALIASES = {
 MODEL_CONFIGS = {
     "Qwen": {
         "model_id": grade_qwen.MODEL,
-        "max_tokens": 1800,
+        "max_tokens": 2000,
     },
     "Nemotron": {
         "model_id": grade_nemotron.MODEL,
-        "max_tokens": 1800,
+        "max_tokens": 2000,
     },
 }
 
@@ -157,26 +157,23 @@ def build_web_prompt(map_file: str, model_id: str) -> str:
     schema: dict[str, Any] = {"map_file": map_file, "model": model_id}
     for group, fields in CATEGORY_FIELDS.items():
         schema[group] = {
-            **{
-                field: {"score": 0, "reasoning": "", "evidence_from_map": []}
-                for field in fields
-            },
-            "overall": {"meets_expectations": "", "reasoning": ""},
+            field: {
+                "score": 0,
+                "reasoning": "",
+                "evidence_from_map": [],
+            }
+            for field in fields
         }
     schema.update(
         {
             "overall_map_meets_expectations": "",
-            "strengths": [{"description": "", "evidence_from_map": []}],
-            "areas_for_improvement": [
-                {"description": "", "missing_or_weak_evidence": []}
-            ],
+            "strengths": ["", ""],
+            "areas_for_improvement": ["", ""],
             "grading_notes": "",
         }
     )
 
-    rubric_categories = {
-        group: fields for group, fields in CATEGORY_FIELDS.items()
-    }
+    rubric_categories = {group: fields for group, fields in CATEGORY_FIELDS.items()}
 
     return f"""Grade this medical concept map using only visible evidence.
 
@@ -189,37 +186,94 @@ Scoring:
 3 = relevant, mostly accurate, and mostly synthesized.
 4 = detailed, comprehensive, accurate, and well-integrated.
 
-For every scored category, provide:
+For every scored category, return only:
 - score: integer 1-4
-- reasoning: brief explanation
-- evidence_from_map: short visible text phrases, or ["No direct supporting evidence visible."]
+- reasoning: one short sentence
+- evidence_from_map: at most 2 short strings copied from visible map text, or ["No direct supporting evidence visible."]
 
+Use compact summary fields:
+- strengths: maximum 2 short strings
+- areas_for_improvement: maximum 2 short strings
+- grading_notes: one short sentence or an empty string
+
+Keep all JSON string values short. Do not write paragraphs.
 Return JSON only. Do not include markdown or text outside JSON.
 Use this exact JSON structure:
 {json.dumps(schema, indent=2)}
 """
 
 
-def parse_model_json(raw_text: str) -> dict[str, Any]:
-    """Extract, parse, and minimally validate grading JSON from a model response."""
-    if not raw_text or not raw_text.strip():
-        raise ModelResponseError("The model returned an empty response.")
+def _strip_json_fences(raw_text: str) -> str:
+    text = raw_text.strip()
+    text = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    return re.sub(r"\s*```\s*$", "", text)
 
-    text = re.sub(r"^\s*```(?:json)?\s*", "", raw_text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*```\s*$", "", text)
+
+def _extract_first_complete_json_object(text: str) -> str | None:
+    """Return the first balanced JSON object substring, if one exists."""
     start = text.find("{")
     if start < 0:
-        raise MalformedResultError("The model response did not contain a JSON object.")
+        return None
 
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
+
+
+def _load_json_with_repair(raw_text: str) -> dict[str, Any]:
+    """Parse JSON, then fall back to the first complete object if needed."""
+    text = _strip_json_fences(raw_text)
     try:
-        result, _ = json.JSONDecoder().raw_decode(text[start:])
-    except json.JSONDecodeError as exc:
-        raise MalformedResultError(
-            f"The model returned malformed JSON ({exc.msg}, line {exc.lineno})."
-        ) from exc
+        result = json.loads(text)
+    except json.JSONDecodeError as first_exc:
+        candidate = _extract_first_complete_json_object(text)
+        if candidate is None:
+            raise MalformedResultError(
+                "The model returned malformed JSON "
+                f"({first_exc.msg}, line {first_exc.lineno})."
+            ) from first_exc
+        try:
+            result = json.loads(candidate)
+        except json.JSONDecodeError as second_exc:
+            raise MalformedResultError(
+                "The model returned malformed JSON "
+                f"({second_exc.msg}, line {second_exc.lineno})."
+            ) from second_exc
 
     if not isinstance(result, dict):
         raise MalformedResultError("The model result must be a JSON object.")
+    return result
+
+
+def parse_model_json(raw_text: str) -> dict[str, Any]:
+    """Extract, parse, repair when possible, and validate grading JSON."""
+    if not raw_text or not raw_text.strip():
+        raise ModelResponseError("The model returned an empty response.")
+
+    if "{" not in raw_text:
+        raise MalformedResultError("The model response did not contain a JSON object.")
+
+    result = _load_json_with_repair(raw_text)
 
     missing = [
         key
