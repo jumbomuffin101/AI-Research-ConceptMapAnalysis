@@ -96,7 +96,13 @@ Structured JSON Output
 
 The Streamlit demo accepts any concept map PDF, runs Qwen, Nemotron, or both through
 OpenRouter, and displays rubric scores, reasoning, evidence, strengths, and areas for
-improvement. Valid results are also saved under `outputs/web_demo/`.
+improvement. Valid results are saved under `outputs/web_demo/`.
+
+If one selected model fails, the app keeps any successful model result visible and
+shows a warning for the failed model. Raw failed responses are saved under
+`outputs/web_demo/debug/` for troubleshooting. Nemotron may intermittently fail to
+return usable JSON on dense concept maps; when that happens, select `Nemotron` only
+and run the evaluation again to retry it independently.
 
 Install the dependencies and configure the OpenRouter API key:
 

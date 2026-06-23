@@ -6,7 +6,6 @@ PDF rendering and OpenRouter request flow while accepting any uploaded PDF.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
@@ -18,21 +17,30 @@ from uuid import uuid4
 
 import fitz
 from dotenv import load_dotenv
-from openai import OpenAI
+
+from grading import grade_nemotron, grade_qwen
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RUBRIC_PATH = PROJECT_ROOT / "rubric" / "concept_map_rubric.json"
 OUTPUT_DIR = PROJECT_ROOT / "outputs" / "web_demo"
+DEBUG_DIR = OUTPUT_DIR / "debug"
+
+GRADER_MODULES = {
+    "Qwen": grade_qwen,
+    "Nemotron": grade_nemotron,
+}
+
+MODEL_SELECTION_ALIASES = {
+    "Qwen (Recommended)": "Qwen",
+    "Nemotron (Experimental)": "Nemotron",
+}
 
 MODEL_CONFIGS = {
     "Qwen": {
-        "model_id": "qwen/qwen2.5-vl-72b-instruct",
-        "max_tokens": 8000,
+        "model_id": grade_qwen.MODEL,
     },
     "Nemotron": {
-        "model_id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "max_tokens": 8000,
+        "model_id": grade_nemotron.MODEL,
     },
 }
 
@@ -74,6 +82,10 @@ class InvalidPDFError(GradingError):
 class ModelResponseError(GradingError):
     """A model returned no usable grading response."""
 
+    def __init__(self, message: str, raw_response: Any | None = None) -> None:
+        super().__init__(message)
+        self.raw_response = raw_response
+
 
 class MalformedResultError(GradingError):
     """A model response is not valid grading JSON."""
@@ -89,88 +101,42 @@ class EvaluationResult:
     output_path: Path
 
 
+@dataclass(frozen=True)
+class EvaluationFailure:
+    """One model's failed result and persisted debug location."""
+
+    model_name: str
+    model_id: str
+    error_message: str
+    debug_path: Path
+
+
+EvaluationOutcome = EvaluationResult | EvaluationFailure
+
+
 def selected_model_names(selection: str) -> list[str]:
     """Translate the UI selection into model registry keys."""
     if selection == "Both":
         return ["Qwen", "Nemotron"]
+    selection = MODEL_SELECTION_ALIASES.get(selection, selection)
     if selection not in MODEL_CONFIGS:
         raise GradingError(f"Unknown model selection: {selection}")
     return [selection]
 
 
-def render_pdf_pages(pdf_path: Path, scale: float = 2.0) -> list[str]:
-    """Render all PDF pages as base64 PNG strings for vision input."""
+def render_pdf_image(pdf_path: Path, model_name: str) -> str:
+    """Render the uploaded PDF using the selected grader's existing helper."""
+    grader = GRADER_MODULES[model_name]
     try:
-        with fitz.open(pdf_path) as document:
-            if document.page_count < 1:
-                raise InvalidPDFError("The uploaded PDF has no pages.")
-
-            images = []
-            matrix = fitz.Matrix(scale, scale)
-            for page in document:
-                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-                images.append(base64.b64encode(pixmap.tobytes("png")).decode("ascii"))
-            return images
-    except InvalidPDFError:
-        raise
-    except (fitz.FileDataError, fitz.EmptyFileError, RuntimeError, ValueError) as exc:
+        return grader.pdf_to_base64(pdf_path)
+    except (
+        fitz.FileDataError,
+        fitz.EmptyFileError,
+        RuntimeError,
+        ValueError,
+        IndexError,
+    ) as exc:
         raise InvalidPDFError("The uploaded file is not a valid, readable PDF.") from exc
-
-
-def load_rubric() -> dict[str, Any]:
-    """Load and validate the local rubric JSON."""
-    try:
-        data = json.loads(RUBRIC_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise GradingError(f"Rubric not found at {RUBRIC_PATH}.") from exc
-    except json.JSONDecodeError as exc:
-        raise GradingError("The rubric file contains invalid JSON.") from exc
-    if not isinstance(data, dict):
-        raise GradingError("The rubric must contain a JSON object.")
-    return data
-
-
-def build_prompt(rubric: dict[str, Any], map_file: str, model_id: str) -> str:
-    """Build the grounded grading prompt shared by every registered model."""
-    schema: dict[str, Any] = {"map_file": map_file, "model": model_id}
-    for group, fields in CATEGORY_FIELDS.items():
-        schema[group] = {
-            **{
-                field: {"score": 0, "reasoning": "", "evidence_from_map": []}
-                for field in fields
-            },
-            "overall": {"meets_expectations": "", "reasoning": ""},
-        }
-    schema.update(
-        {
-            "overall_map_meets_expectations": "",
-            "strengths": [{"description": "", "evidence_from_map": []}],
-            "areas_for_improvement": [
-                {"description": "", "missing_or_weak_evidence": []}
-            ],
-            "grading_notes": "",
-        }
-    )
-
-    return f"""You are evaluating a student medical concept map using the rubric below.
-
-Use only evidence directly visible in the concept map. For every scored category,
-include short, directly traceable visible phrases in evidence_from_map. If no direct
-evidence is visible, use [\"No direct supporting evidence visible.\"] and reduce the
-score. A score of 3 or 4 requires at least two pieces of direct supporting evidence.
-
-Rubric:
-{json.dumps(rubric, indent=2)}
-
-Return ONLY raw valid JSON matching this structure exactly:
-{json.dumps(schema, indent=2)}
-
-Rules:
-- Every numeric score must be an integer from 1 to 4.
-- Use the rubric definitions as the source of truth.
-- Do not add markdown fences or text outside the JSON object.
-- Evaluate every PDF page supplied in the image inputs.
-"""
 
 
 def parse_model_json(raw_text: str) -> dict[str, Any]:
@@ -218,48 +184,96 @@ def parse_model_json(raw_text: str) -> dict[str, Any]:
     return result
 
 
-def _create_client() -> OpenAI:
+def _response_to_debug_text(response: Any) -> str:
+    """Convert an SDK response object into a debug-safe text payload."""
+    if response is None:
+        return ""
+    if isinstance(response, str):
+        return response
+    for method_name in ("model_dump_json", "json"):
+        method = getattr(response, method_name, None)
+        if callable(method):
+            try:
+                return method(indent=2)
+            except TypeError:
+                try:
+                    return method()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    return str(response)
+
+
+def _save_failed_response(
+    *,
+    timestamp: str,
+    run_id: str,
+    file_stem: str,
+    model_name: str,
+    model_id: str,
+    error_message: str,
+    raw_response: Any | None,
+) -> Path:
+    """Persist failed model content for later debugging."""
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    debug_path = DEBUG_DIR / (
+        f"{timestamp}_{run_id}_{file_stem}_{model_name.lower()}_failure.json"
+    )
+    payload = {
+        "timestamp": timestamp,
+        "model_name": model_name,
+        "model_id": model_id,
+        "error_message": error_message,
+        "raw_response": _response_to_debug_text(raw_response),
+    }
+    debug_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return debug_path
+
+
+def _ensure_api_key() -> None:
     load_dotenv(PROJECT_ROOT / ".env")
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
+    if not os.getenv("OPENROUTER_API_KEY"):
         raise GradingError(
             "OPENROUTER_API_KEY is missing. Add it to the environment or project .env file."
         )
-    return OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1", timeout=300)
 
 
 def _request_model(
-    client: OpenAI,
     model_name: str,
     prompt: str,
-    page_images: list[str],
+    image: str,
 ) -> tuple[str, str]:
-    config = MODEL_CONFIGS[model_name]
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    content.extend(
-        {
-            "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{image}"},
-        }
-        for image in page_images
-    )
+    grader = GRADER_MODULES[model_name]
 
     try:
-        response = client.chat.completions.create(
-            model=config["model_id"],
-            max_tokens=config["max_tokens"],
-            temperature=0,
-            messages=[{"role": "user", "content": content}],
-        )
+        client = grader.create_client()
+        response = grader.request_grade(client, prompt, image)
     except Exception as exc:
-        raise ModelResponseError(f"{model_name} request failed: {exc}") from exc
+        raise ModelResponseError(
+            f"{model_name} API request failed: {exc}",
+            raw_response=repr(exc),
+        ) from exc
 
     if not response.choices:
-        raise ModelResponseError(f"{model_name} returned no response choices.")
-    text = response.choices[0].message.content
+        raise ModelResponseError(
+            f"{model_name} returned no response choices.",
+            raw_response=response,
+        )
+    try:
+        text = response.choices[0].message.content
+    except (AttributeError, IndexError, TypeError) as exc:
+        raise ModelResponseError(
+            f"{model_name} returned a malformed API response.",
+            raw_response=response,
+        ) from exc
+
     if not isinstance(text, str) or not text.strip():
-        raise ModelResponseError(f"{model_name} returned no usable content.")
-    return config["model_id"], text
+        raise ModelResponseError(
+            f"{model_name} returned no usable content.",
+            raw_response=response,
+        )
+    return grader.MODEL, text
 
 
 def _safe_stem(filename: str) -> str:
@@ -272,8 +286,12 @@ def run_evaluation(
     pdf_path: Path,
     model_names: Iterable[str],
     original_filename: str,
-) -> list[EvaluationResult]:
-    """Grade an uploaded PDF with each selected model and persist valid JSON."""
+) -> list[EvaluationOutcome]:
+    """Grade an uploaded PDF with each selected model and persist outcomes.
+
+    Model-specific failures are returned as EvaluationFailure objects so a
+    partial run can still show successful results from other models.
+    """
     names = list(model_names)
     if not names:
         raise GradingError("Select at least one model.")
@@ -281,31 +299,51 @@ def run_evaluation(
     if unknown:
         raise GradingError("Unknown model(s): " + ", ".join(unknown))
 
-    # Render before creating the API client so invalid uploads fail without a request.
-    page_images = render_pdf_pages(pdf_path)
-    rubric = load_rubric()
-    client = _create_client()
+    _ensure_api_key()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_id = uuid4().hex[:8]
     file_stem = _safe_stem(original_filename)
-    results = []
+    results: list[EvaluationOutcome] = []
 
     for model_name in names:
         model_id = MODEL_CONFIGS[model_name]["model_id"]
-        prompt = build_prompt(rubric, Path(original_filename).name, model_id)
-        returned_model_id, raw_text = _request_model(
-            client, model_name, prompt, page_images
-        )
-        data = parse_model_json(raw_text)
-        output_path = OUTPUT_DIR / (
-            f"{timestamp}_{run_id}_{file_stem}_{model_name.lower()}.json"
-        )
-        output_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        results.append(
-            EvaluationResult(model_name, returned_model_id, data, output_path)
-        )
+        grader = GRADER_MODULES[model_name]
+        image = render_pdf_image(pdf_path, model_name)
+        prompt = grader.build_prompt(Path(original_filename).name)
+        raw_text: str | None = None
+        try:
+            returned_model_id, raw_text = _request_model(model_name, prompt, image)
+            cleaned_text = grader.clean_json_output(raw_text)
+            data = parse_model_json(cleaned_text)
+            output_path = OUTPUT_DIR / (
+                f"{timestamp}_{run_id}_{file_stem}_{model_name.lower()}.json"
+            )
+            output_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            results.append(
+                EvaluationResult(model_name, returned_model_id, data, output_path)
+            )
+        except (ModelResponseError, MalformedResultError) as exc:
+            raw_response = getattr(exc, "raw_response", None)
+            if raw_response is None:
+                raw_response = raw_text
+            debug_path = _save_failed_response(
+                timestamp=timestamp,
+                run_id=run_id,
+                file_stem=file_stem,
+                model_name=model_name,
+                model_id=model_id,
+                error_message=str(exc),
+                raw_response=raw_response,
+            )
+            results.append(
+                EvaluationFailure(
+                    model_name=model_name,
+                    model_id=model_id,
+                    error_message=str(exc),
+                    debug_path=debug_path,
+                )
+            )
 
     return results
-

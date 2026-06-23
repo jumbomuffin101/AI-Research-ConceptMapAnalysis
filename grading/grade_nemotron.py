@@ -8,10 +8,11 @@ import re
 
 load_dotenv()
 
-client = OpenAI(
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-    base_url="https://openrouter.ai/api/v1"
-)
+def create_client():
+    return OpenAI(
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url="https://openrouter.ai/api/v1"
+    )
 
 MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
 
@@ -217,58 +218,73 @@ Scoring rules:
 - 4 = detailed, comprehensive, accurate, and well-integrated.
 """
 
-Path("outputs/gradingV4").mkdir(parents=True, exist_ok=True)
 
-for item in MAPS:
-    image = pdf_to_base64(item["path"])
-
-    prompt = prompt_template.format(
+def build_prompt(map_file):
+    return prompt_template.format(
         rubric=rubric,
-        map_file=item["map_file"],
+        map_file=map_file,
         model=MODEL
     )
 
-    try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{image}"
-                            }
+
+def request_grade(client, prompt, image):
+    return client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image}"
                         }
-                    ]
-                }
-            ]
-        )
+                    }
+                ]
+            }
+        ]
+    )
 
-        raw_output_path = item["output"].replace(".json", "_raw.txt")
-        with open(raw_output_path, "w", encoding="utf-8") as f:
-            f.write(str(response))
 
-        result = response.choices[0].message.content
+def run_all():
+    client = create_client()
+    Path("outputs/gradingV4").mkdir(parents=True, exist_ok=True)
 
-        if result is None:
-            print(f"No content returned for {item['label']}")
-            print(response)
+    for item in MAPS:
+        image = pdf_to_base64(item["path"])
+
+        prompt = build_prompt(item["map_file"])
+
+        try:
+            response = request_grade(client, prompt, image)
+
+            raw_output_path = item["output"].replace(".json", "_raw.txt")
+            with open(raw_output_path, "w", encoding="utf-8") as f:
+                f.write(str(response))
+
+            result = response.choices[0].message.content
+
+            if result is None:
+                print(f"No content returned for {item['label']}")
+                print(response)
+                continue
+
+            cleaned_result = clean_json_output(result)
+
+            with open(item["output"], "w", encoding="utf-8") as f:
+                f.write(cleaned_result)
+
+            print(f"\nSaved {item['output']}")
+            print(cleaned_result)
+
+        except Exception as e:
+            print(f"Error processing {item['label']}: {e}")
             continue
 
-        cleaned_result = clean_json_output(result)
 
-        with open(item["output"], "w", encoding="utf-8") as f:
-            f.write(cleaned_result)
-
-        print(f"\nSaved {item['output']}")
-        print(cleaned_result)
-
-    except Exception as e:
-        print(f"Error processing {item['label']}: {e}")
-        continue
+if __name__ == "__main__":
+    run_all()

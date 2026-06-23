@@ -7,7 +7,12 @@ from typing import Any
 
 import streamlit as st
 
-from interface.grading_runner import CATEGORY_FIELDS, EvaluationResult
+from interface.grading_runner import (
+    CATEGORY_FIELDS,
+    EvaluationFailure,
+    EvaluationOutcome,
+    EvaluationResult,
+)
 
 
 GROUP_LABELS = {
@@ -84,6 +89,7 @@ def _display_summary_items(title: str, items: Any, evidence_key: str) -> None:
 def display_result(result: EvaluationResult) -> None:
     """Render one model's complete result."""
     data = result.data
+    st.success(f"{result.model_name} completed successfully.")
     st.header(result.model_name)
     st.caption(result.model_id)
     st.metric(
@@ -120,9 +126,30 @@ def display_result(result: EvaluationResult) -> None:
     )
 
 
-def display_results(results: list[EvaluationResult]) -> None:
-    """Render all selected model results."""
+def display_failure(result: EvaluationFailure) -> None:
+    """Render one model's failed result without hiding other model results."""
+    st.warning(
+        f"{result.model_name} did not return usable content. "
+        "Raw response saved for debugging. "
+        f"You can retry {result.model_name} only."
+    )
+    st.header(result.model_name)
+    st.caption(result.model_id)
+    with st.expander("Failure details", expanded=True):
+        st.write(result.error_message)
+        st.caption(f"Debug file: {result.debug_path}")
+        st.info(
+            f"To retry only this model, choose '{result.model_name}' in the Model "
+            "selector and click Run Evaluation again."
+        )
+
+
+def display_results(results: list[EvaluationOutcome]) -> None:
+    """Render successful model results and failed model warnings together."""
     for index, result in enumerate(results):
         if index:
             st.divider()
-        display_result(result)
+        if isinstance(result, EvaluationFailure):
+            display_failure(result)
+        else:
+            display_result(result)

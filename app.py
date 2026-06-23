@@ -15,16 +15,22 @@ st.set_page_config(page_title="AI Concept Map Grading Demo", layout="wide")
 
 st.title("AI Concept Map Grading Demo")
 st.write(
-    "Upload a concept map PDF and evaluate it against the project rubric using "
-    "Qwen, Nemotron, or both models."
+    "Upload a medical concept map PDF and generate evidence-grounded "
+    "rubric-based evaluations using multimodal AI models."
 )
 
 uploaded_file = st.file_uploader("Concept map PDF", type=["pdf"])
 model_selection = st.radio(
     "Model",
-    options=["Qwen", "Nemotron", "Both"],
+    options=["Qwen (Recommended)", "Nemotron (Experimental)", "Both"],
     horizontal=True,
 )
+st.info(
+    "Qwen: Recommended for evidence-grounded grading\n\n"
+    "Nemotron: Experimental secondary grader\n\n"
+    "Both: Runs both models and displays any successful results even if one model fails"
+)
+st.button("Multi-AI Consensus Grading — Coming Soon", disabled=True)
 
 if st.button("Run Evaluation", type="primary"):
     if uploaded_file is None:
@@ -48,5 +54,4 @@ if st.button("Run Evaluation", type="primary"):
             st.error(f"Evaluation failed unexpectedly: {exc}")
 
 if st.session_state.get("evaluation_results"):
-    st.success("Evaluation complete.")
     display_results(st.session_state["evaluation_results"])
