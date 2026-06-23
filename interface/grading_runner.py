@@ -6,6 +6,7 @@ PDF rendering and OpenRouter request flow while accepting any uploaded PDF.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -17,6 +18,7 @@ from uuid import uuid4
 
 import fitz
 from dotenv import load_dotenv
+from openai import OpenAI
 
 from grading import grade_nemotron, grade_qwen
 
@@ -38,9 +40,11 @@ MODEL_SELECTION_ALIASES = {
 MODEL_CONFIGS = {
     "Qwen": {
         "model_id": grade_qwen.MODEL,
+        "max_tokens": 1800,
     },
     "Nemotron": {
         "model_id": grade_nemotron.MODEL,
+        "max_tokens": 1800,
     },
 }
 
@@ -125,10 +129,19 @@ def selected_model_names(selection: str) -> list[str]:
 
 
 def render_pdf_image(pdf_path: Path, model_name: str) -> str:
-    """Render the uploaded PDF using the selected grader's existing helper."""
-    grader = GRADER_MODULES[model_name]
+    """Render the uploaded PDF as a deployment-safe base64 PNG."""
+    _ = model_name
     try:
-        return grader.pdf_to_base64(pdf_path)
+        with fitz.open(pdf_path) as document:
+            if document.page_count < 1:
+                raise InvalidPDFError("The uploaded PDF has no pages.")
+            page = document[0]
+            # Lower resolution for Streamlit/OpenRouter token compatibility
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(1, 1))
+            image_bytes = pixmap.tobytes("png")
+            return base64.b64encode(image_bytes).decode("utf-8")
+    except InvalidPDFError:
+        raise
     except (
         fitz.FileDataError,
         fitz.EmptyFileError,
@@ -137,6 +150,54 @@ def render_pdf_image(pdf_path: Path, model_name: str) -> str:
         IndexError,
     ) as exc:
         raise InvalidPDFError("The uploaded file is not a valid, readable PDF.") from exc
+
+
+def build_web_prompt(map_file: str, model_id: str) -> str:
+    """Build the shorter Streamlit/OpenRouter-compatible grading prompt."""
+    schema: dict[str, Any] = {"map_file": map_file, "model": model_id}
+    for group, fields in CATEGORY_FIELDS.items():
+        schema[group] = {
+            **{
+                field: {"score": 0, "reasoning": "", "evidence_from_map": []}
+                for field in fields
+            },
+            "overall": {"meets_expectations": "", "reasoning": ""},
+        }
+    schema.update(
+        {
+            "overall_map_meets_expectations": "",
+            "strengths": [{"description": "", "evidence_from_map": []}],
+            "areas_for_improvement": [
+                {"description": "", "missing_or_weak_evidence": []}
+            ],
+            "grading_notes": "",
+        }
+    )
+
+    rubric_categories = {
+        group: fields for group, fields in CATEGORY_FIELDS.items()
+    }
+
+    return f"""Grade this medical concept map using only visible evidence.
+
+Rubric categories:
+{json.dumps(rubric_categories, indent=2)}
+
+Scoring:
+1 = missing, incorrect, irrelevant, or minimal.
+2 = partial, superficial, too general, or contains notable errors.
+3 = relevant, mostly accurate, and mostly synthesized.
+4 = detailed, comprehensive, accurate, and well-integrated.
+
+For every scored category, provide:
+- score: integer 1-4
+- reasoning: brief explanation
+- evidence_from_map: short visible text phrases, or ["No direct supporting evidence visible."]
+
+Return JSON only. Do not include markdown or text outside JSON.
+Use this exact JSON structure:
+{json.dumps(schema, indent=2)}
+"""
 
 
 def parse_model_json(raw_text: str) -> dict[str, Any]:
@@ -239,29 +300,71 @@ def _ensure_api_key() -> None:
         )
 
 
+def _create_client() -> OpenAI:
+    _ensure_api_key()
+    return OpenAI(
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url="https://openrouter.ai/api/v1",
+        timeout=300,
+    )
+
+
+def _is_input_limit_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "prompt tokens limit exceeded",
+            "input token",
+            "context length",
+            "maximum context",
+            "token limit",
+        )
+    )
+
+
 def _request_model(
     model_name: str,
     prompt: str,
     image: str,
 ) -> tuple[str, str]:
-    grader = GRADER_MODULES[model_name]
+    config = MODEL_CONFIGS[model_name]
+    content: list[dict[str, Any]] = [
+        {"type": "text", "text": prompt},
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{image}"},
+        },
+    ]
 
     try:
-        client = grader.create_client()
-        response = grader.request_grade(client, prompt, image)
+        client = _create_client()
+        response = client.chat.completions.create(
+            model=config["model_id"],
+            max_tokens=config["max_tokens"],
+            temperature=0,
+            messages=[{"role": "user", "content": content}],
+        )
     except Exception as exc:
+        message = str(exc)
+        if _is_input_limit_error(message):
+            message = (
+                "Input is too large for the current OpenRouter model limit. "
+                "Try a smaller PDF/image or use the local CLI pipeline."
+            )
         raise ModelResponseError(
-            f"{model_name} API request failed: {exc}",
+            f"{model_name} API request failed: {message}",
             raw_response=repr(exc),
         ) from exc
 
-    if not response.choices:
+    choices = getattr(response, "choices", None)
+    if not choices:
         raise ModelResponseError(
             f"{model_name} returned no response choices.",
             raw_response=response,
         )
     try:
-        text = response.choices[0].message.content
+        text = choices[0].message.content
     except (AttributeError, IndexError, TypeError) as exc:
         raise ModelResponseError(
             f"{model_name} returned a malformed API response.",
@@ -273,7 +376,7 @@ def _request_model(
             f"{model_name} returned no usable content.",
             raw_response=response,
         )
-    return grader.MODEL, text
+    return config["model_id"], text
 
 
 def _safe_stem(filename: str) -> str:
@@ -299,7 +402,6 @@ def run_evaluation(
     if unknown:
         raise GradingError("Unknown model(s): " + ", ".join(unknown))
 
-    _ensure_api_key()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -309,14 +411,12 @@ def run_evaluation(
 
     for model_name in names:
         model_id = MODEL_CONFIGS[model_name]["model_id"]
-        grader = GRADER_MODULES[model_name]
         image = render_pdf_image(pdf_path, model_name)
-        prompt = grader.build_prompt(Path(original_filename).name)
+        prompt = build_web_prompt(Path(original_filename).name, model_id)
         raw_text: str | None = None
         try:
             returned_model_id, raw_text = _request_model(model_name, prompt, image)
-            cleaned_text = grader.clean_json_output(raw_text)
-            data = parse_model_json(cleaned_text)
+            data = parse_model_json(raw_text)
             output_path = OUTPUT_DIR / (
                 f"{timestamp}_{run_id}_{file_stem}_{model_name.lower()}.json"
             )

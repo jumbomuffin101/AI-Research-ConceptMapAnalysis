@@ -128,11 +128,18 @@ def display_result(result: EvaluationResult) -> None:
 
 def display_failure(result: EvaluationFailure) -> None:
     """Render one model's failed result without hiding other model results."""
-    st.warning(
-        f"{result.model_name} did not return usable content. "
-        "Raw response saved for debugging. "
-        f"You can retry {result.model_name} only."
-    )
+    if "Input is too large for the current OpenRouter model limit" in result.error_message:
+        st.warning(
+            "Input is too large for the current OpenRouter model limit. "
+            "Try a smaller PDF/image or use the local CLI pipeline. "
+            "Raw response saved for debugging."
+        )
+    else:
+        st.warning(
+            f"{result.model_name} did not return usable content. "
+            "Raw response saved for debugging. "
+            f"You can retry {result.model_name} only."
+        )
     st.header(result.model_name)
     st.caption(result.model_id)
     with st.expander("Failure details", expanded=True):
