@@ -164,8 +164,8 @@ def build_prompt(map_file):
 def request_grade(client, prompt, image):
     return client.chat.completions.create(
         model=MODEL,
-        # Reduced for OpenRouter free-tier compatibility
-        max_tokens=3000,
+        # Reduced for OpenRouter free-tier compatibility on Streamlit Cloud
+        max_tokens=2000,
         temperature=0,
         messages=[
             {
