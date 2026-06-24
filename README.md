@@ -16,7 +16,7 @@ The current system uses multimodal vision-language models to analyze medical con
 
 ### Content Extraction and Grading
 
-* Gemma (`google/gemma-4-31b-it:free`)
+* Gemma (`google/gemma-4-26b-a4b-it:free`)
 * Nemotron VL (`nvidia/nemotron-nano-12b-v2-vl:free`)
 
 ## Current Progress

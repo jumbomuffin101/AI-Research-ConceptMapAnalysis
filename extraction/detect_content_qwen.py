@@ -12,7 +12,7 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1"
 )
 
-MODEL = "google/gemma-4-31b-it:free"
+MODEL = "google/gemma-4-26b-a4b-it:free"
 PDF_PATH = "maps/ConceptMapWeak.pdf"
 OUTPUT_PATH = "outputs/detected_content_weak_gemma.json"
 

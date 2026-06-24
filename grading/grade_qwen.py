@@ -15,7 +15,7 @@ def create_client():
         timeout=300
     )
 
-MODEL = "google/gemma-4-31b-it:free"
+MODEL = "google/gemma-4-26b-a4b-it:free"
 
 MAPS = [
     {
