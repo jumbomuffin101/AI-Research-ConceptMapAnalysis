@@ -22,15 +22,10 @@ st.write(
 uploaded_file = st.file_uploader("Concept map PDF", type=["pdf"])
 model_selection = st.radio(
     "Model",
-    options=["Gemma (Recommended)", "Nemotron (Experimental)", "Both"],
+    options=["Gemma", "Nemotron", "Both"],
     horizontal=True,
 )
-st.info(
-    "Gemma: Recommended for evidence-grounded grading\n\n"
-    "Nemotron: Experimental secondary grader\n\n"
-    "Both: Runs both models and displays any successful results even if one model fails"
-)
-st.button("Multi-AI Consensus Grading — Coming Soon", disabled=True)
+st.button("Multi-AI Consensus Grading - Coming Soon", disabled=True)
 
 if st.button("Run Evaluation", type="primary"):
     if uploaded_file is None:

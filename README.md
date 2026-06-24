@@ -1,110 +1,131 @@
-﻿# AI Research Concept Map Analysis
+# AI Concept Map Evaluation System
 
-This project investigates how AI-generated concept map evaluations differ from human-generated grading and how collaborative grading strategies compare across multiple AI and human evaluators.
+AI-powered concept map evaluation system for medical education.
 
-The current system uses multimodal vision-language models to analyze medical concept maps through concept extraction, relationship detection, hierarchy identification, and rubric-based grading. The long-term goal is to compare AI-generated evaluations against human-generated evaluations and explore multi-AI and AI-human collaborative grading workflows.
+The project evaluates medical concept maps using multimodal AI models, extracts visible concepts and relationships, applies a structured rubric, and presents evidence-grounded grading results in an interactive Streamlit dashboard.
 
-## Research Objectives
+## Status
 
-* Compare AI-generated evaluations with human-generated grading
-* Investigate multi-AI grading workflows
-* Investigate AI-human collaborative grading workflows
-* Evaluate agreement, disagreement, and consensus strategies
-* Support automated rubric-based assessment of medical concept maps
+**Status: Working Prototype**
 
-## Current Models
+Completed:
 
-### Content Extraction and Grading
+- ✅ Dual-model grading
+- ✅ Structured JSON output
+- ✅ Web interface
+- ✅ PDF processing pipeline
+- ✅ Rubric-based evaluation
 
-* Gemma (`google/gemma-4-26b-a4b-it:free`)
-* Nemotron VL (`nvidia/nemotron-nano-12b-v2-vl:free`)
+In Progress:
 
-## Current Progress
-
-### Completed
-
-* Concept extraction from medical concept maps
-* Relationship detection between concepts
-* Hierarchy identification
-* Structured JSON output generation
-* Comparison of model extraction outputs
-* Custom rubric implementation
-* Rubric-based grading of Strong and Weak concept maps
-* Prompting methodology evaluation
-* Comparison of grading outputs across models
-
-### In Progress
-
-* Multi-AI consensus grading
-* AI-human collaborative grading
-* Comparison against human-generated scores
-* Expanded testing on additional concept maps
-
-## Repository Structure
-
-```text
-maps/
-â”œâ”€â”€ ConceptMapStrong.pdf
-â””â”€â”€ ConceptMapWeak.pdf
-
-extraction/
-â”œâ”€â”€ detect_content_qwen.py
-â””â”€â”€ detect_content_nemotron.py
-
-grading/
-â”œâ”€â”€ grade_qwen.py
-â””â”€â”€ grade_nemotron.py
-
-rubric/
-â””â”€â”€ concept_map_rubric.json
-
-outputs/
-â”œâ”€â”€ gradingV1/
-â”œâ”€â”€ gradingV2/
-â”œâ”€â”€ gradingV3/
-â””â”€â”€ extraction outputs
-```
+- 🔄 Expanded validation dataset
+- 🔄 Inter-model agreement analytics
 
 ## Current Pipeline
 
 ```text
 Concept Map PDF
-        â†“
+    |
+    v
 PDF-to-Image Conversion
-        â†“
-Vision-Language Model
-(Gemma / Nemotron VL)
-        â†“
+    |
+    v
+Vision Language Model
+    (Gemma 4 26B A4B OR Nemotron Nano 12B V2 VL)
+    |
+    v
 Concept Extraction
-        â†“
+    |
+    v
 Relationship Detection
-        â†“
+    |
+    v
 Rubric-Based Grading
-        â†“
+    |
+    v
 Structured JSON Output
+    |
+    v
+Interactive Web Dashboard
 ```
 
-## Current Findings
+## Completed Features
 
-* Gemma and Nemotron VL are the current active multimodal grading models.
-* Model outputs should continue to be compared for agreement, disagreement, and evidence quality.
-* Historical Qwen and earlier Nemotron outputs are preserved for prior comparisons.
-* Both models successfully distinguish Strong and Weak concept maps using the grading rubric.
-* Model agreement was higher during grading than during initial content extraction.
+- PDF concept map upload
+- PDF-to-image conversion
+- Dual-model evaluation (Gemma + Nemotron)
+- Automated concept extraction
+- Relationship detection
+- Rubric-based scoring
+- Knowledge Acquisition grading
+- Integration grading
+- Application grading
+- Transfer grading
+- Strength identification
+- Areas for improvement generation
+- Structured JSON export
+- Interactive web dashboard
+- Multi-model comparison mode
+- Graceful handling of single-model failures
+
+## Model Information
+
+### Primary Models
+
+- `google/gemma-4-26b-a4b-it:free`
+- `nvidia/nemotron-nano-12b-v2-vl:free`
+
+Both models independently evaluate concept maps and generate rubric-aligned scoring.
+
+Users may run:
+
+- Gemma only
+- Nemotron only
+- Both models simultaneously
+
+## Repository Structure
+
+```text
+maps/
+|-- ConceptMapStrong.pdf
+`-- ConceptMapWeak.pdf
+
+extraction/
+|-- detect_content_gemma.py
+`-- detect_content_nemotron.py
+
+grading/
+|-- grade_gemma.py
+`-- grade_nemotron.py
+
+interface/
+|-- __init__.py
+|-- grading_runner.py
+`-- result_display.py
+
+rubric/
+`-- concept_map_rubric.json
+
+outputs/
+|-- gradingV1/
+|-- gradingV2/
+|-- gradingV3/
+|-- gradingV4/
+|-- gradingV5/
+`-- web_demo/
+
+app.py
+requirements.txt
+runtime.txt
+```
 
 ## Web Demo
 
-The Streamlit demo accepts any concept map PDF, runs Gemma, Nemotron, or both through
-OpenRouter, and displays rubric scores, reasoning, evidence, strengths, and areas for
-improvement. Valid results are saved under `outputs/web_demo/`.
+The Streamlit demo accepts any concept map PDF, runs Gemma, Nemotron, or both through OpenRouter, and displays rubric scores, reasoning, evidence, strengths, and areas for improvement. Valid results are saved under `outputs/web_demo/`.
 
-If one selected model fails, the app keeps any successful model result visible and
-shows a warning for the failed model. Raw failed responses are saved under
-`outputs/web_demo/debug/` for troubleshooting. Nemotron may intermittently fail to
-return usable JSON on dense concept maps; when that happens, select `Nemotron` only
-and run the evaluation again to retry it independently.
+If one selected model fails, the app keeps any successful model result visible and shows a warning for the failed model. Raw failed responses are saved under `outputs/web_demo/debug/` for troubleshooting.
 
-Install the dependencies and configure the OpenRouter API key:
+Install dependencies and configure the OpenRouter API key:
 
 ```powershell
 pip install -r requirements.txt
@@ -112,8 +133,20 @@ $env:OPENROUTER_API_KEY="your-api-key"
 ```
 
 You can instead place `OPENROUTER_API_KEY=your-api-key` in the project `.env` file.
-Then start the app from the repository root:
+
+Start the app from the repository root:
 
 ```powershell
 streamlit run app.py
 ```
+
+## Command-Line Usage
+
+Run the grading scripts from the repository root:
+
+```powershell
+python grading/grade_gemma.py
+python grading/grade_nemotron.py
+```
+
+New grading outputs are organized under `outputs/gradingV5/`. Historical outputs in earlier grading folders are preserved for comparison.

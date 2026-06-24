@@ -32,10 +32,7 @@ GRADER_MODULES = {
     "Nemotron": grade_nemotron,
 }
 
-MODEL_SELECTION_ALIASES = {
-    "Gemma (Recommended)": "Gemma",
-    "Nemotron (Experimental)": "Nemotron",
-}
+MODEL_SELECTION_ALIASES: dict[str, str] = {}
 
 MODEL_CONFIGS = {
     "Gemma": {
