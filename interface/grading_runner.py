@@ -28,17 +28,17 @@ OUTPUT_DIR = PROJECT_ROOT / "outputs" / "web_demo"
 DEBUG_DIR = OUTPUT_DIR / "debug"
 
 GRADER_MODULES = {
-    "Qwen": grade_qwen,
+    "Gemma": grade_qwen,
     "Nemotron": grade_nemotron,
 }
 
 MODEL_SELECTION_ALIASES = {
-    "Qwen (Recommended)": "Qwen",
+    "Gemma (Recommended)": "Gemma",
     "Nemotron (Experimental)": "Nemotron",
 }
 
 MODEL_CONFIGS = {
-    "Qwen": {
+    "Gemma": {
         "model_id": grade_qwen.MODEL,
         "max_tokens": 2000,
     },
@@ -121,7 +121,7 @@ EvaluationOutcome = EvaluationResult | EvaluationFailure
 def selected_model_names(selection: str) -> list[str]:
     """Translate the UI selection into model registry keys."""
     if selection == "Both":
-        return ["Qwen", "Nemotron"]
+        return ["Gemma", "Nemotron"]
     selection = MODEL_SELECTION_ALIASES.get(selection, selection)
     if selection not in MODEL_CONFIGS:
         raise GradingError(f"Unknown model selection: {selection}")

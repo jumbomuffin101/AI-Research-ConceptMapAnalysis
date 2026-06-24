@@ -14,20 +14,20 @@ def create_client():
         base_url="https://openrouter.ai/api/v1"
     )
 
-MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+MODEL = "nvidia/nemotron-nano-12b-v2-vl:free"
 
 MAPS = [
     {
         "label": "Map 1",
         "map_file": "ConceptMap1.pdf",
         "path": "maps/ConceptMap1.pdf",
-        "output": "outputs/gradingV4/grounded_map1_nemotron.json"
+        "output": "outputs/gradingV5/grounded_map1_nemotron_vl.json"
     },
     {
         "label": "Map 2",
         "map_file": "ConceptMap2.pdf",
         "path": "maps/ConceptMap2.pdf",
-        "output": "outputs/gradingV4/grounded_map2_nemotron.json"
+        "output": "outputs/gradingV5/grounded_map2_nemotron_vl.json"
     }
 ]
 
@@ -252,7 +252,7 @@ def request_grade(client, prompt, image):
 
 def run_all():
     client = create_client()
-    Path("outputs/gradingV4").mkdir(parents=True, exist_ok=True)
+    Path("outputs/gradingV5").mkdir(parents=True, exist_ok=True)
 
     for item in MAPS:
         image = pdf_to_base64(item["path"])

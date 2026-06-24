@@ -12,9 +12,9 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1"
 )
 
-MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+MODEL = "nvidia/nemotron-nano-12b-v2-vl:free"
 PDF_PATH = "maps/ConceptMapWeak.pdf"
-OUTPUT_PATH = "outputs/detected_content_weak_nemotron.json"
+OUTPUT_PATH = "outputs/detected_content_weak_nemotron_vl.json"
 
 def pdf_to_base64(pdf_path):
     doc = fitz.open(pdf_path)

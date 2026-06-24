@@ -15,20 +15,20 @@ def create_client():
         timeout=300
     )
 
-MODEL = "qwen/qwen3-vl-8b-instruct"
+MODEL = "google/gemma-4-31b-it:free"
 
 MAPS = [
     {
         "label": "Map 1",
         "map_file": "ConceptMap1.pdf",
         "path": "maps/ConceptMap1.pdf",
-        "output": "outputs/gradingV4/grounded_map1_qwen.json"
+        "output": "outputs/gradingV5/grounded_map1_gemma.json"
     },
     {
         "label": "Map 2",
         "map_file": "ConceptMap2.pdf",
         "path": "maps/ConceptMap2.pdf",
-        "output": "outputs/gradingV4/grounded_map2_qwen.json"
+        "output": "outputs/gradingV5/grounded_map2_gemma.json"
     }
 ]
 
@@ -186,7 +186,7 @@ def request_grade(client, prompt, image):
 
 def run_all():
     client = create_client()
-    Path("outputs/gradingV4").mkdir(parents=True, exist_ok=True)
+    Path("outputs/gradingV5").mkdir(parents=True, exist_ok=True)
 
     for item in MAPS:
         image = pdf_to_base64(item["path"])

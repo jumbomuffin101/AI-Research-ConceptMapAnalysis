@@ -16,8 +16,8 @@ The current system uses multimodal vision-language models to analyze medical con
 
 ### Content Extraction and Grading
 
-* Qwen-VL (`qwen/qwen3-vl-8b-instruct`)
-* Nemotron (`nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`)
+* Gemma (`google/gemma-4-31b-it:free`)
+* Nemotron VL (`nvidia/nemotron-nano-12b-v2-vl:free`)
 
 ## Current Progress
 
@@ -73,7 +73,7 @@ Concept Map PDF
 PDF-to-Image Conversion
         â†“
 Vision-Language Model
-(Qwen-VL / Nemotron)
+(Gemma / Nemotron VL)
         â†“
 Concept Extraction
         â†“
@@ -86,15 +86,15 @@ Structured JSON Output
 
 ## Current Findings
 
-* Both Qwen-VL and Nemotron successfully identify concept map structure and major concepts.
-* Qwen generally produces more detailed extraction outputs.
-* Nemotron generally produces more concise outputs.
+* Gemma and Nemotron VL are the current active multimodal grading models.
+* Model outputs should continue to be compared for agreement, disagreement, and evidence quality.
+* Historical Qwen and earlier Nemotron outputs are preserved for prior comparisons.
 * Both models successfully distinguish Strong and Weak concept maps using the grading rubric.
 * Model agreement was higher during grading than during initial content extraction.
 
 ## Web Demo
 
-The Streamlit demo accepts any concept map PDF, runs Qwen, Nemotron, or both through
+The Streamlit demo accepts any concept map PDF, runs Gemma, Nemotron, or both through
 OpenRouter, and displays rubric scores, reasoning, evidence, strengths, and areas for
 improvement. Valid results are saved under `outputs/web_demo/`.
 

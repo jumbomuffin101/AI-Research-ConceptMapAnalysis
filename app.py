@@ -22,11 +22,11 @@ st.write(
 uploaded_file = st.file_uploader("Concept map PDF", type=["pdf"])
 model_selection = st.radio(
     "Model",
-    options=["Qwen (Recommended)", "Nemotron (Experimental)", "Both"],
+    options=["Gemma (Recommended)", "Nemotron (Experimental)", "Both"],
     horizontal=True,
 )
 st.info(
-    "Qwen: Recommended for evidence-grounded grading\n\n"
+    "Gemma: Recommended for evidence-grounded grading\n\n"
     "Nemotron: Experimental secondary grader\n\n"
     "Both: Runs both models and displays any successful results even if one model fails"
 )

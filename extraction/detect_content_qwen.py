@@ -12,9 +12,9 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1"
 )
 
-MODEL = "qwen/qwen3-vl-8b-instruct"
+MODEL = "google/gemma-4-31b-it:free"
 PDF_PATH = "maps/ConceptMapWeak.pdf"
-OUTPUT_PATH = "outputs/detected_content_weak_qwen.json"
+OUTPUT_PATH = "outputs/detected_content_weak_gemma.json"
 
 
 def pdf_to_base64(pdf_path):
