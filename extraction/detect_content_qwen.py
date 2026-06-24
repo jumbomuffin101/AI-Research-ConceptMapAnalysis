@@ -1,4 +1,4 @@
-from openai import OpenAI
+﻿from openai import OpenAI
 from dotenv import load_dotenv
 import os
 import base64
@@ -12,7 +12,7 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1"
 )
 
-MODEL = "qwen/qwen2.5-vl-72b-instruct"
+MODEL = "qwen/qwen3-vl-8b-instruct"
 PDF_PATH = "maps/ConceptMapWeak.pdf"
 OUTPUT_PATH = "outputs/detected_content_weak_qwen.json"
 

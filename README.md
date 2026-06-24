@@ -1,4 +1,4 @@
-# AI Research Concept Map Analysis
+﻿# AI Research Concept Map Analysis
 
 This project investigates how AI-generated concept map evaluations differ from human-generated grading and how collaborative grading strategies compare across multiple AI and human evaluators.
 
@@ -16,7 +16,7 @@ The current system uses multimodal vision-language models to analyze medical con
 
 ### Content Extraction and Grading
 
-* Qwen-VL (`qwen/qwen2.5-vl-72b-instruct`)
+* Qwen-VL (`qwen/qwen3-vl-8b-instruct`)
 * Nemotron (`nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`)
 
 ## Current Progress
@@ -44,43 +44,43 @@ The current system uses multimodal vision-language models to analyze medical con
 
 ```text
 maps/
-├── ConceptMapStrong.pdf
-└── ConceptMapWeak.pdf
+â”œâ”€â”€ ConceptMapStrong.pdf
+â””â”€â”€ ConceptMapWeak.pdf
 
 extraction/
-├── detect_content_qwen.py
-└── detect_content_nemotron.py
+â”œâ”€â”€ detect_content_qwen.py
+â””â”€â”€ detect_content_nemotron.py
 
 grading/
-├── grade_qwen.py
-└── grade_nemotron.py
+â”œâ”€â”€ grade_qwen.py
+â””â”€â”€ grade_nemotron.py
 
 rubric/
-└── concept_map_rubric.json
+â””â”€â”€ concept_map_rubric.json
 
 outputs/
-├── gradingV1/
-├── gradingV2/
-├── gradingV3/
-└── extraction outputs
+â”œâ”€â”€ gradingV1/
+â”œâ”€â”€ gradingV2/
+â”œâ”€â”€ gradingV3/
+â””â”€â”€ extraction outputs
 ```
 
 ## Current Pipeline
 
 ```text
 Concept Map PDF
-        ↓
+        â†“
 PDF-to-Image Conversion
-        ↓
+        â†“
 Vision-Language Model
 (Qwen-VL / Nemotron)
-        ↓
+        â†“
 Concept Extraction
-        ↓
+        â†“
 Relationship Detection
-        ↓
+        â†“
 Rubric-Based Grading
-        ↓
+        â†“
 Structured JSON Output
 ```
 

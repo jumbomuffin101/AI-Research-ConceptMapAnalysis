@@ -44,7 +44,7 @@ MODEL_CONFIGS = {
     },
     "Nemotron": {
         "model_id": grade_nemotron.MODEL,
-        "max_tokens": 2000,
+        "max_tokens": 1500,
     },
 }
 
@@ -203,6 +203,44 @@ Use this exact JSON structure:
 """
 
 
+def build_nemotron_web_prompt(map_file: str, model_id: str) -> str:
+    """Build Nemotron's compact web prompt for more reliable JSON output."""
+    schema: dict[str, Any] = {"map_file": map_file, "model": model_id}
+    for group, fields in CATEGORY_FIELDS.items():
+        schema[group] = {
+            field: {"score": 0, "reasoning": "", "evidence_from_map": []}
+            for field in fields
+        }
+    schema.update(
+        {
+            "overall_map_meets_expectations": "",
+            "strengths": ["", ""],
+            "areas_for_improvement": ["", ""],
+            "grading_notes": "",
+        }
+    )
+    rubric_categories = {group: fields for group, fields in CATEGORY_FIELDS.items()}
+
+    return (
+        "Grade the concept map using visible evidence only.\n"
+        "Return only valid minified JSON. No markdown. No prose. Keep all strings short.\n"
+        "Use scores 1-4: 1 missing/incorrect, 2 partial, 3 mostly accurate, 4 detailed and well-integrated.\n"
+        "Each category object must contain only score, reasoning, evidence_from_map.\n"
+        "Reasoning: one short sentence. evidence_from_map: max 1-2 short strings.\n"
+        "strengths: max 2 short strings. areas_for_improvement: max 2 short strings. grading_notes can be empty.\n"
+        f"Rubric categories: {json.dumps(rubric_categories, separators=(',', ':'))}\n"
+        f"JSON shape: {json.dumps(schema, separators=(',', ':'))}"
+    )
+
+
+def build_model_prompt(model_name: str, map_file: str, model_id: str) -> str:
+    """Build the web prompt for a model without changing CLI prompts."""
+    if model_name == "Nemotron":
+        # Nemotron is an experimental secondary grader and may require JSON cleanup.
+        return build_nemotron_web_prompt(map_file, model_id)
+    return build_web_prompt(map_file, model_id)
+
+
 def _strip_json_fences(raw_text: str) -> str:
     text = raw_text.strip()
     text = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.IGNORECASE)
@@ -240,6 +278,50 @@ def _extract_first_complete_json_object(text: str) -> str | None:
     return None
 
 
+def _extract_repairable_json_object(text: str) -> str | None:
+    """Extract JSON and append missing closers only when structurally obvious."""
+    start = text.find("{")
+    if start < 0:
+        return None
+
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    last_index = start
+
+    for index in range(start, len(text)):
+        char = text[index]
+        last_index = index
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            stack.append("}")
+        elif char == "[":
+            stack.append("]")
+        elif char in ("}", "]"):
+            if not stack or stack[-1] != char:
+                return None
+            stack.pop()
+            if not stack:
+                return text[start : index + 1]
+
+    if in_string or escaped or not stack:
+        return None
+
+    candidate = text[start : last_index + 1].rstrip()
+    candidate = re.sub(r",\s*$", "", candidate)
+    return candidate + "".join(reversed(stack))
+
+
 def _load_json_with_repair(raw_text: str) -> dict[str, Any]:
     """Parse JSON, then fall back to the first complete object if needed."""
     text = _strip_json_fences(raw_text)
@@ -247,6 +329,8 @@ def _load_json_with_repair(raw_text: str) -> dict[str, Any]:
         result = json.loads(text)
     except json.JSONDecodeError as first_exc:
         candidate = _extract_first_complete_json_object(text)
+        if candidate is None:
+            candidate = _extract_repairable_json_object(text)
         if candidate is None:
             raise MalformedResultError(
                 "The model returned malformed JSON "
@@ -466,7 +550,7 @@ def run_evaluation(
     for model_name in names:
         model_id = MODEL_CONFIGS[model_name]["model_id"]
         image = render_pdf_image(pdf_path, model_name)
-        prompt = build_web_prompt(Path(original_filename).name, model_id)
+        prompt = build_model_prompt(model_name, Path(original_filename).name, model_id)
         raw_text: str | None = None
         try:
             returned_model_id, raw_text = _request_model(model_name, prompt, image)

@@ -1,4 +1,4 @@
-from openai import OpenAI
+﻿from openai import OpenAI
 from dotenv import load_dotenv
 import os
 import base64
@@ -15,7 +15,7 @@ def create_client():
         timeout=300
     )
 
-MODEL = "qwen/qwen2.5-vl-72b-instruct"
+MODEL = "qwen/qwen3-vl-8b-instruct"
 
 MAPS = [
     {

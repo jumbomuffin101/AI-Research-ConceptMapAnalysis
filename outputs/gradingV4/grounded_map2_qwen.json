@@ -1,6 +1,6 @@
-{
+﻿{
   "map_file": "ConceptMap2.pdf",
-  "model": "qwen/qwen2.5-vl-72b-instruct",
+  "model": "qwen/qwen3-vl-8b-instruct",
   "knowledge_acquisition": {
     "basic_science": {"score": 3, "reasoning": "The map includes relevant and mostly synthesized knowledge from basic science.", "evidence_from_map": ["disorganized electrical activity in atria", "uncoordinated atrial contractions"]},
     "health_system_science": {"score": 2, "reasoning": "The map includes partly relevant knowledge but is too general.", "evidence_from_map": ["No direct supporting evidence visible."]},
