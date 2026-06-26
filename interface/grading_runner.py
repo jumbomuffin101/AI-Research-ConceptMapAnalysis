@@ -432,6 +432,108 @@ def _require_yes_no(value: Any, field_path: str) -> None:
         raise MalformedResultError(f"'{field_path}' must be exactly 'Yes' or 'No'.")
 
 
+def _normalize_yes_no(value: Any) -> str:
+    return value if value in {"Yes", "No"} else "No"
+
+
+def _normalize_score(value: Any) -> int:
+    if isinstance(value, bool):
+        return 1
+    if isinstance(value, (int, float)):
+        return max(1, min(4, int(round(value))))
+    if isinstance(value, str):
+        try:
+            return max(1, min(4, int(round(float(value.strip())))))
+        except ValueError:
+            return 1
+    return 1
+
+
+def normalize_nemotron_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Fill conservative defaults for incomplete Nemotron JSON outputs."""
+    normalized = dict(result)
+    changed = False
+
+    if normalized.get("overall_meets_expectations") not in {"Yes", "No"}:
+        normalized["overall_meets_expectations"] = "No"
+        changed = True
+
+    for field, default in (
+        ("strengths", []),
+        ("areas_for_improvement", []),
+        ("grading_notes", ""),
+    ):
+        if field not in normalized:
+            normalized[field] = default
+            changed = True
+
+    for group, fields in CATEGORY_FIELDS.items():
+        section = normalized.get(group)
+        if not isinstance(section, dict):
+            section = {}
+            normalized[group] = section
+            changed = True
+
+        decision = section.get("overall_decision")
+        normalized_decision = _normalize_yes_no(decision)
+        if decision != normalized_decision:
+            section["overall_decision"] = normalized_decision
+            changed = True
+
+        if (
+            section["overall_decision"] == "No"
+            and not str(section.get("if_no_explanation", "")).strip()
+        ):
+            section["if_no_explanation"] = (
+                "Model did not provide a domain-level explanation."
+            )
+            changed = True
+        elif "if_no_explanation" not in section:
+            section["if_no_explanation"] = ""
+            changed = True
+
+        for criterion in fields:
+            item = section.get(criterion)
+            if not isinstance(item, dict):
+                section[criterion] = {
+                    "score": 1,
+                    "explanation": "No valid model output provided for this criterion.",
+                    "evidence_from_map": [
+                        "No clear evidence found in the concept map."
+                    ],
+                }
+                changed = True
+                continue
+
+            score = item.get("score")
+            normalized_score = _normalize_score(score)
+            if score != normalized_score:
+                item["score"] = normalized_score
+                changed = True
+
+            if not isinstance(item.get("explanation"), str) or not item.get(
+                "explanation", ""
+            ).strip():
+                item["explanation"] = (
+                    "No valid model output provided for this criterion."
+                )
+                changed = True
+
+            evidence = item.get("evidence_from_map")
+            if not isinstance(evidence, list) or not evidence:
+                item["evidence_from_map"] = [
+                    "No clear evidence found in the concept map."
+                ]
+                changed = True
+
+    if changed:
+        normalized["grading_notes"] = (
+            "Model output was normalized because required fields were missing."
+        )
+
+    return normalized
+
+
 def parse_model_json(raw_text: str) -> dict[str, Any]:
     """Extract, parse, repair when possible, and validate grading JSON."""
     if not raw_text or not raw_text.strip():
@@ -658,7 +760,12 @@ def run_evaluation(
         raw_text: str | None = None
         try:
             returned_model_id, raw_text = _request_model(model_name, prompt, image)
-            data = parse_model_json(raw_text)
+            if model_name == "Nemotron":
+                parsed = _load_json_with_repair(raw_text)
+                data = normalize_nemotron_result(parsed)
+                data = parse_model_json(json.dumps(data))
+            else:
+                data = parse_model_json(raw_text)
             output_path = OUTPUT_DIR / (
                 f"{timestamp}_{run_id}_{file_stem}_{model_name.lower()}.json"
             )
