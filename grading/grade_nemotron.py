@@ -6,6 +6,8 @@ import fitz
 from pathlib import Path
 import re
 import json
+import time
+from datetime import datetime, timezone
 
 load_dotenv()
 
@@ -157,7 +159,7 @@ def build_prompt(map_file):
         "Rules: score each criterion with integer 1-4 only; never use 0,5,decimals,"
         "Partial,Partially Meets,Borderline,Maybe. Domain overall_decision and "
         "overall_meets_expectations must be exactly Yes or No. Each criterion needs "
-        "score, explanation, evidence_from_map. If evidence is missing, write "
+        "score, a brief explanation, and 1–2 short evidence items from the map when visible. If evidence is missing, write "
         "\"No clear evidence found in the concept map.\" Do not hallucinate evidence. "
         "If a domain is No, fill if_no_explanation. Return only valid minified JSON.\n"
         f"Rubric:\n{_compact_spring_rubric_text()}\n"
@@ -166,9 +168,58 @@ def build_prompt(map_file):
     )
 
 
-def request_grade(client, prompt, image):
+def _response_debug_text(response):
+    if response is None:
+        return "None"
+    for method_name in ("model_dump_json", "json"):
+        method = getattr(response, method_name, None)
+        if callable(method):
+            try:
+                return method(indent=2)
+            except TypeError:
+                try:
+                    return method()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    return str(response)
+
+
+def _save_attempt_debug(response, attempt, reason, debug_label="nemotron"):
+    debug_dir = Path("outputs/gradingV5/debug")
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", debug_label).strip("_") or "nemotron"
+    debug_path = debug_dir / f"{timestamp}_{safe_label}_attempt{attempt}.txt"
+    debug_path.write_text(
+        f"attempt={attempt}\nreason={reason}\n\n{_response_debug_text(response)}",
+        encoding="utf-8",
+    )
+    return debug_path
+
+
+def _response_content(response):
+    if response is None:
+        return None, "response is None"
+    choices = getattr(response, "choices", None)
+    if not choices:
+        return None, "response.choices is missing or empty"
+    first_choice = choices[0]
+    message = getattr(first_choice, "message", None)
+    if message is None:
+        return None, "choices[0].message is missing"
+    content = getattr(message, "content", None)
+    if not isinstance(content, str) or not content.strip():
+        return None, "choices[0].message.content is empty"
+    return content, ""
+
+
+def _create_completion(client, prompt, image):
     return client.chat.completions.create(
         model=MODEL,
+        temperature=0,
+        max_tokens=4000,
         messages=[
             {
                 "role": "user",
@@ -189,6 +240,35 @@ def request_grade(client, prompt, image):
     )
 
 
+def request_grade(client, prompt, image, debug_label="nemotron"):
+    wait_seconds = [5, 15, 30]
+    max_attempts = len(wait_seconds) + 1
+    last_reason = "unknown failure"
+    debug_paths = []
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = _create_completion(client, prompt, image)
+        except Exception as exc:
+            last_reason = f"API exception: {exc}"
+            debug_paths.append(_save_attempt_debug(repr(exc), attempt, last_reason, debug_label))
+        else:
+            _, reason = _response_content(response)
+            if not reason:
+                return response
+            last_reason = reason
+            debug_paths.append(_save_attempt_debug(response, attempt, reason, debug_label))
+
+        if attempt <= len(wait_seconds):
+            time.sleep(wait_seconds[attempt - 1])
+
+    raise RuntimeError(
+        "Nemotron returned no usable content after retrying. "
+        f"Last failure: {last_reason}. "
+        "Raw debug outputs saved: " + ", ".join(str(path) for path in debug_paths)
+    )
+
+
 def run_all():
     client = create_client()
     Path("outputs/gradingV5").mkdir(parents=True, exist_ok=True)
@@ -198,16 +278,15 @@ def run_all():
         prompt = build_prompt(item["map_file"])
 
         try:
-            response = request_grade(client, prompt, image)
+            response = request_grade(client, prompt, image, Path(item["output"]).stem)
 
             raw_output_path = item["output"].replace(".json", "_raw.txt")
             with open(raw_output_path, "w", encoding="utf-8") as f:
                 f.write(str(response))
 
-            result = response.choices[0].message.content
-            if result is None:
-                print(f"No content returned for {item['label']}")
-                print(response)
+            result, reason = _response_content(response)
+            if reason:
+                print(f"Nemotron returned no usable content for {item['label']}: {reason}")
                 continue
 
             cleaned_result = clean_json_output(result)
