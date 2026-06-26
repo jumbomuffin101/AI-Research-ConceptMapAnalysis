@@ -206,6 +206,45 @@ def build_spring_schema(map_file: str, model_id: str) -> dict[str, Any]:
     return schema
 
 
+def compact_spring_rubric_text(rubric: dict[str, Any]) -> str:
+    """Represent every Spring 2025 rubric criterion without JSON overhead."""
+    _ = rubric
+    return """Shared scale: L=little/irrelevant; P=partly relevant and/or too general; R=relevant and mostly synthesized; D=synthesized and detailed; C1=inaccurate/illogical connections; C2=mostly accurate but simplistic/errors; C3=accurate logical flow; C4=accurate logical comprehensive.
+knowledge_acquisition overall: Does the student's map include key knowledge from the case and content learned during this unit?
+knowledge_acquisition.basic_science: 1=L knowledge; 2=P knowledge; 3=R knowledge; 4=D knowledge from each session.
+knowledge_acquisition.health_system_science: 1=L knowledge; 2=P knowledge; 3=R knowledge; 4=D knowledge from multiple sessions.
+knowledge_acquisition.clinical_science: 1=L knowledge; 2=P knowledge; 3=R knowledge; 4=relevant, synthesized, detailed knowledge from each session.
+knowledge_acquisition.patient_case_information: 1=little/irrelevant information; 2=partly relevant with limited synthesis; 3=relevant mostly synthesized patient data; 4=synthesized, relevant, comprehensive patient data.
+knowledge_acquisition.determinants_of_health: 1=DoH absent; 2=at least one DoH but not patient-specific and/or not clinically relevant; 3=multiple DoH across map with clear impact on condition and/or care; 4=comprehensive DoH across map with clear impact on condition, care, and/or prognosis.
+integration overall: Did the learner connect key knowledge accurately & comprehensively?
+integration.prioritized_differential_diagnosis: 1=DDx absent and/or mostly incorrect; 2=too narrow or not accurately connected to patient data; 3=focused and relevant to patient; 4=focused, relevant, correctly prioritized.
+integration.illness_scripts: 1=insufficient data for illness scripts; 2=incorrect/incomplete; 3=accurate patient-data connections; 4=accurate prioritized patient-data connections for multiple diagnoses.
+integration.basic_to_foundational_science: 1=C1; 2=C2; 3=C3 from unit basic science to molecular/cellular disease basis; 4=C4 including anatomy, histology, biochemistry, genetics, physiology, and/or pharmacology.
+integration.patient_data_to_clinical_information: 1=C1; 2=C2; 3=C3 from patient data to clinical information; 4=C4 including epidemiology, symptoms, signs, diagnostics, treatments, and patient-specific risk factors.
+integration.patient_data_to_basic_science: 1=C1; 2=C2; 3=C3 from patient data to molecular/cellular disease basis; 4=C4 including anatomy, histology, biochemistry, genetics, physiology, and/or pharmacology.
+application overall: Did the learner explain key clinical data with relevant basic science?
+application.working_diagnosis_pathophysiology: 1=pathophysiology connections absent/unclear; 2=present but inaccurate and/or too simplistic; 3=flow of concepts explains pathophysiology; 4=flow explains pathophysiology and includes basic, clinical, health-system sciences.
+application.patient_data_pathophysiology: 1=pathophysiology connections absent/unclear; 2=present but inaccurate and/or too simplistic; 3=flow of concepts explains pathophysiology; 4=flow explains pathophysiology of multiple patient-data components including symptoms, signs, findings, and/or care plan.
+transfer overall: Did the learner use previously learned content to deepen understanding?
+transfer.prior_basic_science: 1=L knowledge; 2=P knowledge; 3=R knowledge; 4=D knowledge.
+transfer.prior_clinical_concepts: 1=L knowledge; 2=P knowledge; 3=R knowledge; 4=D knowledge.
+transfer.deepens_understanding: 1=L knowledge; 2=P knowledge; 3=R knowledge; 4=D knowledge connecting patient data and basic science."""
+
+
+def compact_output_contract() -> str:
+    """Describe required JSON fields compactly for Nemotron."""
+    domains = "; ".join(
+        f"{group}=[{','.join(fields)}]+overall_decision+if_no_explanation"
+        for group, fields in CATEGORY_FIELDS.items()
+    )
+    return (
+        "Top keys: map_file,model,knowledge_acquisition,integration,application,"
+        "transfer,overall_meets_expectations,strengths,areas_for_improvement,"
+        f"grading_notes. Domains: {domains}. "
+        "Every criterion object has exactly score,explanation,evidence_from_map."
+    )
+
+
 def build_web_prompt(map_file: str, model_id: str) -> str:
     """Build the shorter Streamlit/OpenRouter-compatible grading prompt."""
     schema = build_spring_schema(map_file, model_id)
@@ -243,19 +282,19 @@ Use this exact JSON structure:
 
 def build_nemotron_web_prompt(map_file: str, model_id: str) -> str:
     """Build Nemotron's compact web prompt for more reliable JSON output."""
-    schema = build_spring_schema(map_file, model_id)
     rubric = load_summative_rubric()
 
     return (
-        "Use the Spring 2025 summative concept map rubric exactly.\n"
-        "Return only valid minified JSON. No markdown. No prose. Keep all strings short.\n"
-        "Scores must be integers 1,2,3,4 only. Never use 0,5,decimals,Partial,Borderline,Maybe.\n"
-        "Each category object must contain only score, explanation, evidence_from_map.\n"
-        "Domain overall_decision and overall_meets_expectations must be exactly Yes or No.\n"
-        "If evidence is missing, use: No clear evidence found in the concept map.\n"
-        "If a domain overall_decision is No, provide if_no_explanation.\n"
-        f"Rubric: {json.dumps(rubric, separators=(',', ':'))}\n"
-        f"JSON shape: {json.dumps(schema, separators=(',', ':'))}"
+        "Spring 2025 SUMMATIVE concept map grading. Use only visible map evidence.\n"
+        "Rules: score each criterion with integer 1-4 only; never use 0,5,decimals,"
+        "Partial,Partially Meets,Borderline,Maybe. Domain overall_decision and "
+        "overall_meets_expectations must be exactly Yes or No. Each criterion needs "
+        "score, explanation, evidence_from_map. If evidence is missing, write "
+        "\"No clear evidence found in the concept map.\" Do not hallucinate evidence. "
+        "If a domain is No, fill if_no_explanation. Return only valid minified JSON.\n"
+        f"Rubric:\n{compact_spring_rubric_text(rubric)}\n"
+        f"JSON contract: {compact_output_contract()} "
+        f'Use map_file="{map_file}" and model="{model_id}".'
     )
 
 
