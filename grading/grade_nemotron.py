@@ -5,30 +5,59 @@ import base64
 import fitz
 from pathlib import Path
 import re
+import json
 
 load_dotenv()
+
 
 def create_client():
     return OpenAI(
         api_key=os.getenv("OPENROUTER_API_KEY"),
-        base_url="https://openrouter.ai/api/v1"
+        base_url="https://openrouter.ai/api/v1",
     )
 
+
 MODEL = "nvidia/nemotron-nano-12b-v2-vl:free"
+
+CATEGORY_FIELDS = {
+    "knowledge_acquisition": [
+        "basic_science",
+        "health_system_science",
+        "clinical_science",
+        "patient_case_information",
+        "determinants_of_health",
+    ],
+    "integration": [
+        "prioritized_differential_diagnosis",
+        "illness_scripts",
+        "basic_to_foundational_science",
+        "patient_data_to_clinical_information",
+        "patient_data_to_basic_science",
+    ],
+    "application": [
+        "working_diagnosis_pathophysiology",
+        "patient_data_pathophysiology",
+    ],
+    "transfer": [
+        "prior_basic_science",
+        "prior_clinical_concepts",
+        "deepens_understanding",
+    ],
+}
 
 MAPS = [
     {
         "label": "Map 1",
         "map_file": "ConceptMap1.pdf",
         "path": "maps/ConceptMap1.pdf",
-        "output": "outputs/gradingV5/grounded_map1_nemotron_vl.json"
+        "output": "outputs/gradingV5/grounded_map1_nemotron_vl.json",
     },
     {
         "label": "Map 2",
         "map_file": "ConceptMap2.pdf",
         "path": "maps/ConceptMap2.pdf",
-        "output": "outputs/gradingV5/grounded_map2_nemotron_vl.json"
-    }
+        "output": "outputs/gradingV5/grounded_map2_nemotron_vl.json",
+    },
 ]
 
 
@@ -54,177 +83,61 @@ def clean_json_output(text):
     return text
 
 
-rubric = Path("rubric/concept_map_rubric.json").read_text(
-    encoding="utf-8"
-)
+rubric = Path("rubric/concept_map_rubric.json").read_text(encoding="utf-8")
 
-prompt_template = """
-You are evaluating a student medical concept map using the rubric provided below.
 
-Review the concept map and assign scores according to the rubric definitions.
+def _spring_rubric():
+    rubric_data = json.loads(rubric)
+    return {
+        group: rubric_data[group]
+        for group in CATEGORY_FIELDS
+        if isinstance(rubric_data.get(group), dict)
+    }
 
-Use evidence that is visible in the concept map when assigning scores.
 
-For each scored category, include 1-2 short evidence phrases copied from visible map text in evidence_from_map when possible.
-
-If no visible evidence supports a category, write:
-"No direct supporting evidence visible."
-
-Provide brief reasoning for each score.
-
-Rubric:
-{rubric}
-
-Case-specific expectations include:
-- atrial fibrillation
-- rapid ventricular response
-- hypertension
-- tobacco and alcohol use
-- thyroid disease
-- shock findings such as low blood pressure, clammy skin, poor pulses
-- pulmonary edema
-- need for immediate DC shock
-- anticoagulation
-- differential diagnosis
-- illness scripts
-- pathophysiology connecting atrial fibrillation, heart failure, and poor perfusion
-
-Return ONLY raw valid JSON.
-Do not include markdown.
-Do not include ```json fences.
-Do not include introductory text.
-Do not include any text before or after the JSON object.
-
-Return valid JSON only using this exact structure:
-
-{{
-  "map_file": "{map_file}",
-  "model": "{model}",
-  "knowledge_acquisition": {{
-    "basic_science": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "health_system_science": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "clinical_science": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "patient_case_information": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "determinants_of_health": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "overall": {{
-      "meets_expectations": "",
-      "reasoning": ""
-    }}
-  }},
-  "integration": {{
-    "prioritized_differential_diagnosis": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "illness_scripts": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "basic_to_foundational_science": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "patient_data_to_clinical_information": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "patient_data_to_basic_science": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "overall": {{
-      "meets_expectations": "",
-      "reasoning": ""
-    }}
-  }},
-  "application": {{
-    "working_diagnosis_pathophysiology": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "patient_data_pathophysiology": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "overall": {{
-      "meets_expectations": "",
-      "reasoning": ""
-    }}
-  }},
-  "transfer": {{
-    "prior_basic_science": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "prior_clinical_concepts": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "deepens_understanding": {{
-      "score": 0,
-      "reasoning": "",
-      "evidence_from_map": []
-    }},
-    "overall": {{
-      "meets_expectations": "",
-      "reasoning": ""
-    }}
-  }},
-  "overall_map_meets_expectations": "",
-  "strengths": [],
-  "areas_for_improvement": [],
-  "grading_notes": ""
-}}
-
-Important:
-- Every numeric score must be an integer from 1 to 4.
-- Use the rubric definitions as the source of truth for scoring.
-- Do not add fields outside the requested JSON structure.
-
-Scoring rules:
-- Every numeric score must be an integer from 1 to 4.
-- 1 = missing, incorrect, irrelevant, or minimal.
-- 2 = partial, superficial, too general, or contains notable errors.
-- 3 = relevant, mostly accurate, and mostly synthesized.
-- 4 = detailed, comprehensive, accurate, and well-integrated.
-"""
+def _spring_schema(map_file):
+    schema = {"map_file": map_file, "model": MODEL}
+    for group, fields in CATEGORY_FIELDS.items():
+        schema[group] = {
+            field: {"score": 1, "explanation": "", "evidence_from_map": []}
+            for field in fields
+        }
+        schema[group]["overall_decision"] = "No"
+        schema[group]["if_no_explanation"] = ""
+    schema.update(
+        {
+            "overall_meets_expectations": "No",
+            "strengths": ["", ""],
+            "areas_for_improvement": ["", ""],
+            "grading_notes": "",
+        }
+    )
+    return schema
 
 
 def build_prompt(map_file):
-    return prompt_template.format(
-        rubric=rubric,
-        map_file=map_file,
-        model=MODEL
-    )
+    return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
+Do not invent additional grading criteria.
+
+Rubric:
+{json.dumps(_spring_rubric(), indent=2)}
+
+Global rules:
+- Every criterion score must be an integer 1, 2, 3, or 4 only.
+- Every domain overall_decision must be exactly "Yes" or "No".
+- overall_meets_expectations must be exactly "Yes" or "No".
+- Do not output Partial, Partially Meets, Borderline, Maybe, score 0, score 5, decimal scores, or any score outside 1-4.
+- If evidence is missing, write "No clear evidence found in the concept map."
+- Do not hallucinate evidence not visible in the concept map.
+
+Each criterion must include score, explanation, and evidence_from_map.
+Each domain must include overall_decision and if_no_explanation.
+If overall_decision is "No", if_no_explanation is required.
+The final overall decision answers: This map meets expectations.
+
+Return ONLY raw valid JSON using this exact structure:
+{json.dumps(_spring_schema(map_file), indent=2)}
+"""
 
 
 def request_grade(client, prompt, image):
@@ -236,17 +149,17 @@ def request_grade(client, prompt, image):
                 "content": [
                     {
                         "type": "text",
-                        "text": prompt
+                        "text": prompt,
                     },
                     {
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image/png;base64,{image}"
-                        }
-                    }
-                ]
+                        },
+                    },
+                ],
             }
-        ]
+        ],
     )
 
 
@@ -256,7 +169,6 @@ def run_all():
 
     for item in MAPS:
         image = pdf_to_base64(item["path"])
-
         prompt = build_prompt(item["map_file"])
 
         try:
@@ -267,14 +179,12 @@ def run_all():
                 f.write(str(response))
 
             result = response.choices[0].message.content
-
             if result is None:
                 print(f"No content returned for {item['label']}")
                 print(response)
                 continue
 
             cleaned_result = clean_json_output(result)
-
             with open(item["output"], "w", encoding="utf-8") as f:
                 f.write(cleaned_result)
 

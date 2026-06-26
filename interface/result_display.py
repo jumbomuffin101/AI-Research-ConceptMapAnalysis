@@ -43,19 +43,17 @@ def _display_category(group_key: str, section: dict[str, Any]) -> None:
 
     st.dataframe(rows, hide_index=True, use_container_width=True)
 
-    overall = section.get("overall", {})
-    if isinstance(overall, dict):
-        status = overall.get("meets_expectations")
-        if status:
-            st.markdown(f"**Meets expectations:** {status}")
-        if overall.get("reasoning"):
-            st.write(overall["reasoning"])
+    domain_decision = section.get("overall_decision")
+    if domain_decision:
+        st.markdown(f"**Domain overall decision:** {domain_decision}")
+    if section.get("if_no_explanation"):
+        st.write(section["if_no_explanation"])
 
     for field in CATEGORY_FIELDS[group_key]:
         item = section.get(field, {})
         with st.expander(f"{_label(field)} - Score {item.get('score', '-')}"):
-            st.markdown("**Reasoning**")
-            st.write(item.get("reasoning") or "No reasoning provided.")
+            st.markdown("**Explanation**")
+            st.write(item.get("explanation") or "No explanation provided.")
             st.markdown("**Evidence from map**")
             evidence = _as_list(item.get("evidence_from_map"))
             if evidence:
@@ -93,8 +91,8 @@ def display_result(result: EvaluationResult) -> None:
     st.header(result.model_name)
     st.caption(result.model_id)
     st.metric(
-        "Overall meets expectations",
-        data.get("overall_map_meets_expectations", "Not reported"),
+        "Final Overall: This map meets expectations",
+        data.get("overall_meets_expectations", "Not reported"),
     )
 
     tabs = st.tabs([GROUP_LABELS[key] for key in CATEGORY_FIELDS])

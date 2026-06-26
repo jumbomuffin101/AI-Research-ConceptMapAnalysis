@@ -24,6 +24,7 @@ from grading import grade_nemotron, grade_qwen
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RUBRIC_PATH = PROJECT_ROOT / "rubric" / "concept_map_rubric.json"
 OUTPUT_DIR = PROJECT_ROOT / "outputs" / "web_demo"
 DEBUG_DIR = OUTPUT_DIR / "debug"
 
@@ -70,6 +71,25 @@ CATEGORY_FIELDS = {
         "deepens_understanding",
     ],
 }
+
+DOMAIN_OVERALL_QUESTIONS = {
+    "knowledge_acquisition": (
+        "Does the student's map include key knowledge from the case and content "
+        "learned during this unit?"
+    ),
+    "integration": "Did the learner connect key knowledge accurately & comprehensively?",
+    "application": "Did the learner explain key clinical data with relevant basic science?",
+    "transfer": "Did the learner use previously learned content to deepen understanding?",
+}
+
+FORBIDDEN_DECISION_TEXT = (
+    "Partial",
+    "Partially Meets",
+    "Borderline",
+    "Maybe",
+    "Almost",
+    "Meets some expectations",
+)
 
 
 class GradingError(RuntimeError):
@@ -149,49 +169,70 @@ def render_pdf_image(pdf_path: Path, model_name: str) -> str:
         raise InvalidPDFError("The uploaded file is not a valid, readable PDF.") from exc
 
 
-def build_web_prompt(map_file: str, model_id: str) -> str:
-    """Build the shorter Streamlit/OpenRouter-compatible grading prompt."""
+def load_summative_rubric() -> dict[str, Any]:
+    """Load the Spring 2025 summative rubric used by grading prompts."""
+    try:
+        rubric = json.loads(RUBRIC_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise GradingError(f"Rubric not found at {RUBRIC_PATH}.") from exc
+    except json.JSONDecodeError as exc:
+        raise GradingError("The rubric file contains invalid JSON.") from exc
+
+    return {
+        group: rubric[group]
+        for group in CATEGORY_FIELDS
+        if isinstance(rubric.get(group), dict)
+    }
+
+
+def build_spring_schema(map_file: str, model_id: str) -> dict[str, Any]:
+    """Build the Spring 2025 summative grading JSON shape."""
     schema: dict[str, Any] = {"map_file": map_file, "model": model_id}
     for group, fields in CATEGORY_FIELDS.items():
         schema[group] = {
             field: {
-                "score": 0,
-                "reasoning": "",
+                "score": 1,
+                "explanation": "",
                 "evidence_from_map": [],
             }
             for field in fields
         }
-    schema.update(
-        {
-            "overall_map_meets_expectations": "",
-            "strengths": ["", ""],
-            "areas_for_improvement": ["", ""],
-            "grading_notes": "",
-        }
-    )
+        schema[group]["overall_decision"] = "No"
+        schema[group]["if_no_explanation"] = ""
+    schema["overall_meets_expectations"] = "No"
+    schema["strengths"] = ["", ""]
+    schema["areas_for_improvement"] = ["", ""]
+    schema["grading_notes"] = ""
+    return schema
 
-    rubric_categories = {group: fields for group, fields in CATEGORY_FIELDS.items()}
 
-    return f"""Grade this medical concept map using only visible evidence.
+def build_web_prompt(map_file: str, model_id: str) -> str:
+    """Build the shorter Streamlit/OpenRouter-compatible grading prompt."""
+    schema = build_spring_schema(map_file, model_id)
+    rubric = load_summative_rubric()
 
-Rubric categories:
-{json.dumps(rubric_categories, indent=2)}
+    return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
+Do not invent additional grading criteria.
 
-Scoring:
-1 = missing, incorrect, irrelevant, or minimal.
-2 = partial, superficial, too general, or contains notable errors.
-3 = relevant, mostly accurate, and mostly synthesized.
-4 = detailed, comprehensive, accurate, and well-integrated.
+Rubric:
+{json.dumps(rubric, indent=2)}
+
+Global rules:
+- Every criterion score must be an integer 1, 2, 3, or 4 only.
+- Every domain overall_decision must be exactly "Yes" or "No".
+- overall_meets_expectations must be exactly "Yes" or "No".
+- Do not output Partial, Partially Meets, Borderline, Maybe, score 0, score 5, decimal scores, or any score outside 1-4.
+- If evidence is missing, write "No clear evidence found in the concept map."
+- Do not hallucinate evidence not visible in the concept map.
 
 For every scored category, return only:
 - score: integer 1-4
-- reasoning: one short sentence
-- evidence_from_map: at most 2 short strings copied from visible map text, or ["No direct supporting evidence visible."]
+- explanation: one short explanation
+- evidence_from_map: short strings copied or paraphrased from visible map content
 
-Use compact summary fields:
-- strengths: maximum 2 short strings
-- areas_for_improvement: maximum 2 short strings
-- grading_notes: one short sentence or an empty string
+Each domain must include:
+- overall_decision: "Yes" or "No"
+- if_no_explanation: required when overall_decision is "No"; otherwise empty string
 
 Keep all JSON string values short. Do not write paragraphs.
 Return JSON only. Do not include markdown or text outside JSON.
@@ -202,30 +243,18 @@ Use this exact JSON structure:
 
 def build_nemotron_web_prompt(map_file: str, model_id: str) -> str:
     """Build Nemotron's compact web prompt for more reliable JSON output."""
-    schema: dict[str, Any] = {"map_file": map_file, "model": model_id}
-    for group, fields in CATEGORY_FIELDS.items():
-        schema[group] = {
-            field: {"score": 0, "reasoning": "", "evidence_from_map": []}
-            for field in fields
-        }
-    schema.update(
-        {
-            "overall_map_meets_expectations": "",
-            "strengths": ["", ""],
-            "areas_for_improvement": ["", ""],
-            "grading_notes": "",
-        }
-    )
-    rubric_categories = {group: fields for group, fields in CATEGORY_FIELDS.items()}
+    schema = build_spring_schema(map_file, model_id)
+    rubric = load_summative_rubric()
 
     return (
-        "Grade the concept map using visible evidence only.\n"
+        "Use the Spring 2025 summative concept map rubric exactly.\n"
         "Return only valid minified JSON. No markdown. No prose. Keep all strings short.\n"
-        "Use scores 1-4: 1 missing/incorrect, 2 partial, 3 mostly accurate, 4 detailed and well-integrated.\n"
-        "Each category object must contain only score, reasoning, evidence_from_map.\n"
-        "Reasoning: one short sentence. evidence_from_map: max 1-2 short strings.\n"
-        "strengths: max 2 short strings. areas_for_improvement: max 2 short strings. grading_notes can be empty.\n"
-        f"Rubric categories: {json.dumps(rubric_categories, separators=(',', ':'))}\n"
+        "Scores must be integers 1,2,3,4 only. Never use 0,5,decimals,Partial,Borderline,Maybe.\n"
+        "Each category object must contain only score, explanation, evidence_from_map.\n"
+        "Domain overall_decision and overall_meets_expectations must be exactly Yes or No.\n"
+        "If evidence is missing, use: No clear evidence found in the concept map.\n"
+        "If a domain overall_decision is No, provide if_no_explanation.\n"
+        f"Rubric: {json.dumps(rubric, separators=(',', ':'))}\n"
         f"JSON shape: {json.dumps(schema, separators=(',', ':'))}"
     )
 
@@ -346,6 +375,24 @@ def _load_json_with_repair(raw_text: str) -> dict[str, Any]:
     return result
 
 
+def _contains_forbidden_decision_text(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_forbidden_decision_text(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_forbidden_decision_text(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    return any(
+        re.search(rf"\b{re.escape(term)}\b", value, flags=re.IGNORECASE)
+        for term in FORBIDDEN_DECISION_TEXT
+    )
+
+
+def _require_yes_no(value: Any, field_path: str) -> None:
+    if value not in {"Yes", "No"}:
+        raise MalformedResultError(f"'{field_path}' must be exactly 'Yes' or 'No'.")
+
+
 def parse_model_json(raw_text: str) -> dict[str, Any]:
     """Extract, parse, repair when possible, and validate grading JSON."""
     if not raw_text or not raw_text.strip():
@@ -355,10 +402,14 @@ def parse_model_json(raw_text: str) -> dict[str, Any]:
         raise MalformedResultError("The model response did not contain a JSON object.")
 
     result = _load_json_with_repair(raw_text)
+    if _contains_forbidden_decision_text(result):
+        raise MalformedResultError(
+            "The model result contains a forbidden non-binary decision label."
+        )
 
     missing = [
         key
-        for key in (*CATEGORY_FIELDS.keys(), "overall_map_meets_expectations")
+        for key in (*CATEGORY_FIELDS.keys(), "overall_meets_expectations")
         if key not in result
     ]
     if missing:
@@ -366,16 +417,33 @@ def parse_model_json(raw_text: str) -> dict[str, Any]:
             "The model result is missing required fields: " + ", ".join(missing)
         )
 
+    _require_yes_no(
+        result.get("overall_meets_expectations"),
+        "overall_meets_expectations",
+    )
+
     for group, fields in CATEGORY_FIELDS.items():
         section = result.get(group)
         if not isinstance(section, dict):
             raise MalformedResultError(f"'{group}' must be a JSON object.")
+        _require_yes_no(section.get("overall_decision"), f"{group}.overall_decision")
+        if (
+            section.get("overall_decision") == "No"
+            and not str(section.get("if_no_explanation", "")).strip()
+        ):
+            raise MalformedResultError(
+                f"'{group}.if_no_explanation' is required when overall_decision is 'No'."
+            )
         for field in fields:
             item = section.get(field)
             score = item.get("score") if isinstance(item, dict) else None
             if not isinstance(score, int) or isinstance(score, bool) or not 1 <= score <= 4:
                 raise MalformedResultError(
                     f"'{group}.{field}.score' must be an integer from 1 to 4."
+                )
+            if not isinstance(item.get("explanation"), str):
+                raise MalformedResultError(
+                    f"'{group}.{field}.explanation' must be a string."
                 )
     return result
 
