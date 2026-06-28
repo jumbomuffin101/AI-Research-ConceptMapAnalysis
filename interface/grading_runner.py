@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from uuid import uuid4
 
 import fitz
@@ -682,12 +682,17 @@ def _ensure_api_key() -> None:
         )
 
 
-def _create_client() -> OpenAI:
+def _create_client(*, disable_sdk_retries: bool = False) -> OpenAI:
     _ensure_api_key()
+    options: dict[str, Any] = {
+        "api_key": os.getenv("OPENROUTER_API_KEY"),
+        "base_url": "https://openrouter.ai/api/v1",
+        "timeout": 300,
+    }
+    if disable_sdk_retries:
+        options["max_retries"] = 0
     return OpenAI(
-        api_key=os.getenv("OPENROUTER_API_KEY"),
-        base_url="https://openrouter.ai/api/v1",
-        timeout=300,
+        **options
     )
 
 
@@ -710,6 +715,7 @@ def _request_model(
     prompt: str,
     image: str,
     max_tokens: int | None = None,
+    request_timeout: float | None = None,
 ) -> tuple[str, str]:
     config = MODEL_CONFIGS[model_name]
     content: list[dict[str, Any]] = [
@@ -721,12 +727,17 @@ def _request_model(
     ]
 
     try:
-        client = _create_client()
+        client = _create_client(disable_sdk_retries=request_timeout is not None)
+        request_options: dict[str, Any] = {
+            "model": config["model_id"],
+            "max_tokens": max_tokens or config["max_tokens"],
+            "temperature": 0,
+            "messages": [{"role": "user", "content": content}],
+        }
+        if request_timeout is not None:
+            request_options["timeout"] = request_timeout
         response = client.chat.completions.create(
-            model=config["model_id"],
-            max_tokens=max_tokens or config["max_tokens"],
-            temperature=0,
-            messages=[{"role": "user", "content": content}],
+            **request_options
         )
     except Exception as exc:
         message = str(exc)
@@ -835,14 +846,22 @@ def _request_nemotron_json_step(
     prompt: str,
     image: str,
     max_tokens: int,
+    deadline: float,
 ) -> dict[str, Any]:
     """Run and validate one compact Nemotron call, retrying transient failures."""
     last_error: Exception | None = None
-    for attempt in range(1, 4):
+    for attempt in range(1, 3):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ModelResponseError("Nemotron's four-minute run limit was reached.")
         raw_text: str | None = None
         try:
             _, raw_text = _request_model(
-                "Nemotron", prompt, image, max_tokens=max_tokens
+                "Nemotron",
+                prompt,
+                image,
+                max_tokens=max_tokens,
+                request_timeout=min(60.0, remaining),
             )
             data = _load_json_with_repair(raw_text)
             if step in CATEGORY_FIELDS:
@@ -878,44 +897,90 @@ def _request_nemotron_json_step(
                 exc.raw_response = raw_text
             last_error = exc
             _save_nemotron_step_debug(step, attempt, exc)
-            if attempt < 3:
-                time.sleep(2 * attempt)
+            if attempt == 1:
+                remaining = deadline - time.monotonic()
+                if remaining <= 3:
+                    break
+                time.sleep(3)
     raise ModelResponseError(
-        f"Nemotron {step} step failed after 3 attempts: {last_error}",
+        f"Nemotron {step} step failed after 2 attempts: {last_error}",
         raw_response=getattr(last_error, "raw_response", None),
     )
 
 
-def _run_nemotron_sequential(image: str) -> dict[str, Any]:
+def _local_nemotron_summary(
+    domains: dict[str, Any], note: str
+) -> dict[str, Any]:
+    """Create a deterministic summary when the remote summary is unavailable."""
+    overall = (
+        "No"
+        if any(section.get("overall_decision") == "No" for section in domains.values())
+        else "Yes"
+    )
+    return {
+        "overall_meets_expectations": overall,
+        "strengths": [],
+        "areas_for_improvement": [
+            "Review domains with low scores or missing evidence."
+        ],
+        "grading_notes": note,
+    }
+
+
+def _run_nemotron_sequential(
+    image: str,
+    progress_callback: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
     """Generate the full grading object through four domains and one summary."""
+    deadline = time.monotonic() + 240
     domains: dict[str, Any] = {}
     failed_domains: list[str] = []
+    progress_labels = {
+        "knowledge_acquisition": "Knowledge Acquisition",
+        "integration": "Integration",
+        "application": "Application",
+        "transfer": "Transfer",
+    }
     for domain in CATEGORY_FIELDS:
+        if progress_callback:
+            progress_callback(f"Nemotron: grading {progress_labels[domain]}...")
+        if time.monotonic() >= deadline:
+            domains[domain] = _failed_nemotron_domain(domain)
+            failed_domains.append(domain)
+            continue
         try:
             domains[domain] = _request_nemotron_json_step(
                 domain,
                 build_nemotron_domain_prompt(domain),
                 image,
                 max_tokens=1600,
+                deadline=deadline,
             )
         except ModelResponseError:
             domains[domain] = _failed_nemotron_domain(domain)
             failed_domains.append(domain)
 
-    try:
-        summary = _request_nemotron_json_step(
-            "summary",
-            build_nemotron_summary_prompt(domains),
-            image,
-            max_tokens=1000,
+    if progress_callback:
+        progress_callback("Nemotron: generating final summary...")
+    if time.monotonic() >= deadline:
+        summary = _local_nemotron_summary(
+            domains,
+            "Final summary was generated locally because Nemotron reached the four-minute run limit.",
         )
-    except ModelResponseError:
-        summary = {
-            "overall_meets_expectations": "No",
-            "strengths": [],
-            "areas_for_improvement": [],
-            "grading_notes": "Nemotron failed to generate the final summary.",
-        }
+    else:
+        try:
+            summary = _request_nemotron_json_step(
+                "summary",
+                build_nemotron_summary_prompt(domains),
+                image,
+                max_tokens=1000,
+                deadline=deadline,
+            )
+        except ModelResponseError:
+            summary = _local_nemotron_summary(
+                domains,
+                "Final summary was generated locally due to Nemotron failure.",
+            )
 
     notes = str(summary.get("grading_notes", "")).strip()
     if failed_domains:
@@ -934,6 +999,7 @@ def run_evaluation(
     pdf_path: Path,
     model_names: Iterable[str],
     original_filename: str,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> list[EvaluationOutcome]:
     """Grade an uploaded PDF with each selected model and persist outcomes.
 
@@ -961,7 +1027,7 @@ def run_evaluation(
         try:
             if model_name == "Nemotron":
                 returned_model_id = model_id
-                data = _run_nemotron_sequential(image)
+                data = _run_nemotron_sequential(image, progress_callback)
                 data["map_file"] = Path(original_filename).name
                 data["model"] = model_id
                 data = normalize_nemotron_result(data)

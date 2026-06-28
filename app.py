@@ -32,6 +32,7 @@ if st.button("Run Evaluation", type="primary"):
         st.error("Upload a PDF before running the evaluation.")
     else:
         st.session_state.pop("evaluation_results", None)
+        progress_status = st.empty()
         try:
             with st.spinner("Rendering the PDF and running the selected model(s)..."):
                 with tempfile.TemporaryDirectory(prefix="concept-map-") as temp_dir:
@@ -41,8 +42,11 @@ if st.button("Run Evaluation", type="primary"):
                         pdf_path=pdf_path,
                         model_names=selected_model_names(model_selection),
                         original_filename=uploaded_file.name,
+                        progress_callback=progress_status.info,
                     )
                 st.session_state["evaluation_results"] = results
+                if model_selection in {"Nemotron", "Both"}:
+                    progress_status.success("Nemotron grading complete.")
         except GradingError as exc:
             st.error(str(exc))
         except Exception as exc:
