@@ -999,7 +999,7 @@ def run_evaluation(
     pdf_path: Path,
     model_names: Iterable[str],
     original_filename: str,
-    progress_callback: Callable[[str], None] | None = None,
+    progress_callback=None,
 ) -> list[EvaluationOutcome]:
     """Grade an uploaded PDF with each selected model and persist outcomes.
 
@@ -1027,7 +1027,9 @@ def run_evaluation(
         try:
             if model_name == "Nemotron":
                 returned_model_id = model_id
-                data = _run_nemotron_sequential(image, progress_callback)
+                data = _run_nemotron_sequential(
+                    image, progress_callback=progress_callback
+                )
                 data["map_file"] = Path(original_filename).name
                 data["model"] = model_id
                 data = normalize_nemotron_result(data)
