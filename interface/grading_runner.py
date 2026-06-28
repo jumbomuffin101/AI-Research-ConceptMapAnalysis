@@ -10,6 +10,7 @@ import base64
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -296,6 +297,43 @@ def build_nemotron_web_prompt(map_file: str, model_id: str) -> str:
         f"JSON contract: {compact_output_contract()} "
         f'Use map_file="{map_file}" and model="{model_id}".'
     )
+
+
+def build_nemotron_domain_prompt(domain: str) -> str:
+    """Build one Spring 2025 domain request with its complete rubric criteria."""
+    rubric = load_summative_rubric()[domain]
+    fields = CATEGORY_FIELDS[domain]
+    domain_schema = {
+        field: {"score": 1, "explanation": "", "evidence_from_map": []}
+        for field in fields
+    }
+    domain_schema.update({"overall_decision": "No", "if_no_explanation": ""})
+    return f"""Grade only the {domain} domain using the Spring 2025 SUMMATIVE rubric below.
+Use only visible concept-map evidence. Apply every criterion and its 1-4 definitions exactly.
+Every score must be an integer 1-4. overall_decision must be exactly "Yes" or "No".
+Each criterion needs a brief explanation and 1-2 short evidence items. Do not invent evidence.
+If evidence is absent, use "No clear evidence found in the concept map."
+If overall_decision is "No", provide if_no_explanation; otherwise use an empty string.
+Return only valid minified JSON for this domain, with no markdown or prose.
+Rubric: {json.dumps(rubric, separators=(',', ':'))}
+Required JSON: {json.dumps(domain_schema, separators=(',', ':'))}"""
+
+
+def build_nemotron_summary_prompt(domains: dict[str, Any]) -> str:
+    """Build the final decision request from the four completed domain outputs."""
+    summary_schema = {
+        "overall_meets_expectations": "No",
+        "strengths": [],
+        "areas_for_improvement": [],
+        "grading_notes": "",
+    }
+    return f"""Summarize these four Spring 2025 domain grading results.
+Base the summary only on the supplied domain JSON. Do not rescore or change any domain.
+overall_meets_expectations must be exactly "Yes" or "No".
+Return up to two short strengths, up to two short areas_for_improvement, and one brief grading_notes string.
+Return only valid minified JSON with no markdown or prose.
+Domains: {json.dumps(domains, separators=(',', ':'))}
+Required JSON: {json.dumps(summary_schema, separators=(',', ':'))}"""
 
 
 def build_model_prompt(model_name: str, map_file: str, model_id: str) -> str:
@@ -671,6 +709,7 @@ def _request_model(
     model_name: str,
     prompt: str,
     image: str,
+    max_tokens: int | None = None,
 ) -> tuple[str, str]:
     config = MODEL_CONFIGS[model_name]
     content: list[dict[str, Any]] = [
@@ -685,7 +724,7 @@ def _request_model(
         client = _create_client()
         response = client.chat.completions.create(
             model=config["model_id"],
-            max_tokens=config["max_tokens"],
+            max_tokens=max_tokens or config["max_tokens"],
             temperature=0,
             messages=[{"role": "user", "content": content}],
         )
@@ -723,6 +762,168 @@ def _request_model(
     return config["model_id"], text
 
 
+def _validate_nemotron_domain(domain: str, data: dict[str, Any]) -> None:
+    """Reject incomplete domain output so the individual step can be retried."""
+    missing = [field for field in CATEGORY_FIELDS[domain] if field not in data]
+    missing.extend(
+        field
+        for field in ("overall_decision", "if_no_explanation")
+        if field not in data
+    )
+    if missing:
+        raise MalformedResultError(
+            f"{domain} output is missing required fields: {', '.join(missing)}"
+        )
+    _require_yes_no(data.get("overall_decision"), f"{domain}.overall_decision")
+    if (
+        data.get("overall_decision") == "No"
+        and not str(data.get("if_no_explanation", "")).strip()
+    ):
+        raise MalformedResultError(
+            f"'{domain}.if_no_explanation' is required for a No decision."
+        )
+    for field in CATEGORY_FIELDS[domain]:
+        item = data.get(field)
+        if not isinstance(item, dict):
+            raise MalformedResultError(f"'{domain}.{field}' must be an object.")
+        score = item.get("score")
+        if not isinstance(score, int) or isinstance(score, bool) or not 1 <= score <= 4:
+            raise MalformedResultError(
+                f"'{domain}.{field}.score' must be an integer from 1 to 4."
+            )
+        if not isinstance(item.get("explanation"), str):
+            raise MalformedResultError(f"'{domain}.{field}.explanation' is required.")
+        if not isinstance(item.get("evidence_from_map"), list):
+            raise MalformedResultError(
+                f"'{domain}.{field}.evidence_from_map' must be a list."
+            )
+
+
+def _failed_nemotron_domain(domain: str) -> dict[str, Any]:
+    """Return the schema-safe conservative fallback for a failed domain step."""
+    section = {
+        field: {
+            "score": 1,
+            "explanation": "No valid model output provided for this criterion.",
+            "evidence_from_map": ["No clear evidence found in the concept map."],
+        }
+        for field in CATEGORY_FIELDS[domain]
+    }
+    section.update(
+        {
+            "overall_decision": "No",
+            "if_no_explanation": f"Nemotron failed to generate the {domain} domain.",
+        }
+    )
+    return section
+
+
+def _save_nemotron_step_debug(step: str, attempt: int, error: Exception) -> None:
+    """Save each failed sequential attempt without affecting the final UI result."""
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    safe_step = re.sub(r"[^A-Za-z0-9_-]+", "_", step)
+    path = DEBUG_DIR / f"{timestamp}_nemotron_{safe_step}_attempt{attempt}.txt"
+    raw = getattr(error, "raw_response", None)
+    path.write_text(
+        f"error={error}\n\n{_response_to_debug_text(raw)}", encoding="utf-8"
+    )
+
+
+def _request_nemotron_json_step(
+    step: str,
+    prompt: str,
+    image: str,
+    max_tokens: int,
+) -> dict[str, Any]:
+    """Run and validate one compact Nemotron call, retrying transient failures."""
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        raw_text: str | None = None
+        try:
+            _, raw_text = _request_model(
+                "Nemotron", prompt, image, max_tokens=max_tokens
+            )
+            data = _load_json_with_repair(raw_text)
+            if step in CATEGORY_FIELDS:
+                _validate_nemotron_domain(step, data)
+            else:
+                required = {
+                    "overall_meets_expectations",
+                    "strengths",
+                    "areas_for_improvement",
+                    "grading_notes",
+                }
+                missing = required.difference(data)
+                if missing:
+                    raise MalformedResultError(
+                        "Summary output is missing required fields: "
+                        + ", ".join(sorted(missing))
+                    )
+                _require_yes_no(
+                    data.get("overall_meets_expectations"),
+                    "overall_meets_expectations",
+                )
+                if not isinstance(data.get("strengths"), list):
+                    raise MalformedResultError("'strengths' must be a list.")
+                if not isinstance(data.get("areas_for_improvement"), list):
+                    raise MalformedResultError(
+                        "'areas_for_improvement' must be a list."
+                    )
+                if not isinstance(data.get("grading_notes"), str):
+                    raise MalformedResultError("'grading_notes' must be a string.")
+            return data
+        except (ModelResponseError, MalformedResultError) as exc:
+            if getattr(exc, "raw_response", None) is None and raw_text is not None:
+                exc.raw_response = raw_text
+            last_error = exc
+            _save_nemotron_step_debug(step, attempt, exc)
+            if attempt < 3:
+                time.sleep(2 * attempt)
+    raise ModelResponseError(
+        f"Nemotron {step} step failed after 3 attempts: {last_error}",
+        raw_response=getattr(last_error, "raw_response", None),
+    )
+
+
+def _run_nemotron_sequential(image: str) -> dict[str, Any]:
+    """Generate the full grading object through four domains and one summary."""
+    domains: dict[str, Any] = {}
+    failed_domains: list[str] = []
+    for domain in CATEGORY_FIELDS:
+        try:
+            domains[domain] = _request_nemotron_json_step(
+                domain,
+                build_nemotron_domain_prompt(domain),
+                image,
+                max_tokens=1600,
+            )
+        except ModelResponseError:
+            domains[domain] = _failed_nemotron_domain(domain)
+            failed_domains.append(domain)
+
+    try:
+        summary = _request_nemotron_json_step(
+            "summary",
+            build_nemotron_summary_prompt(domains),
+            image,
+            max_tokens=1000,
+        )
+    except ModelResponseError:
+        summary = {
+            "overall_meets_expectations": "No",
+            "strengths": [],
+            "areas_for_improvement": [],
+            "grading_notes": "Nemotron failed to generate the final summary.",
+        }
+
+    notes = str(summary.get("grading_notes", "")).strip()
+    if failed_domains:
+        failure_note = "Domains that failed to generate: " + ", ".join(failed_domains) + "."
+        summary["grading_notes"] = f"{notes} {failure_note}".strip()
+    return {**domains, **summary}
+
+
 def _safe_stem(filename: str) -> str:
     stem = Path(filename).stem
     cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_")
@@ -756,15 +957,22 @@ def run_evaluation(
     for model_name in names:
         model_id = MODEL_CONFIGS[model_name]["model_id"]
         image = render_pdf_image(pdf_path, model_name)
-        prompt = build_model_prompt(model_name, Path(original_filename).name, model_id)
         raw_text: str | None = None
         try:
-            returned_model_id, raw_text = _request_model(model_name, prompt, image)
             if model_name == "Nemotron":
-                parsed = _load_json_with_repair(raw_text)
-                data = normalize_nemotron_result(parsed)
+                returned_model_id = model_id
+                data = _run_nemotron_sequential(image)
+                data["map_file"] = Path(original_filename).name
+                data["model"] = model_id
+                data = normalize_nemotron_result(data)
                 data = parse_model_json(json.dumps(data))
             else:
+                prompt = build_model_prompt(
+                    model_name, Path(original_filename).name, model_id
+                )
+                returned_model_id, raw_text = _request_model(
+                    model_name, prompt, image
+                )
                 data = parse_model_json(raw_text)
             output_path = OUTPUT_DIR / (
                 f"{timestamp}_{run_id}_{file_stem}_{model_name.lower()}.json"
