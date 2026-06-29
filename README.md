@@ -10,16 +10,16 @@ The project evaluates medical concept maps using multimodal AI models, extracts 
 
 Completed:
 
-- ✅ Dual-model grading
-- ✅ Structured JSON output
-- ✅ Web interface
-- ✅ PDF processing pipeline
-- ✅ Rubric-based evaluation
+- [x] Dual-model grading
+- [x] Structured JSON output
+- [x] Web interface
+- [x] PDF processing pipeline
+- [x] Rubric-based evaluation
 
 In Progress:
 
-- 🔄 Expanded validation dataset
-- 🔄 Inter-model agreement analytics
+- [ ] Expanded validation dataset
+- [ ] Inter-model agreement analytics
 
 ## Current Pipeline
 

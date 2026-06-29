@@ -6,8 +6,6 @@ import fitz
 from pathlib import Path
 import re
 import json
-import time
-from datetime import datetime, timezone
 
 load_dotenv()
 
@@ -16,6 +14,7 @@ def create_client():
     return OpenAI(
         api_key=os.getenv("OPENROUTER_API_KEY"),
         base_url="https://openrouter.ai/api/v1",
+        timeout=300,
     )
 
 
@@ -117,109 +116,36 @@ def _spring_schema(map_file):
     return schema
 
 
-def _compact_spring_rubric_text():
-    return """Shared scale: L=little/irrelevant; P=partly relevant and/or too general; R=relevant and mostly synthesized; D=synthesized and detailed; C1=inaccurate/illogical connections; C2=mostly accurate but simplistic/errors; C3=accurate logical flow; C4=accurate logical comprehensive.
-knowledge_acquisition overall: Does the student's map include key knowledge from the case and content learned during this unit?
-knowledge_acquisition.basic_science: 1=L knowledge; 2=P knowledge; 3=R knowledge; 4=D knowledge from each session.
-knowledge_acquisition.health_system_science: 1=L knowledge; 2=P knowledge; 3=R knowledge; 4=D knowledge from multiple sessions.
-knowledge_acquisition.clinical_science: 1=L knowledge; 2=P knowledge; 3=R knowledge; 4=relevant, synthesized, detailed knowledge from each session.
-knowledge_acquisition.patient_case_information: 1=little/irrelevant information; 2=partly relevant with limited synthesis; 3=relevant mostly synthesized patient data; 4=synthesized, relevant, comprehensive patient data.
-knowledge_acquisition.determinants_of_health: 1=DoH absent; 2=at least one DoH but not patient-specific and/or not clinically relevant; 3=multiple DoH across map with clear impact on condition and/or care; 4=comprehensive DoH across map with clear impact on condition, care, and/or prognosis.
-integration overall: Did the learner connect key knowledge accurately & comprehensively?
-integration.prioritized_differential_diagnosis: 1=DDx absent and/or mostly incorrect; 2=too narrow or not accurately connected to patient data; 3=focused and relevant to patient; 4=focused, relevant, correctly prioritized.
-integration.illness_scripts: 1=insufficient data for illness scripts; 2=incorrect/incomplete; 3=accurate patient-data connections; 4=accurate prioritized patient-data connections for multiple diagnoses.
-integration.basic_to_foundational_science: 1=C1; 2=C2; 3=C3 from unit basic science to molecular/cellular disease basis; 4=C4 including anatomy, histology, biochemistry, genetics, physiology, and/or pharmacology.
-integration.patient_data_to_clinical_information: 1=C1; 2=C2; 3=C3 from patient data to clinical information; 4=C4 including epidemiology, symptoms, signs, diagnostics, treatments, and patient-specific risk factors.
-integration.patient_data_to_basic_science: 1=C1; 2=C2; 3=C3 from patient data to molecular/cellular disease basis; 4=C4 including anatomy, histology, biochemistry, genetics, physiology, and/or pharmacology.
-application overall: Did the learner explain key clinical data with relevant basic science?
-application.working_diagnosis_pathophysiology: 1=pathophysiology connections absent/unclear; 2=present but inaccurate and/or too simplistic; 3=flow of concepts explains pathophysiology; 4=flow explains pathophysiology and includes basic, clinical, health-system sciences.
-application.patient_data_pathophysiology: 1=pathophysiology connections absent/unclear; 2=present but inaccurate and/or too simplistic; 3=flow of concepts explains pathophysiology; 4=flow explains pathophysiology of multiple patient-data components including symptoms, signs, findings, and/or care plan.
-transfer overall: Did the learner use previously learned content to deepen understanding?
-transfer.prior_basic_science: 1=L knowledge; 2=P knowledge; 3=R knowledge; 4=D knowledge.
-transfer.prior_clinical_concepts: 1=L knowledge; 2=P knowledge; 3=R knowledge; 4=D knowledge.
-transfer.deepens_understanding: 1=L knowledge; 2=P knowledge; 3=R knowledge; 4=D knowledge connecting patient data and basic science."""
-
-
-def _compact_output_contract():
-    domains = "; ".join(
-        f"{group}=[{','.join(fields)}]+overall_decision+if_no_explanation"
-        for group, fields in CATEGORY_FIELDS.items()
-    )
-    return (
-        "Top keys: map_file,model,knowledge_acquisition,integration,application,"
-        "transfer,overall_meets_expectations,strengths,areas_for_improvement,"
-        f"grading_notes. Domains: {domains}. "
-        "Every criterion object has exactly score,explanation,evidence_from_map."
-    )
-
-
 def build_prompt(map_file):
-    return (
-        "Spring 2025 SUMMATIVE concept map grading. Use only visible map evidence.\n"
-        "Rules: score each criterion with integer 1-4 only; never use 0,5,decimals,"
-        "Partial,Partially Meets,Borderline,Maybe. Domain overall_decision and "
-        "overall_meets_expectations must be exactly Yes or No. Each criterion needs "
-        "score, a brief explanation, and 1–2 short evidence items from the map when visible. If evidence is missing, write "
-        "\"No clear evidence found in the concept map.\" Do not hallucinate evidence. "
-        "If a domain is No, fill if_no_explanation. Return only valid minified JSON.\n"
-        f"Rubric:\n{_compact_spring_rubric_text()}\n"
-        f"JSON contract: {_compact_output_contract()} "
-        f'Use map_file="{map_file}" and model="{MODEL}".'
-    )
+    return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
+Do not invent additional grading criteria.
+
+Rubric:
+{json.dumps(_spring_rubric(), indent=2)}
+
+Global rules:
+- Every criterion score must be an integer 1, 2, 3, or 4 only.
+- Every domain overall_decision must be exactly "Yes" or "No".
+- overall_meets_expectations must be exactly "Yes" or "No".
+- Do not output Partial, Partially Meets, Borderline, Maybe, score 0, score 5, decimal scores, or any score outside 1-4.
+- If evidence is missing, write "No clear evidence found in the concept map."
+- Do not hallucinate evidence not visible in the concept map.
+
+Each criterion must include score, explanation, and evidence_from_map.
+Each domain must include overall_decision and if_no_explanation.
+If overall_decision is "No", if_no_explanation is required.
+The final overall decision answers: This map meets expectations.
+
+Return ONLY raw valid JSON using this exact structure:
+{json.dumps(_spring_schema(map_file), indent=2)}
+"""
 
 
-def _response_debug_text(response):
-    if response is None:
-        return "None"
-    for method_name in ("model_dump_json", "json"):
-        method = getattr(response, method_name, None)
-        if callable(method):
-            try:
-                return method(indent=2)
-            except TypeError:
-                try:
-                    return method()
-                except Exception:
-                    pass
-            except Exception:
-                pass
-    return str(response)
-
-
-def _save_attempt_debug(response, attempt, reason, debug_label="nemotron"):
-    debug_dir = Path("outputs/gradingV5/debug")
-    debug_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", debug_label).strip("_") or "nemotron"
-    debug_path = debug_dir / f"{timestamp}_{safe_label}_attempt{attempt}.txt"
-    debug_path.write_text(
-        f"attempt={attempt}\nreason={reason}\n\n{_response_debug_text(response)}",
-        encoding="utf-8",
-    )
-    return debug_path
-
-
-def _response_content(response):
-    if response is None:
-        return None, "response is None"
-    choices = getattr(response, "choices", None)
-    if not choices:
-        return None, "response.choices is missing or empty"
-    first_choice = choices[0]
-    message = getattr(first_choice, "message", None)
-    if message is None:
-        return None, "choices[0].message is missing"
-    content = getattr(message, "content", None)
-    if not isinstance(content, str) or not content.strip():
-        return None, "choices[0].message.content is empty"
-    return content, ""
-
-
-def _create_completion(client, prompt, image):
+def request_grade(client, prompt, image):
     return client.chat.completions.create(
         model=MODEL,
         temperature=0,
-        max_tokens=4000,
+        max_tokens=2000,
         messages=[
             {
                 "role": "user",
@@ -240,33 +166,20 @@ def _create_completion(client, prompt, image):
     )
 
 
-def request_grade(client, prompt, image, debug_label="nemotron"):
-    wait_seconds = [5, 15, 30]
-    max_attempts = len(wait_seconds) + 1
-    last_reason = "unknown failure"
-    debug_paths = []
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = _create_completion(client, prompt, image)
-        except Exception as exc:
-            last_reason = f"API exception: {exc}"
-            debug_paths.append(_save_attempt_debug(repr(exc), attempt, last_reason, debug_label))
-        else:
-            _, reason = _response_content(response)
-            if not reason:
-                return response
-            last_reason = reason
-            debug_paths.append(_save_attempt_debug(response, attempt, reason, debug_label))
-
-        if attempt <= len(wait_seconds):
-            time.sleep(wait_seconds[attempt - 1])
-
-    raise RuntimeError(
-        "Nemotron returned no usable content after retrying. "
-        f"Last failure: {last_reason}. "
-        "Raw debug outputs saved: " + ", ".join(str(path) for path in debug_paths)
-    )
+def _response_content(response):
+    if response is None:
+        return None, "response is None"
+    choices = getattr(response, "choices", None)
+    if not choices:
+        return None, "response.choices is missing or empty"
+    first_choice = choices[0]
+    message = getattr(first_choice, "message", None)
+    if message is None:
+        return None, "choices[0].message is missing"
+    content = getattr(message, "content", None)
+    if not isinstance(content, str) or not content.strip():
+        return None, "choices[0].message.content is empty"
+    return content, ""
 
 
 def run_all():
@@ -278,7 +191,7 @@ def run_all():
         prompt = build_prompt(item["map_file"])
 
         try:
-            response = request_grade(client, prompt, image, Path(item["output"]).stem)
+            response = request_grade(client, prompt, image)
 
             raw_output_path = item["output"].replace(".json", "_raw.txt")
             with open(raw_output_path, "w", encoding="utf-8") as f:
