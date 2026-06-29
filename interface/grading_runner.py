@@ -16,32 +16,29 @@ from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
 
-import fitz
-from dotenv import load_dotenv
-from openai import OpenAI
-
-from grading import grade_gemma, grade_nemotron
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUBRIC_PATH = PROJECT_ROOT / "rubric" / "concept_map_rubric.json"
 OUTPUT_DIR = PROJECT_ROOT / "outputs" / "web_demo"
 DEBUG_DIR = OUTPUT_DIR / "debug"
 
+GEMMA_MODEL = "google/gemma-4-26b-a4b-it:free"
+NEMOTRON_MODEL = "nvidia/llama-3.1-nemotron-nano-vl-8b-v1"
+
 GRADER_MODULES = {
-    "Gemma": grade_gemma,
-    "Nemotron": grade_nemotron,
+    "Gemma": None,
+    "Nemotron": None,
 }
 
 MODEL_SELECTION_ALIASES: dict[str, str] = {}
 
 MODEL_CONFIGS = {
     "Gemma": {
-        "model_id": grade_gemma.MODEL,
+        "model_id": GEMMA_MODEL,
         "max_tokens": 2000,
     },
     "Nemotron": {
-        "model_id": grade_nemotron.MODEL,
+        "model_id": NEMOTRON_MODEL,
         "max_tokens": 2000,
     },
 }
@@ -50,12 +47,12 @@ MODEL_PROVIDER_INFO = {
     "Gemma": {
         "provider": "OpenRouter",
         "base_url": "https://openrouter.ai/api/v1",
-        "model": grade_gemma.MODEL,
+        "model": GEMMA_MODEL,
     },
     "Nemotron": {
         "provider": "NVIDIA NIM",
         "base_url": "https://integrate.api.nvidia.com/v1",
-        "model": grade_nemotron.MODEL,
+        "model": NEMOTRON_MODEL,
     },
 }
 
@@ -175,6 +172,13 @@ def model_debug_lines(model_names: Iterable[str]) -> list[str]:
 def render_pdf_image(pdf_path: Path, model_name: str) -> str:
     """Render the uploaded PDF as a deployment-safe base64 PNG."""
     _ = model_name
+    try:
+        import fitz
+    except ImportError as exc:
+        raise GradingError(
+            "PyMuPDF is not installed. Install dependencies with `pip install -r requirements.txt`."
+        ) from exc
+
     try:
         with fitz.open(pdf_path) as document:
             if document.page_count < 1:
@@ -509,7 +513,13 @@ def _save_failed_response(
 
 
 def _get_secret(name: str) -> str | None:
-    load_dotenv(PROJECT_ROOT / ".env")
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(PROJECT_ROOT / ".env")
+    except ImportError:
+        pass
+
     value = os.getenv(name)
     if value:
         return value
@@ -523,7 +533,17 @@ def _get_secret(name: str) -> str | None:
     return str(secret_value) if secret_value else None
 
 
-def create_openrouter_client(*, disable_sdk_retries: bool = False) -> OpenAI:
+def _openai_client(**options: Any) -> Any:
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise GradingError(
+            "The OpenAI SDK is not installed. Install dependencies with `pip install -r requirements.txt`."
+        ) from exc
+    return OpenAI(**options)
+
+
+def create_openrouter_client(*, disable_sdk_retries: bool = False) -> Any:
     api_key = _get_secret("OPENROUTER_API_KEY")
     if not api_key:
         raise GradingError(
@@ -536,12 +556,12 @@ def create_openrouter_client(*, disable_sdk_retries: bool = False) -> OpenAI:
     }
     if disable_sdk_retries:
         options["max_retries"] = 0
-    return OpenAI(
+    return _openai_client(
         **options
     )
 
 
-def create_nvidia_client(*, disable_sdk_retries: bool = False) -> OpenAI:
+def create_nvidia_client(*, disable_sdk_retries: bool = False) -> Any:
     api_key = _get_secret("NVIDIA_API_KEY")
     if not api_key:
         raise GradingError("NVIDIA_API_KEY is not configured.")
@@ -552,14 +572,14 @@ def create_nvidia_client(*, disable_sdk_retries: bool = False) -> OpenAI:
     }
     if disable_sdk_retries:
         options["max_retries"] = 0
-    return OpenAI(
+    return _openai_client(
         **options
     )
 
 
 def _create_client(
     model_name: str, *, disable_sdk_retries: bool = False
-) -> OpenAI:
+) -> Any:
     if model_name == "Nemotron":
         return create_nvidia_client(disable_sdk_retries=disable_sdk_retries)
     return create_openrouter_client(disable_sdk_retries=disable_sdk_retries)
