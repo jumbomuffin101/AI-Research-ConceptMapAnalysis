@@ -1,7 +1,7 @@
 """Upload-driven grading pipeline used by the Streamlit demo.
 
 The command-line graders remain independent. This module mirrors their proven
-PDF rendering and OpenRouter request flow while accepting any uploaded PDF.
+PDF rendering flow while accepting any uploaded PDF.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ MODEL_CONFIGS = {
     },
     "Nemotron": {
         "model_id": grade_nemotron.MODEL,
-        "max_tokens": 800,
+        "max_tokens": 2000,
     },
 }
 
@@ -153,7 +153,7 @@ def render_pdf_image(pdf_path: Path, model_name: str) -> str:
             if document.page_count < 1:
                 raise InvalidPDFError("The uploaded PDF has no pages.")
             page = document[0]
-            # Lower resolution for Streamlit/OpenRouter token compatibility
+            # Lower resolution for hosted model token compatibility
             pixmap = page.get_pixmap(matrix=fitz.Matrix(1, 1))
             image_bytes = pixmap.tobytes("png")
             return base64.b64encode(image_bytes).decode("utf-8")
@@ -206,25 +206,8 @@ def build_spring_schema(map_file: str, model_id: str) -> dict[str, Any]:
     return schema
 
 
-def build_nemotron_lightweight_schema(map_file: str, model_id: str) -> dict[str, Any]:
-    """Build Nemotron's lightweight second-opinion JSON shape."""
-    return {
-        "map_file": map_file,
-        "model": model_id,
-        "overall_meets_expectations": "No",
-        "domain_scores": {
-            "knowledge_acquisition": 1,
-            "integration": 1,
-            "application": 1,
-            "transfer": 1,
-        },
-        "brief_rationale": "",
-        "agreement_notes": "",
-    }
-
-
 def build_web_prompt(map_file: str, model_id: str) -> str:
-    """Build the shorter Streamlit/OpenRouter-compatible grading prompt."""
+    """Build the shorter Streamlit-compatible grading prompt."""
     schema = build_spring_schema(map_file, model_id)
     rubric = load_summative_rubric()
 
@@ -259,31 +242,8 @@ Use this exact JSON structure:
 
 
 def build_nemotron_web_prompt(map_file: str, model_id: str) -> str:
-    """Build Nemotron's lightweight second-opinion prompt."""
-    schema = build_nemotron_lightweight_schema(map_file, model_id)
-
-    return f"""Use the Spring 2025 concept map rubric at a high level.
-Give an independent lightweight second opinion for the visible concept map.
-
-Score only these four domains from 1 to 4:
-- knowledge_acquisition
-- integration
-- application
-- transfer
-
-Rules:
-- Scores must be integers 1, 2, 3, or 4 only.
-- overall_meets_expectations must be exactly "Yes" or "No".
-- Do not use Partial, Maybe, Borderline, score 0, score 5, or decimals.
-- Keep brief_rationale and agreement_notes short.
-- Return only valid JSON. No markdown. No prose outside JSON.
-
-Do not grade every subcriterion.
-Do not provide evidence_from_map.
-
-Return exactly this JSON shape:
-{json.dumps(schema, indent=2)}
-"""
+    """Build Nemotron's full rubric prompt using the Gemma schema structure."""
+    return build_web_prompt(map_file, model_id)
 
 
 def build_model_prompt(model_name: str, map_file: str, model_id: str) -> str:
@@ -474,74 +434,6 @@ def parse_model_json(raw_text: str) -> dict[str, Any]:
     return result
 
 
-def parse_nemotron_lightweight_json(raw_text: str) -> dict[str, Any]:
-    """Parse and validate Nemotron's lightweight second-opinion JSON."""
-    if not raw_text or not raw_text.strip():
-        raise ModelResponseError("The model returned an empty response.")
-
-    if "{" not in raw_text:
-        raise MalformedResultError("The model response did not contain a JSON object.")
-
-    result = _load_json_with_repair(raw_text)
-    if _contains_forbidden_decision_text(result):
-        raise MalformedResultError(
-            "The model result contains a forbidden non-binary decision label."
-        )
-
-    required = {
-        "map_file",
-        "model",
-        "overall_meets_expectations",
-        "domain_scores",
-        "brief_rationale",
-        "agreement_notes",
-    }
-    missing = sorted(required.difference(result))
-    if missing:
-        raise MalformedResultError(
-            "The lightweight Nemotron result is missing required fields: "
-            + ", ".join(missing)
-        )
-
-    _require_yes_no(
-        result.get("overall_meets_expectations"),
-        "overall_meets_expectations",
-    )
-
-    if result.get("model") != grade_nemotron.MODEL:
-        raise MalformedResultError(
-            f"'model' must be exactly '{grade_nemotron.MODEL}'."
-        )
-    if not isinstance(result.get("map_file"), str):
-        raise MalformedResultError("'map_file' must be a string.")
-
-    domain_scores = result.get("domain_scores")
-    if not isinstance(domain_scores, dict):
-        raise MalformedResultError("'domain_scores' must be a JSON object.")
-
-    missing_domains = [
-        domain for domain in CATEGORY_FIELDS if domain not in domain_scores
-    ]
-    if missing_domains:
-        raise MalformedResultError(
-            "The lightweight Nemotron result is missing domain scores: "
-            + ", ".join(missing_domains)
-        )
-
-    for domain in CATEGORY_FIELDS:
-        score = domain_scores.get(domain)
-        if not isinstance(score, int) or isinstance(score, bool) or not 1 <= score <= 4:
-            raise MalformedResultError(
-                f"'domain_scores.{domain}' must be an integer from 1 to 4."
-            )
-
-    for field in ("brief_rationale", "agreement_notes"):
-        if not isinstance(result.get(field), str):
-            raise MalformedResultError(f"'{field}' must be a string.")
-
-    return result
-
-
 def _response_to_debug_text(response: Any) -> str:
     """Convert an SDK response object into a debug-safe text payload."""
     if response is None:
@@ -589,18 +481,29 @@ def _save_failed_response(
     return debug_path
 
 
-def _ensure_api_key() -> None:
+def _get_secret(name: str) -> str | None:
     load_dotenv(PROJECT_ROOT / ".env")
-    if not os.getenv("OPENROUTER_API_KEY"):
+    value = os.getenv(name)
+    if value:
+        return value
+
+    try:
+        import streamlit as st
+
+        secret_value = st.secrets.get(name)
+    except Exception:
+        return None
+    return str(secret_value) if secret_value else None
+
+
+def create_openrouter_client(*, disable_sdk_retries: bool = False) -> OpenAI:
+    api_key = _get_secret("OPENROUTER_API_KEY")
+    if not api_key:
         raise GradingError(
-            "OPENROUTER_API_KEY is missing. Add it to the environment or project .env file."
+            "OPENROUTER_API_KEY is missing. Add it to the environment, Streamlit secrets, or project .env file."
         )
-
-
-def _create_client(*, disable_sdk_retries: bool = False) -> OpenAI:
-    _ensure_api_key()
     options: dict[str, Any] = {
-        "api_key": os.getenv("OPENROUTER_API_KEY"),
+        "api_key": api_key,
         "base_url": "https://openrouter.ai/api/v1",
         "timeout": 300,
     }
@@ -609,6 +512,30 @@ def _create_client(*, disable_sdk_retries: bool = False) -> OpenAI:
     return OpenAI(
         **options
     )
+
+
+def create_nvidia_client(*, disable_sdk_retries: bool = False) -> OpenAI:
+    api_key = _get_secret("NVIDIA_API_KEY")
+    if not api_key:
+        raise GradingError("NVIDIA_API_KEY is not configured.")
+    options: dict[str, Any] = {
+        "api_key": api_key,
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "timeout": 300,
+    }
+    if disable_sdk_retries:
+        options["max_retries"] = 0
+    return OpenAI(
+        **options
+    )
+
+
+def _create_client(
+    model_name: str, *, disable_sdk_retries: bool = False
+) -> OpenAI:
+    if model_name == "Nemotron":
+        return create_nvidia_client(disable_sdk_retries=disable_sdk_retries)
+    return create_openrouter_client(disable_sdk_retries=disable_sdk_retries)
 
 
 def _is_input_limit_error(message: str) -> bool:
@@ -642,7 +569,9 @@ def _request_model(
     ]
 
     try:
-        client = _create_client(disable_sdk_retries=request_timeout is not None)
+        client = _create_client(
+            model_name, disable_sdk_retries=request_timeout is not None
+        )
         request_options: dict[str, Any] = {
             "model": config["model_id"],
             "max_tokens": max_tokens or config["max_tokens"],
@@ -658,11 +587,12 @@ def _request_model(
         message = str(exc)
         if _is_input_limit_error(message):
             message = (
-                "Input is too large for the current OpenRouter model limit. "
+                "Input is too large for the current model limit. "
                 "Try a smaller PDF/image or use the local CLI pipeline."
             )
+        provider = "NVIDIA NIM" if model_name == "Nemotron" else "OpenRouter"
         raise ModelResponseError(
-            f"{model_name} API request failed: {message}",
+            f"{model_name} {provider} API request failed: {message}",
             raw_response=repr(exc),
         ) from exc
 
@@ -727,10 +657,7 @@ def run_evaluation(
                 model_name, Path(original_filename).name, model_id
             )
             returned_model_id, raw_text = _request_model(model_name, prompt, image)
-            if model_name == "Nemotron":
-                data = parse_nemotron_lightweight_json(raw_text)
-            else:
-                data = parse_model_json(raw_text)
+            data = parse_model_json(raw_text)
             output_path = OUTPUT_DIR / (
                 f"{timestamp}_{run_id}_{file_stem}_{model_name.lower()}.json"
             )

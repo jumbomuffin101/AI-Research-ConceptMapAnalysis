@@ -31,7 +31,7 @@ PDF-to-Image Conversion
     |
     v
 Vision Language Model
-    (Gemma 4 26B A4B OR Nemotron Nano 12B V2 VL)
+    (Gemma 4 26B A4B via OpenRouter OR Nemotron Nano VL 8B via NVIDIA NIM)
     |
     v
 Concept Extraction
@@ -73,9 +73,14 @@ Interactive Web Dashboard
 ### Primary Models
 
 - `google/gemma-4-26b-a4b-it:free`
-- `nvidia/nemotron-nano-12b-v2-vl:free`
+- `nvidia/llama-3.1-nemotron-nano-vl-8b-v1`
 
-Gemma is the full Spring 2025 rubric grader. Nemotron provides a lightweight independent second-opinion evaluation with domain-level scores and a brief rationale.
+Gemma uses OpenRouter. Nemotron uses NVIDIA's official NIM API. Both models generate full Spring 2025 rubric-aligned JSON grading.
+
+Required environment variables:
+
+- `OPENROUTER_API_KEY` for Gemma
+- `NVIDIA_API_KEY` for Nemotron
 
 Users may run:
 
@@ -121,18 +126,24 @@ runtime.txt
 
 ## Web Demo
 
-The Streamlit demo accepts any concept map PDF, runs Gemma, Nemotron, or both through OpenRouter, and displays rubric scores, reasoning, evidence, strengths, and areas for improvement. Valid results are saved under `outputs/web_demo/`.
+The Streamlit demo accepts any concept map PDF, runs Gemma, Nemotron, or both, and displays rubric scores, reasoning, evidence, strengths, and areas for improvement. Valid results are saved under `outputs/web_demo/`.
 
 If one selected model fails, the app keeps any successful model result visible and shows a warning for the failed model. Raw failed responses are saved under `outputs/web_demo/debug/` for troubleshooting.
 
-Install dependencies and configure the OpenRouter API key:
+Install dependencies and configure API keys:
 
 ```powershell
 pip install -r requirements.txt
 $env:OPENROUTER_API_KEY="your-api-key"
+$env:NVIDIA_API_KEY="your-nvidia-api-key"
 ```
 
-You can instead place `OPENROUTER_API_KEY=your-api-key` in the project `.env` file.
+You can instead place these values in the project `.env` file or Streamlit secrets:
+
+```text
+OPENROUTER_API_KEY=your-openrouter-api-key
+NVIDIA_API_KEY=your-nvidia-api-key
+```
 
 Start the app from the repository root:
 

@@ -8,11 +8,11 @@ from pathlib import Path
 load_dotenv()
 
 client = OpenAI(
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-    base_url="https://openrouter.ai/api/v1"
+    api_key=os.getenv("NVIDIA_API_KEY"),
+    base_url="https://integrate.api.nvidia.com/v1"
 )
 
-MODEL = "nvidia/nemotron-nano-12b-v2-vl:free"
+MODEL = "nvidia/llama-3.1-nemotron-nano-vl-8b-v1"
 PDF_PATH = "maps/ConceptMapWeak.pdf"
 OUTPUT_PATH = "outputs/detected_content_weak_nemotron_vl.json"
 
