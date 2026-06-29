@@ -42,7 +42,7 @@ MODEL_CONFIGS = {
     },
     "Nemotron": {
         "model_id": grade_nemotron.MODEL,
-        "max_tokens": 2000,
+        "max_tokens": 800,
     },
 }
 
@@ -206,6 +206,23 @@ def build_spring_schema(map_file: str, model_id: str) -> dict[str, Any]:
     return schema
 
 
+def build_nemotron_lightweight_schema(map_file: str, model_id: str) -> dict[str, Any]:
+    """Build Nemotron's lightweight second-opinion JSON shape."""
+    return {
+        "map_file": map_file,
+        "model": model_id,
+        "overall_meets_expectations": "No",
+        "domain_scores": {
+            "knowledge_acquisition": 1,
+            "integration": 1,
+            "application": 1,
+            "transfer": 1,
+        },
+        "brief_rationale": "",
+        "agreement_notes": "",
+    }
+
+
 def build_web_prompt(map_file: str, model_id: str) -> str:
     """Build the shorter Streamlit/OpenRouter-compatible grading prompt."""
     schema = build_spring_schema(map_file, model_id)
@@ -242,30 +259,29 @@ Use this exact JSON structure:
 
 
 def build_nemotron_web_prompt(map_file: str, model_id: str) -> str:
-    """Build Nemotron's single-call prompt aligned with the Gemma grader."""
-    schema = build_spring_schema(map_file, model_id)
-    rubric = load_summative_rubric()
+    """Build Nemotron's lightweight second-opinion prompt."""
+    schema = build_nemotron_lightweight_schema(map_file, model_id)
 
-    return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
-Do not invent additional grading criteria.
+    return f"""Use the Spring 2025 concept map rubric at a high level.
+Give an independent lightweight second opinion for the visible concept map.
 
-Rubric:
-{json.dumps(rubric, indent=2)}
+Score only these four domains from 1 to 4:
+- knowledge_acquisition
+- integration
+- application
+- transfer
 
-Global rules:
-- Every criterion score must be an integer 1, 2, 3, or 4 only.
-- Every domain overall_decision must be exactly "Yes" or "No".
+Rules:
+- Scores must be integers 1, 2, 3, or 4 only.
 - overall_meets_expectations must be exactly "Yes" or "No".
-- Do not output Partial, Partially Meets, Borderline, Maybe, score 0, score 5, decimal scores, or any score outside 1-4.
-- If evidence is missing, write "No clear evidence found in the concept map."
-- Do not hallucinate evidence not visible in the concept map.
+- Do not use Partial, Maybe, Borderline, score 0, score 5, or decimals.
+- Keep brief_rationale and agreement_notes short.
+- Return only valid JSON. No markdown. No prose outside JSON.
 
-Each criterion must include score, explanation, and evidence_from_map.
-Each domain must include overall_decision and if_no_explanation.
-If overall_decision is "No", if_no_explanation is required.
-The final overall decision answers: This map meets expectations.
+Do not grade every subcriterion.
+Do not provide evidence_from_map.
 
-Return ONLY raw valid JSON using this exact structure:
+Return exactly this JSON shape:
 {json.dumps(schema, indent=2)}
 """
 
@@ -458,6 +474,74 @@ def parse_model_json(raw_text: str) -> dict[str, Any]:
     return result
 
 
+def parse_nemotron_lightweight_json(raw_text: str) -> dict[str, Any]:
+    """Parse and validate Nemotron's lightweight second-opinion JSON."""
+    if not raw_text or not raw_text.strip():
+        raise ModelResponseError("The model returned an empty response.")
+
+    if "{" not in raw_text:
+        raise MalformedResultError("The model response did not contain a JSON object.")
+
+    result = _load_json_with_repair(raw_text)
+    if _contains_forbidden_decision_text(result):
+        raise MalformedResultError(
+            "The model result contains a forbidden non-binary decision label."
+        )
+
+    required = {
+        "map_file",
+        "model",
+        "overall_meets_expectations",
+        "domain_scores",
+        "brief_rationale",
+        "agreement_notes",
+    }
+    missing = sorted(required.difference(result))
+    if missing:
+        raise MalformedResultError(
+            "The lightweight Nemotron result is missing required fields: "
+            + ", ".join(missing)
+        )
+
+    _require_yes_no(
+        result.get("overall_meets_expectations"),
+        "overall_meets_expectations",
+    )
+
+    if result.get("model") != grade_nemotron.MODEL:
+        raise MalformedResultError(
+            f"'model' must be exactly '{grade_nemotron.MODEL}'."
+        )
+    if not isinstance(result.get("map_file"), str):
+        raise MalformedResultError("'map_file' must be a string.")
+
+    domain_scores = result.get("domain_scores")
+    if not isinstance(domain_scores, dict):
+        raise MalformedResultError("'domain_scores' must be a JSON object.")
+
+    missing_domains = [
+        domain for domain in CATEGORY_FIELDS if domain not in domain_scores
+    ]
+    if missing_domains:
+        raise MalformedResultError(
+            "The lightweight Nemotron result is missing domain scores: "
+            + ", ".join(missing_domains)
+        )
+
+    for domain in CATEGORY_FIELDS:
+        score = domain_scores.get(domain)
+        if not isinstance(score, int) or isinstance(score, bool) or not 1 <= score <= 4:
+            raise MalformedResultError(
+                f"'domain_scores.{domain}' must be an integer from 1 to 4."
+            )
+
+    for field in ("brief_rationale", "agreement_notes"):
+        if not isinstance(result.get(field), str):
+            raise MalformedResultError(f"'{field}' must be a string.")
+
+    return result
+
+
 def _response_to_debug_text(response: Any) -> str:
     """Convert an SDK response object into a debug-safe text payload."""
     if response is None:
@@ -643,7 +727,10 @@ def run_evaluation(
                 model_name, Path(original_filename).name, model_id
             )
             returned_model_id, raw_text = _request_model(model_name, prompt, image)
-            data = parse_model_json(raw_text)
+            if model_name == "Nemotron":
+                data = parse_nemotron_lightweight_json(raw_text)
+            else:
+                data = parse_model_json(raw_text)
             output_path = OUTPUT_DIR / (
                 f"{timestamp}_{run_id}_{file_stem}_{model_name.lower()}.json"
             )

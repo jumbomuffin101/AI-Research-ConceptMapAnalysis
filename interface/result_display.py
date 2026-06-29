@@ -130,11 +130,61 @@ def _display_summary_items(title: str, items: Any, evidence_key: str) -> None:
                 st.write("No supporting details provided.")
 
 
+def is_lightweight_nemotron_result(data: dict[str, Any] | None) -> bool:
+    """Detect Nemotron's lightweight second-opinion payload."""
+    return isinstance(data, dict) and isinstance(data.get("domain_scores"), dict)
+
+
+def display_lightweight_result(result: Any, data: dict[str, Any]) -> None:
+    """Render Nemotron's compact second-opinion result."""
+    model_name = _model_name(result)
+    model_id = _model_id(result, data)
+    output_path = get_result_field(result, "output_path", None)
+
+    st.success(f"{model_name} completed successfully.")
+    st.header(f"{model_name} Lightweight Secondary Evaluation")
+    if model_id:
+        st.caption(model_id)
+
+    st.metric(
+        "Final Overall: This map meets expectations",
+        data.get("overall_meets_expectations", "Not reported"),
+    )
+
+    domain_scores = data.get("domain_scores", {})
+    rows = [
+        {
+            "Domain": GROUP_LABELS.get(domain, _label(domain)),
+            "Score": domain_scores.get(domain, "-"),
+        }
+        for domain in CATEGORY_FIELDS
+    ]
+    st.dataframe(rows, hide_index=True, use_container_width=True)
+
+    with st.expander("Brief rationale", expanded=True):
+        st.write(data.get("brief_rationale") or "No rationale provided.")
+
+    with st.expander("Agreement notes"):
+        st.write(data.get("agreement_notes") or "No agreement notes provided.")
+
+    st.download_button(
+        "Download JSON result",
+        data=json.dumps(data, indent=2),
+        file_name=getattr(output_path, "name", f"{model_name.lower()}_result.json"),
+        mime="application/json",
+        key=f"download-{model_name}-{id(result)}",
+    )
+
+
 def display_result(result: Any) -> None:
     """Render one model's complete result."""
     data = get_result_data(result)
     if not data:
         display_failure(result)
+        return
+
+    if is_lightweight_nemotron_result(data):
+        display_lightweight_result(result, data)
         return
 
     model_name = _model_name(result)

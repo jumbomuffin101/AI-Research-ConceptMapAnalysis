@@ -20,31 +20,12 @@ def create_client():
 
 MODEL = "nvidia/nemotron-nano-12b-v2-vl:free"
 
-CATEGORY_FIELDS = {
-    "knowledge_acquisition": [
-        "basic_science",
-        "health_system_science",
-        "clinical_science",
-        "patient_case_information",
-        "determinants_of_health",
-    ],
-    "integration": [
-        "prioritized_differential_diagnosis",
-        "illness_scripts",
-        "basic_to_foundational_science",
-        "patient_data_to_clinical_information",
-        "patient_data_to_basic_science",
-    ],
-    "application": [
-        "working_diagnosis_pathophysiology",
-        "patient_data_pathophysiology",
-    ],
-    "transfer": [
-        "prior_basic_science",
-        "prior_clinical_concepts",
-        "deepens_understanding",
-    ],
-}
+DOMAINS = [
+    "knowledge_acquisition",
+    "integration",
+    "application",
+    "transfer",
+]
 
 MAPS = [
     {
@@ -84,60 +65,36 @@ def clean_json_output(text):
     return text
 
 
-rubric = Path("rubric/concept_map_rubric.json").read_text(encoding="utf-8")
-
-
-def _spring_rubric():
-    rubric_data = json.loads(rubric)
+def _lightweight_schema(map_file):
     return {
-        group: rubric_data[group]
-        for group in CATEGORY_FIELDS
-        if isinstance(rubric_data.get(group), dict)
+        "map_file": map_file,
+        "model": MODEL,
+        "overall_meets_expectations": "No",
+        "domain_scores": {domain: 1 for domain in DOMAINS},
+        "brief_rationale": "",
+        "agreement_notes": "",
     }
 
 
-def _spring_schema(map_file):
-    schema = {"map_file": map_file, "model": MODEL}
-    for group, fields in CATEGORY_FIELDS.items():
-        schema[group] = {
-            field: {"score": 1, "explanation": "", "evidence_from_map": []}
-            for field in fields
-        }
-        schema[group]["overall_decision"] = "No"
-        schema[group]["if_no_explanation"] = ""
-    schema.update(
-        {
-            "overall_meets_expectations": "No",
-            "strengths": ["", ""],
-            "areas_for_improvement": ["", ""],
-            "grading_notes": "",
-        }
-    )
-    return schema
-
-
 def build_prompt(map_file):
-    return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
-Do not invent additional grading criteria.
+    return f"""Use the Spring 2025 concept map rubric at a high level.
+Give an independent lightweight second opinion for the visible concept map.
 
-Rubric:
-{json.dumps(_spring_rubric(), indent=2)}
+Score only these four domains from 1 to 4:
+{chr(10).join(f"- {domain}" for domain in DOMAINS)}
 
-Global rules:
-- Every criterion score must be an integer 1, 2, 3, or 4 only.
-- Every domain overall_decision must be exactly "Yes" or "No".
+Rules:
+- Scores must be integers 1, 2, 3, or 4 only.
 - overall_meets_expectations must be exactly "Yes" or "No".
-- Do not output Partial, Partially Meets, Borderline, Maybe, score 0, score 5, decimal scores, or any score outside 1-4.
-- If evidence is missing, write "No clear evidence found in the concept map."
-- Do not hallucinate evidence not visible in the concept map.
+- Do not use Partial, Maybe, Borderline, score 0, score 5, or decimals.
+- Keep brief_rationale and agreement_notes short.
+- Return only valid JSON. No markdown. No prose outside JSON.
 
-Each criterion must include score, explanation, and evidence_from_map.
-Each domain must include overall_decision and if_no_explanation.
-If overall_decision is "No", if_no_explanation is required.
-The final overall decision answers: This map meets expectations.
+Do not grade every subcriterion.
+Do not provide evidence_from_map.
 
-Return ONLY raw valid JSON using this exact structure:
-{json.dumps(_spring_schema(map_file), indent=2)}
+Return exactly this JSON shape:
+{json.dumps(_lightweight_schema(map_file), indent=2)}
 """
 
 
@@ -145,7 +102,7 @@ def request_grade(client, prompt, image):
     return client.chat.completions.create(
         model=MODEL,
         temperature=0,
-        max_tokens=2000,
+        max_tokens=800,
         messages=[
             {
                 "role": "user",

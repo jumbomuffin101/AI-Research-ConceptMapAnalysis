@@ -75,7 +75,7 @@ Interactive Web Dashboard
 - `google/gemma-4-26b-a4b-it:free`
 - `nvidia/nemotron-nano-12b-v2-vl:free`
 
-Both models independently evaluate concept maps and generate rubric-aligned scoring.
+Gemma is the full Spring 2025 rubric grader. Nemotron provides a lightweight independent second-opinion evaluation with domain-level scores and a brief rationale.
 
 Users may run:
 
