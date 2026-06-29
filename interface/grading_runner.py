@@ -155,8 +155,16 @@ def selected_model_names(selection: str) -> list[str]:
     return [selection]
 
 
-def model_debug_lines(model_names: Iterable[str]) -> list[str]:
+def model_debug_lines(model_names: Iterable[str] | None = None) -> list[str]:
     """Return provider/model debug lines safe for display or logs."""
+    if model_names is None:
+        return [
+            "Gemma provider: OpenRouter",
+            f"Gemma model: {GEMMA_MODEL}",
+            "Nemotron provider: NVIDIA NIM",
+            f"Nemotron model: {NEMOTRON_MODEL}",
+        ]
+
     lines = []
     for model_name in model_names:
         info = MODEL_PROVIDER_INFO.get(model_name)
