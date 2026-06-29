@@ -7,7 +7,12 @@ from pathlib import Path
 
 import streamlit as st
 
-from interface.grading_runner import GradingError, run_evaluation, selected_model_names
+from interface.grading_runner import (
+    GradingError,
+    model_debug_lines,
+    run_evaluation,
+    selected_model_names,
+)
 from interface.result_display import display_results
 
 
@@ -25,6 +30,9 @@ model_selection = st.radio(
     options=["Gemma", "Nemotron", "Both"],
     horizontal=True,
 )
+for debug_line in model_debug_lines(selected_model_names(model_selection)):
+    if debug_line.startswith("Nemotron provider:"):
+        st.caption(debug_line)
 st.button("Multi-AI Consensus Grading - Coming Soon", disabled=True)
 
 if st.button("Run Evaluation", type="primary"):

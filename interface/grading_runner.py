@@ -46,6 +46,19 @@ MODEL_CONFIGS = {
     },
 }
 
+MODEL_PROVIDER_INFO = {
+    "Gemma": {
+        "provider": "OpenRouter",
+        "base_url": "https://openrouter.ai/api/v1",
+        "model": grade_gemma.MODEL,
+    },
+    "Nemotron": {
+        "provider": "NVIDIA NIM",
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "model": grade_nemotron.MODEL,
+    },
+}
+
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
         "basic_science",
@@ -143,6 +156,20 @@ def selected_model_names(selection: str) -> list[str]:
     if selection not in MODEL_CONFIGS:
         raise GradingError(f"Unknown model selection: {selection}")
     return [selection]
+
+
+def model_debug_lines(model_names: Iterable[str]) -> list[str]:
+    """Return provider/model debug lines safe for display or logs."""
+    lines = []
+    for model_name in model_names:
+        info = MODEL_PROVIDER_INFO.get(model_name)
+        if not info:
+            continue
+        lines.append(
+            f"{model_name} provider: {info['provider']} | "
+            f"base_url: {info['base_url']} | model: {info['model']}"
+        )
+    return lines
 
 
 def render_pdf_image(pdf_path: Path, model_name: str) -> str:
@@ -572,6 +599,9 @@ def _request_model(
         client = _create_client(
             model_name, disable_sdk_retries=request_timeout is not None
         )
+        if model_name == "Nemotron":
+            for line in model_debug_lines([model_name]):
+                print(line)
         request_options: dict[str, Any] = {
             "model": config["model_id"],
             "max_tokens": max_tokens or config["max_tokens"],
