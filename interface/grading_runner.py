@@ -280,56 +280,9 @@ Use this exact JSON structure:
 """
 
 
-def build_nemotron_web_prompt(map_file: str, model_id: str) -> str:
-    """Build Nemotron's full rubric prompt with conservative scoring rules."""
-    schema = build_spring_schema(map_file, model_id)
-    rubric = load_summative_rubric()
-
-    return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
-Do not invent additional grading criteria.
-
-Rubric:
-{json.dumps(rubric, indent=2)}
-
-Global rules:
-- Every criterion score must be an integer 1, 2, 3, or 4 only.
-- Every domain overall_decision must be exactly "Yes" or "No".
-- overall_meets_expectations must be exactly "Yes" or "No".
-- Do not output Partial, Partially Meets, Borderline, Maybe, score 0, score 5, decimal scores, or any score outside 1-4.
-- If evidence is missing, write "No clear evidence found in the concept map."
-- Do not hallucinate evidence not visible in the concept map.
-
-Anti-overgrading rules:
-- Do not assign 4 unless the concept map clearly satisfies the full score-4 descriptor for that criterion.
-- If evidence is limited, vague, missing, or not clearly visible, score 1 or 2.
-- If evidence is relevant but incomplete or only partially synthesized, score 2.
-- If evidence is relevant and mostly synthesized but not comprehensive or detailed, score 3.
-- Score 4 only when the concept map is detailed, synthesized, comprehensive, and directly supported by visible evidence.
-- Never infer missing information from medical knowledge alone.
-- Grade only what is visible in the concept map image.
-- Do not reward the map for possible intent; grade only demonstrated content and relationships.
-- If evidence_from_map is "No clear evidence found in the concept map.", the score cannot be 3 or 4.
-
-For every scored category, return only:
-- score: integer 1-4
-- explanation: one short explanation
-- evidence_from_map: short strings copied or paraphrased from visible map content
-
-Each domain must include:
-- overall_decision: "Yes" or "No"
-- if_no_explanation: required when overall_decision is "No"; otherwise empty string
-
-Keep all JSON string values short. Do not write paragraphs.
-Return JSON only. Do not include markdown or text outside JSON.
-Use this exact JSON structure:
-{json.dumps(schema, indent=2)}
-"""
-
-
 def build_model_prompt(model_name: str, map_file: str, model_id: str) -> str:
-    """Build the web prompt for a model without changing CLI prompts."""
-    if model_name == "Nemotron":
-        return build_nemotron_web_prompt(map_file, model_id)
+    """Build the same full Spring 2025 prompt for either model."""
+    _ = model_name
     return build_web_prompt(map_file, model_id)
 
 
@@ -511,54 +464,6 @@ def parse_model_json(raw_text: str) -> dict[str, Any]:
                 raise MalformedResultError(
                     f"'{group}.{field}.explanation' must be a string."
                 )
-    return result
-
-
-def _correct_unsupported_nemotron_high_scores(
-    result: dict[str, Any],
-) -> dict[str, Any]:
-    """Downgrade score-4 ratings that have no visible supporting evidence."""
-    missing_evidence = "No clear evidence found in the concept map."
-    corrected = False
-
-    for group, fields in CATEGORY_FIELDS.items():
-        section = result.get(group)
-        if not isinstance(section, dict):
-            continue
-        for field in fields:
-            item = section.get(field)
-            if not isinstance(item, dict) or item.get("score") != 4:
-                continue
-
-            evidence = item.get("evidence_from_map")
-            if isinstance(evidence, list):
-                evidence_items = [
-                    value.strip()
-                    for value in evidence
-                    if isinstance(value, str) and value.strip()
-                ]
-            elif isinstance(evidence, str) and evidence.strip():
-                evidence_items = [evidence.strip()]
-            else:
-                evidence_items = []
-
-            if not evidence_items or all(
-                value == missing_evidence for value in evidence_items
-            ):
-                item["score"] = 2
-                corrected = True
-
-    if corrected:
-        correction_note = (
-            "Unsupported Nemotron score-4 ratings were corrected to score 2 "
-            "because visible evidence was missing."
-        )
-        existing_note = result.get("grading_notes")
-        if isinstance(existing_note, str) and existing_note.strip():
-            result["grading_notes"] = f"{existing_note.strip()} {correction_note}"
-        else:
-            result["grading_notes"] = correction_note
-
     return result
 
 
@@ -805,8 +710,6 @@ def run_evaluation(
             )
             returned_model_id, raw_text = _request_model(model_name, prompt, image)
             data = parse_model_json(raw_text)
-            if model_name == "Nemotron":
-                data = _correct_unsupported_nemotron_high_scores(data)
             output_path = OUTPUT_DIR / (
                 f"{timestamp}_{run_id}_{file_stem}_{model_name.lower()}.json"
             )
