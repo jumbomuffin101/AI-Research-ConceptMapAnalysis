@@ -7,9 +7,11 @@ PDF rendering flow while accepting any uploaded PDF.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -394,6 +396,20 @@ def _load_json_with_repair(raw_text: str) -> dict[str, Any]:
     return result
 
 
+def _cleaned_json_text(raw_text: str) -> str:
+    """Return the JSON text selected by the same repair path used for parsing."""
+    text = _strip_json_fences(raw_text)
+    try:
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        return (
+            _extract_first_complete_json_object(text)
+            or _extract_repairable_json_object(text)
+            or text
+        )
+
+
 def _contains_forbidden_decision_text(value: Any) -> bool:
     if isinstance(value, dict):
         return any(_contains_forbidden_decision_text(item) for item in value.values())
@@ -467,6 +483,21 @@ def parse_model_json(raw_text: str) -> dict[str, Any]:
     return result
 
 
+def _is_implausible_all_four_result(result: dict[str, Any]) -> bool:
+    """Return true only when every required rubric criterion is scored four."""
+    scores: list[Any] = []
+    for group, fields in CATEGORY_FIELDS.items():
+        section = result.get(group)
+        if not isinstance(section, dict):
+            return False
+        for field in fields:
+            item = section.get(field)
+            if not isinstance(item, dict):
+                return False
+            scores.append(item.get("score"))
+    return bool(scores) and all(score == 4 for score in scores)
+
+
 def _response_to_debug_text(response: Any) -> str:
     """Convert an SDK response object into a debug-safe text payload."""
     if response is None:
@@ -509,6 +540,63 @@ def _save_failed_response(
         "model_id": model_id,
         "error_message": error_message,
         "raw_response": _response_to_debug_text(raw_response),
+    }
+    debug_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return debug_path
+
+
+def _save_nemotron_debug_image(
+    *, image: str, timestamp: str, run_id: str, file_stem: str
+) -> Path:
+    """Save the exact PNG bytes included in the NVIDIA request."""
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    image_bytes = base64.b64decode(image, validate=True)
+    if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise GradingError("The rendered Nemotron request image is not a valid PNG.")
+    image_path = DEBUG_DIR / (
+        f"{timestamp}_{run_id}_{file_stem}_nemotron_request.png"
+    )
+    image_path.write_bytes(image_bytes)
+    return image_path
+
+
+def _save_nemotron_trace(
+    *,
+    timestamp: str,
+    run_id: str,
+    file_stem: str,
+    map_filename: str,
+    pdf_path: Path,
+    prompt: str,
+    image_path: Path,
+    raw_api_response: Any | None,
+    cleaned_json: str | None,
+    parsed_before_validation: dict[str, Any] | None,
+    parsed_after_validation: dict[str, Any] | None,
+    request_metadata: dict[str, Any] | None,
+    error_message: str | None,
+) -> Path:
+    """Persist a complete, per-run NVIDIA request/response trace."""
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    debug_path = DEBUG_DIR / (
+        f"{timestamp}_{run_id}_{file_stem}_nemotron_trace.json"
+    )
+    payload = {
+        "timestamp": timestamp,
+        "provider": "NVIDIA NIM",
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "model_id": NEMOTRON_MODEL,
+        "map_filename": map_filename,
+        "source_pdf_sha256": hashlib.sha256(pdf_path.read_bytes()).hexdigest(),
+        "prompt_text": prompt,
+        "image_debug_path": str(image_path),
+        "image_sha256": hashlib.sha256(image_path.read_bytes()).hexdigest(),
+        "request_metadata": request_metadata,
+        "raw_api_response": _response_to_debug_text(raw_api_response),
+        "cleaned_json": cleaned_json,
+        "parsed_json_before_validation": parsed_before_validation,
+        "parsed_json_after_validation": parsed_after_validation,
+        "error_message": error_message,
     }
     debug_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return debug_path
@@ -601,23 +689,96 @@ def _is_input_limit_error(message: str) -> bool:
     )
 
 
+def _upload_nvidia_image_asset(image_bytes: bytes, description: str) -> str:
+    """Upload an oversized PNG through NVIDIA's documented NVCF asset API."""
+    api_key = _get_secret("NVIDIA_API_KEY")
+    if not api_key:
+        raise GradingError("NVIDIA_API_KEY is not configured.")
+
+    create_payload = json.dumps(
+        {"contentType": "image/png", "description": description}
+    ).encode("utf-8")
+    create_request = urllib.request.Request(
+        "https://api.nvcf.nvidia.com/v2/nvcf/assets",
+        data=create_payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(create_request, timeout=60) as response:
+        asset_response = json.loads(response.read().decode("utf-8"))
+
+    asset_id = asset_response.get("assetId") or asset_response.get("asset_id")
+    upload_url = asset_response.get("uploadUrl") or asset_response.get("upload_url")
+    if not asset_id or not upload_url:
+        raise ModelResponseError(
+            "NVIDIA NVCF did not return an asset ID and upload URL.",
+            raw_response=asset_response,
+        )
+
+    upload_request = urllib.request.Request(
+        upload_url,
+        data=image_bytes,
+        headers={
+            "Content-Type": "image/png",
+            "x-amz-meta-nvcf-asset-description": description,
+        },
+        method="PUT",
+    )
+    with urllib.request.urlopen(upload_request, timeout=120) as response:
+        response.read()
+    return str(asset_id)
+
+
+def _prepare_request_image(
+    model_name: str, prompt: str, image: str
+) -> tuple[str | list[dict[str, Any]], dict[str, str] | None, dict[str, Any]]:
+    """Choose inline or NVCF asset transport without changing image bytes."""
+    image_bytes = base64.b64decode(image, validate=True)
+    request_metadata: dict[str, Any] = {
+        "image_bytes": len(image_bytes),
+        "image_transport": "inline_base64",
+    }
+    extra_headers: dict[str, str] | None = None
+
+    if model_name == "Nemotron" and len(image_bytes) > 180 * 1024:
+        asset_id = _upload_nvidia_image_asset(
+            image_bytes, "AI concept map grading request"
+        )
+        content: str | list[dict[str, Any]] = (
+            f'<img src="data:image/png;asset_id,{asset_id}" />\n{prompt}'
+        )
+        extra_headers = {"NVCF-INPUT-ASSET-REFERENCES": asset_id}
+        request_metadata.update(
+            {"image_transport": "nvcf_asset", "nvcf_asset_id": asset_id}
+        )
+    else:
+        content = [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{image}"},
+            },
+        ]
+    return content, extra_headers, request_metadata
+
+
 def _request_model(
     model_name: str,
     prompt: str,
     image: str,
     max_tokens: int | None = None,
     request_timeout: float | None = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, Any, dict[str, Any]]:
     config = MODEL_CONFIGS[model_name]
-    content: list[dict[str, Any]] = [
-        {"type": "text", "text": prompt},
-        {
-            "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{image}"},
-        },
-    ]
 
     try:
+        content, extra_headers, request_metadata = _prepare_request_image(
+            model_name, prompt, image
+        )
         client = _create_client(
             model_name, disable_sdk_retries=request_timeout is not None
         )
@@ -632,6 +793,8 @@ def _request_model(
         }
         if request_timeout is not None:
             request_options["timeout"] = request_timeout
+        if extra_headers is not None:
+            request_options["extra_headers"] = extra_headers
         response = client.chat.completions.create(
             **request_options
         )
@@ -667,7 +830,7 @@ def _request_model(
             f"{model_name} returned no usable content.",
             raw_response=response,
         )
-    return config["model_id"], text
+    return config["model_id"], text, response, request_metadata
 
 
 def _safe_stem(filename: str) -> str:
@@ -704,12 +867,57 @@ def run_evaluation(
         model_id = MODEL_CONFIGS[model_name]["model_id"]
         image = render_pdf_image(pdf_path, model_name)
         raw_text: str | None = None
+        raw_api_response: Any | None = None
+        prompt = ""
+        image_debug_path: Path | None = None
+        cleaned_json: str | None = None
+        parsed_before_validation: dict[str, Any] | None = None
+        parsed_after_validation: dict[str, Any] | None = None
+        request_metadata: dict[str, Any] | None = None
         try:
             prompt = build_model_prompt(
                 model_name, Path(original_filename).name, model_id
             )
-            returned_model_id, raw_text = _request_model(model_name, prompt, image)
+            if model_name == "Nemotron":
+                image_debug_path = _save_nemotron_debug_image(
+                    image=image,
+                    timestamp=timestamp,
+                    run_id=run_id,
+                    file_stem=file_stem,
+                )
+            (
+                returned_model_id,
+                raw_text,
+                raw_api_response,
+                request_metadata,
+            ) = _request_model(model_name, prompt, image)
+            if model_name == "Nemotron":
+                cleaned_json = _cleaned_json_text(raw_text)
+                parsed_before_validation = _load_json_with_repair(raw_text)
             data = parse_model_json(raw_text)
+            if model_name == "Nemotron":
+                parsed_after_validation = json.loads(json.dumps(data))
+                if _is_implausible_all_four_result(data):
+                    raise ModelResponseError(
+                        "Nemotron returned an implausible all-4 evaluation. "
+                        "Raw output saved for debugging.",
+                        raw_response=raw_api_response,
+                    )
+                _save_nemotron_trace(
+                    timestamp=timestamp,
+                    run_id=run_id,
+                    file_stem=file_stem,
+                    map_filename=Path(original_filename).name,
+                    pdf_path=pdf_path,
+                    prompt=prompt,
+                    image_path=image_debug_path,
+                    raw_api_response=raw_api_response,
+                    cleaned_json=cleaned_json,
+                    parsed_before_validation=parsed_before_validation,
+                    parsed_after_validation=parsed_after_validation,
+                    request_metadata=request_metadata,
+                    error_message=None,
+                )
             output_path = OUTPUT_DIR / (
                 f"{timestamp}_{run_id}_{file_stem}_{model_name.lower()}.json"
             )
@@ -718,18 +926,39 @@ def run_evaluation(
                 EvaluationResult(model_name, returned_model_id, data, output_path)
             )
         except (ModelResponseError, MalformedResultError) as exc:
-            raw_response = getattr(exc, "raw_response", None)
-            if raw_response is None:
-                raw_response = raw_text
-            debug_path = _save_failed_response(
-                timestamp=timestamp,
-                run_id=run_id,
-                file_stem=file_stem,
-                model_name=model_name,
-                model_id=model_id,
-                error_message=str(exc),
-                raw_response=raw_response,
-            )
+            if model_name == "Nemotron" and image_debug_path is not None:
+                debug_path = _save_nemotron_trace(
+                    timestamp=timestamp,
+                    run_id=run_id,
+                    file_stem=file_stem,
+                    map_filename=Path(original_filename).name,
+                    pdf_path=pdf_path,
+                    prompt=prompt,
+                    image_path=image_debug_path,
+                    raw_api_response=(
+                        raw_api_response
+                        if raw_api_response is not None
+                        else getattr(exc, "raw_response", raw_text)
+                    ),
+                    cleaned_json=cleaned_json,
+                    parsed_before_validation=parsed_before_validation,
+                    parsed_after_validation=parsed_after_validation,
+                    request_metadata=request_metadata,
+                    error_message=str(exc),
+                )
+            else:
+                raw_response = getattr(exc, "raw_response", None)
+                if raw_response is None:
+                    raw_response = raw_text
+                debug_path = _save_failed_response(
+                    timestamp=timestamp,
+                    run_id=run_id,
+                    file_stem=file_stem,
+                    model_name=model_name,
+                    model_id=model_id,
+                    error_message=str(exc),
+                    raw_response=raw_response,
+                )
             results.append(
                 EvaluationFailure(
                     model_name=model_name,

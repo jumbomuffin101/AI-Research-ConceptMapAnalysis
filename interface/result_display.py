@@ -186,7 +186,12 @@ def display_failure(result: Any) -> None:
     error_message = _failure_reason(result)
     debug_path = get_result_field(result, "debug_path", None)
 
-    if "Input is too large for the current model limit" in error_message:
+    if "implausible all-4 evaluation" in error_message:
+        st.warning(
+            "Nemotron returned an implausible all-4 evaluation. "
+            "Raw output saved for debugging."
+        )
+    elif "Input is too large for the current model limit" in error_message:
         st.warning(
             "Input is too large for the current model limit. "
             "Try a smaller PDF/image or use the local CLI pipeline. "

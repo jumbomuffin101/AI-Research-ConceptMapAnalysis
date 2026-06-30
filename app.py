@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import tempfile
 from pathlib import Path
 
@@ -24,6 +25,11 @@ st.write(
 )
 
 uploaded_file = st.file_uploader("Concept map PDF", type=["pdf"])
+uploaded_file_fingerprint = (
+    hashlib.sha256(uploaded_file.getvalue()).hexdigest()
+    if uploaded_file is not None
+    else None
+)
 model_selection = st.radio(
     "Model",
     options=["Gemma", "Nemotron", "Both"],
@@ -31,6 +37,7 @@ model_selection = st.radio(
 )
 
 previous_model_selection = st.session_state.get("previous_model_selection")
+previous_file_fingerprint = st.session_state.get("previous_file_fingerprint")
 if previous_model_selection is None:
     st.session_state["previous_model_selection"] = model_selection
 elif model_selection != previous_model_selection:
@@ -38,6 +45,12 @@ elif model_selection != previous_model_selection:
     st.session_state.pop("evaluation_debug", None)
     st.session_state.pop("evaluation_error", None)
     st.session_state["previous_model_selection"] = model_selection
+
+if previous_file_fingerprint != uploaded_file_fingerprint:
+    st.session_state.pop("evaluation_results", None)
+    st.session_state.pop("evaluation_debug", None)
+    st.session_state.pop("evaluation_error", None)
+    st.session_state["previous_file_fingerprint"] = uploaded_file_fingerprint
 
 st.button("Multi-AI Consensus Grading - Coming Soon", disabled=True)
 
