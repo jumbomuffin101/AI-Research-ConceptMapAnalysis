@@ -437,6 +437,18 @@ def _require_yes_no(value: Any, field_path: str) -> None:
         raise MalformedResultError(f"'{field_path}' must be exactly 'Yes' or 'No'.")
 
 
+def _fill_missing_domain_explanations(result: dict[str, Any]) -> None:
+    """Supply the schema fallback for unexplained negative domain decisions."""
+    fallback = "The model did not provide a domain-level explanation."
+    for group in CATEGORY_FIELDS:
+        section = result.get(group)
+        if not isinstance(section, dict) or section.get("overall_decision") != "No":
+            continue
+        explanation = section.get("if_no_explanation")
+        if not isinstance(explanation, str) or not explanation.strip():
+            section["if_no_explanation"] = fallback
+
+
 def parse_model_json(raw_text: str) -> dict[str, Any]:
     """Extract, parse, repair when possible, and validate grading JSON."""
     if not raw_text or not raw_text.strip():
@@ -446,6 +458,7 @@ def parse_model_json(raw_text: str) -> dict[str, Any]:
         raise MalformedResultError("The model response did not contain a JSON object.")
 
     result = _load_json_with_repair(raw_text)
+    _fill_missing_domain_explanations(result)
     if _contains_forbidden_decision_text(result):
         raise MalformedResultError(
             "The model result contains a forbidden non-binary decision label."
