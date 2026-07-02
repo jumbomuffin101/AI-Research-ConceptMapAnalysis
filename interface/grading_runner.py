@@ -713,12 +713,14 @@ def _prepare_request_image(
             },
         },
     }
-    content = [
-        {
-            "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{image}"},
-        },
-        {"type": "text", "text": prompt},
+    image_item = {
+        "type": "image_url",
+        "image_url": {"url": f"data:image/png;base64,{image}"},
+    }
+    text_item = {"type": "text", "text": prompt}
+    content = [image_item, text_item] if model_name == "Nemotron" else [
+        text_item,
+        image_item,
     ]
     return content, request_metadata
 
@@ -805,6 +807,146 @@ def _run_nemotron_health_tests(client: Any, image: str, debug_prefix: Path) -> N
         raise
 
 
+NEMOTRON_EVIDENCE_FIELDS = (
+    "visible_diagnoses",
+    "patient_data",
+    "basic_science_concepts",
+    "clinical_science_concepts",
+    "health_system_science_concepts",
+    "determinants_of_health",
+    "visible_relationships_connections",
+    "missing_or_unclear_required_elements",
+)
+
+
+def _build_nemotron_evidence_prompt() -> str:
+    evidence_schema = {field: [] for field in NEMOTRON_EVIDENCE_FIELDS}
+    return f"""Extract only evidence visibly present in this concept map image.
+Do not grade the map. Do not infer from medical knowledge or add content that is not visible.
+Extract visible diagnoses, patient data, basic science concepts, clinical science concepts,
+health system science concepts, determinants of health, and visible relationships or connections.
+Also identify required elements that are visibly missing or unclear within those categories.
+Use short strings. If a category has no visible evidence, return an empty list.
+
+Return ONLY valid JSON with this exact structure:
+{json.dumps(evidence_schema, indent=2)}
+"""
+
+
+def _parse_nemotron_evidence(raw_text: str) -> dict[str, list[str]]:
+    evidence = _load_json_with_repair(raw_text)
+    missing = [field for field in NEMOTRON_EVIDENCE_FIELDS if field not in evidence]
+    if missing:
+        raise MalformedResultError(
+            "Nemotron evidence extraction is missing fields: " + ", ".join(missing)
+        )
+    parsed: dict[str, list[str]] = {}
+    for field in NEMOTRON_EVIDENCE_FIELDS:
+        value = evidence[field]
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise MalformedResultError(
+                f"Nemotron evidence field '{field}' must be a list of strings."
+            )
+        parsed[field] = value
+    return parsed
+
+
+def _build_nemotron_evidence_grading_prompt(
+    rubric_prompt: str, evidence: dict[str, list[str]]
+) -> str:
+    return f"""{rubric_prompt}
+
+Use ONLY the extracted evidence JSON below to grade. Do not use an image.
+- Do not infer from medical knowledge.
+- Do not grade based on what should be present.
+- Score 4 only if the extracted evidence clearly supports the full rubric descriptor.
+- Missing evidence must score 1.
+- Vague or partial evidence must score 2.
+- Relevant but incomplete evidence must score 3.
+- Comprehensive and detailed evidence can score 4.
+
+Extracted evidence JSON:
+{json.dumps(evidence, indent=2)}
+"""
+
+
+def _run_nemotron_two_stage(
+    client: Any,
+    image: str,
+    rubric_prompt: str,
+    debug_prefix: Path,
+    max_tokens: int,
+    request_timeout: float | None,
+) -> tuple[str, Any, dict[str, Any]]:
+    evidence_prompt = _build_nemotron_evidence_prompt()
+    evidence_content, image_metadata = _prepare_request_image(
+        "Nemotron", evidence_prompt, image
+    )
+    evidence_options: dict[str, Any] = {
+        "model": NEMOTRON_MODEL,
+        "temperature": 0,
+        "max_tokens": 1200,
+        "messages": [{"role": "user", "content": evidence_content}],
+    }
+    if request_timeout is not None:
+        evidence_options["timeout"] = request_timeout
+    evidence_response = client.chat.completions.create(**evidence_options)
+    evidence_text = _require_response_content(evidence_response, "evidence extraction")
+    Path(f"{debug_prefix}_evidence_raw_response.json").write_text(
+        _response_to_debug_text(evidence_response), encoding="utf-8"
+    )
+    evidence = _parse_nemotron_evidence(evidence_text)
+    evidence_path = Path(f"{debug_prefix}_extracted_evidence.json")
+    evidence_path.write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+
+    grading_prompt = _build_nemotron_evidence_grading_prompt(
+        rubric_prompt, evidence
+    )
+    grading_prompt_path = Path(f"{debug_prefix}_grading_prompt.txt")
+    grading_prompt_path.write_text(grading_prompt, encoding="utf-8")
+    grading_options: dict[str, Any] = {
+        "model": NEMOTRON_MODEL,
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": grading_prompt}],
+    }
+    if request_timeout is not None:
+        grading_options["timeout"] = request_timeout
+    grading_response = client.chat.completions.create(**grading_options)
+    grading_text = _require_response_content(grading_response, "rubric grading")
+    raw_grading_path = Path(f"{debug_prefix}_grading_raw_response.json")
+    raw_grading_path.write_text(
+        _response_to_debug_text(grading_response), encoding="utf-8"
+    )
+    metadata = {
+        "pipeline": "nemotron_two_stage_evidence_then_grading",
+        "image_bytes": image_metadata["image_bytes"],
+        "image_transport": image_metadata["image_transport"],
+        "evidence_payload_shape": {
+            "model": NEMOTRON_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        image_metadata["payload_shape"],
+                        {"type": "text", "text": evidence_prompt},
+                    ],
+                }
+            ],
+        },
+        "grading_payload_shape": {
+            "model": NEMOTRON_MODEL,
+            "messages": [{"role": "user", "content": grading_prompt}],
+        },
+        "extracted_evidence_path": str(evidence_path),
+        "grading_prompt_path": str(grading_prompt_path),
+        "raw_grading_response_path": str(raw_grading_path),
+    }
+    return grading_text, grading_response, metadata
+
+
 def _request_model(
     model_name: str,
     prompt: str,
@@ -816,7 +958,6 @@ def _request_model(
     config = MODEL_CONFIGS[model_name]
 
     try:
-        content, request_metadata = _prepare_request_image(model_name, prompt, image)
         client = _create_client(
             model_name, disable_sdk_retries=request_timeout is not None
         )
@@ -826,6 +967,19 @@ def _request_model(
             if health_debug_prefix is None:
                 raise GradingError("Nemotron health-test debug path is missing.")
             _run_nemotron_health_tests(client, image, health_debug_prefix)
+            text, response, request_metadata = _run_nemotron_two_stage(
+                client=client,
+                image=image,
+                rubric_prompt=prompt,
+                debug_prefix=health_debug_prefix,
+                max_tokens=max_tokens or config["max_tokens"],
+                request_timeout=request_timeout,
+            )
+            return config["model_id"], text, response, request_metadata
+
+        content, request_metadata = _prepare_request_image(
+            model_name, prompt, image
+        )
         request_options: dict[str, Any] = {
             "model": config["model_id"],
             "max_tokens": max_tokens or config["max_tokens"],
@@ -840,8 +994,8 @@ def _request_model(
                 {
                     "role": "user",
                     "content": [
-                        request_metadata["payload_shape"],
                         {"type": "text", "text": prompt},
+                        request_metadata["payload_shape"],
                     ],
                 }
             ],
@@ -966,6 +1120,15 @@ def run_evaluation(
             data = parse_model_json(raw_text)
             if model_name == "Nemotron":
                 parsed_after_validation = json.loads(json.dumps(data))
+                Path(
+                    DEBUG_DIR
+                    / (
+                        f"{timestamp}_{run_id}_{file_stem}_nemotron_"
+                        "final_parsed_grading.json"
+                    )
+                ).write_text(
+                    json.dumps(parsed_after_validation, indent=2), encoding="utf-8"
+                )
                 if _is_implausible_all_four_result(data):
                     raise ModelResponseError(
                         "Nemotron returned an implausible all-4 evaluation. "

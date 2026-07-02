@@ -157,28 +157,12 @@ Return ONLY raw valid JSON using this exact structure:
 """
 
 
-def request_grade(client, prompt, image):
+def request_grade(client, prompt):
     return client.chat.completions.create(
         model=MODEL,
         temperature=0,
         max_tokens=2000,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{image}"
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": prompt,
-                    },
-                ],
-            }
-        ],
+        messages=[{"role": "user", "content": prompt}],
     )
 
 
@@ -298,6 +282,107 @@ def _response_content(response):
     return content, ""
 
 
+EVIDENCE_FIELDS = (
+    "visible_diagnoses",
+    "patient_data",
+    "basic_science_concepts",
+    "clinical_science_concepts",
+    "health_system_science_concepts",
+    "determinants_of_health",
+    "visible_relationships_connections",
+    "missing_or_unclear_required_elements",
+)
+
+
+def build_evidence_prompt():
+    schema = {field: [] for field in EVIDENCE_FIELDS}
+    return f"""Extract only evidence visibly present in this concept map image.
+Do not grade the map. Do not infer from medical knowledge or add content that is not visible.
+Extract visible diagnoses, patient data, basic science concepts, clinical science concepts,
+health system science concepts, determinants of health, and visible relationships or connections.
+Also identify required elements that are visibly missing or unclear within those categories.
+Use short strings. If a category has no visible evidence, return an empty list.
+
+Return ONLY valid JSON with this exact structure:
+{json.dumps(schema, indent=2)}
+"""
+
+
+def extract_evidence(client, image, debug_prefix):
+    prompt = build_evidence_prompt()
+    response = client.chat.completions.create(
+        model=MODEL,
+        temperature=0,
+        max_tokens=1200,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image}"
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+    )
+    Path(f"{debug_prefix}_evidence_raw_response.json").write_text(
+        _debug_response_text(response), encoding="utf-8"
+    )
+    content, reason = _response_content(response)
+    if reason:
+        raise RuntimeError(f"Nemotron evidence extraction failed: {reason}")
+    evidence = json.loads(clean_json_output(content))
+    missing = [field for field in EVIDENCE_FIELDS if field not in evidence]
+    if missing:
+        raise RuntimeError(
+            "Nemotron evidence extraction is missing fields: " + ", ".join(missing)
+        )
+    for field in EVIDENCE_FIELDS:
+        if not isinstance(evidence[field], list) or not all(
+            isinstance(item, str) for item in evidence[field]
+        ):
+            raise RuntimeError(f"Evidence field '{field}' must be a list of strings.")
+    Path(f"{debug_prefix}_extracted_evidence.json").write_text(
+        json.dumps(evidence, indent=2), encoding="utf-8"
+    )
+    return evidence
+
+
+def build_evidence_grading_prompt(map_file, evidence):
+    return f"""{build_prompt(map_file)}
+
+Use ONLY the extracted evidence JSON below to grade. Do not use an image.
+- Do not infer from medical knowledge.
+- Do not grade based on what should be present.
+- Score 4 only if the extracted evidence clearly supports the full rubric descriptor.
+- Missing evidence must score 1.
+- Vague or partial evidence must score 2.
+- Relevant but incomplete evidence must score 3.
+- Comprehensive and detailed evidence can score 4.
+
+Extracted evidence JSON:
+{json.dumps(evidence, indent=2)}
+"""
+
+
+def _is_all_four_result(result):
+    scores = []
+    for group, fields in CATEGORY_FIELDS.items():
+        section = result.get(group)
+        if not isinstance(section, dict):
+            return False
+        for field in fields:
+            item = section.get(field)
+            if not isinstance(item, dict):
+                return False
+            scores.append(item.get("score"))
+    return bool(scores) and all(score == 4 for score in scores)
+
+
 def run_all():
     client = create_client()
     Path("outputs/gradingV5").mkdir(parents=True, exist_ok=True)
@@ -306,7 +391,6 @@ def run_all():
 
     for item in MAPS:
         image = pdf_to_base64(item["path"])
-        prompt = build_prompt(item["map_file"])
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         debug_prefix = debug_dir / f"{timestamp}_{Path(item['map_file']).stem}"
         image_debug_path = Path(f"{debug_prefix}_request.png")
@@ -314,6 +398,13 @@ def run_all():
 
         try:
             run_health_tests(client, image, debug_prefix)
+            evidence = extract_evidence(client, image, debug_prefix)
+            grading_prompt = build_evidence_grading_prompt(
+                item["map_file"], evidence
+            )
+            Path(f"{debug_prefix}_grading_prompt.txt").write_text(
+                grading_prompt, encoding="utf-8"
+            )
             outgoing_payload_shape = {
                 "model": MODEL,
                 "temperature": 0,
@@ -321,18 +412,7 @@ def run_all():
                 "messages": [
                     {
                         "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": (
-                                        "data:image/png;base64,"
-                                        "<exact rendered image bytes>"
-                                    )
-                                },
-                            },
-                            {"type": "text", "text": prompt},
-                        ],
+                        "content": grading_prompt,
                     }
                 ],
             }
@@ -346,7 +426,10 @@ def run_all():
                 ),
                 encoding="utf-8",
             )
-            response = request_grade(client, prompt, image)
+            response = request_grade(client, grading_prompt)
+            Path(f"{debug_prefix}_grading_raw_response.json").write_text(
+                _debug_response_text(response), encoding="utf-8"
+            )
 
             raw_output_path = item["output"].replace(".json", "_raw.txt")
             with open(raw_output_path, "w", encoding="utf-8") as f:
@@ -358,8 +441,17 @@ def run_all():
                 continue
 
             cleaned_result = clean_json_output(result)
+            parsed_result = json.loads(cleaned_result)
+            Path(f"{debug_prefix}_final_parsed_grading.json").write_text(
+                json.dumps(parsed_result, indent=2), encoding="utf-8"
+            )
+            if _is_all_four_result(parsed_result):
+                raise RuntimeError(
+                    "Nemotron returned an implausible all-4 evaluation. "
+                    "Raw output saved for debugging."
+                )
             with open(item["output"], "w", encoding="utf-8") as f:
-                f.write(cleaned_result)
+                json.dump(parsed_result, f, indent=2)
 
             print(f"\nSaved {item['output']}")
             print(cleaned_result)
