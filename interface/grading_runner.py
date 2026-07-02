@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import re
-import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -194,10 +193,20 @@ def render_pdf_image(pdf_path: Path, model_name: str) -> str:
             if document.page_count < 1:
                 raise InvalidPDFError("The uploaded PDF has no pages.")
             page = document[0]
-            # Lower resolution for hosted model token compatibility
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(1, 1))
-            image_bytes = pixmap.tobytes("png")
-            return base64.b64encode(image_bytes).decode("utf-8")
+            scales = (
+                (1.0, 0.75, 0.5, 0.4, 0.3, 0.25, 0.2)
+                if model_name == "Nemotron"
+                else (1.0,)
+            )
+            for scale in scales:
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+                image_bytes = pixmap.tobytes("png")
+                if model_name != "Nemotron" or len(image_bytes) <= 180 * 1024:
+                    return base64.b64encode(image_bytes).decode("utf-8")
+            raise GradingError(
+                "The concept map image could not be reduced below NVIDIA's "
+                "180 KB inline-image limit."
+            )
     except InvalidPDFError:
         raise
     except (
@@ -689,81 +698,111 @@ def _is_input_limit_error(message: str) -> bool:
     )
 
 
-def _upload_nvidia_image_asset(image_bytes: bytes, description: str) -> str:
-    """Upload an oversized PNG through NVIDIA's documented NVCF asset API."""
-    api_key = _get_secret("NVIDIA_API_KEY")
-    if not api_key:
-        raise GradingError("NVIDIA_API_KEY is not configured.")
-
-    create_payload = json.dumps(
-        {"contentType": "image/png", "description": description}
-    ).encode("utf-8")
-    create_request = urllib.request.Request(
-        "https://api.nvcf.nvidia.com/v2/nvcf/assets",
-        data=create_payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(create_request, timeout=60) as response:
-        asset_response = json.loads(response.read().decode("utf-8"))
-
-    asset_id = asset_response.get("assetId") or asset_response.get("asset_id")
-    upload_url = asset_response.get("uploadUrl") or asset_response.get("upload_url")
-    if not asset_id or not upload_url:
-        raise ModelResponseError(
-            "NVIDIA NVCF did not return an asset ID and upload URL.",
-            raw_response=asset_response,
-        )
-
-    upload_request = urllib.request.Request(
-        upload_url,
-        data=image_bytes,
-        headers={
-            "Content-Type": "image/png",
-            "x-amz-meta-nvcf-asset-description": description,
-        },
-        method="PUT",
-    )
-    with urllib.request.urlopen(upload_request, timeout=120) as response:
-        response.read()
-    return str(asset_id)
-
-
 def _prepare_request_image(
     model_name: str, prompt: str, image: str
-) -> tuple[str | list[dict[str, Any]], dict[str, str] | None, dict[str, Any]]:
-    """Choose inline or NVCF asset transport without changing image bytes."""
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Build NVIDIA's documented nested image_url message content."""
     image_bytes = base64.b64decode(image, validate=True)
     request_metadata: dict[str, Any] = {
         "image_bytes": len(image_bytes),
         "image_transport": "inline_base64",
-    }
-    extra_headers: dict[str, str] | None = None
-
-    if model_name == "Nemotron" and len(image_bytes) > 180 * 1024:
-        asset_id = _upload_nvidia_image_asset(
-            image_bytes, "AI concept map grading request"
-        )
-        content: str | list[dict[str, Any]] = (
-            f'<img src="data:image/png;asset_id,{asset_id}" />\n{prompt}'
-        )
-        extra_headers = {"NVCF-INPUT-ASSET-REFERENCES": asset_id}
-        request_metadata.update(
-            {"image_transport": "nvcf_asset", "nvcf_asset_id": asset_id}
-        )
-    else:
-        content = [
-            {"type": "text", "text": prompt},
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{image}"},
+        "payload_shape": {
+            "type": "image_url",
+            "image_url": {
+                "url": "data:image/png;base64,<exact bytes saved in image_debug_path>"
             },
-        ]
-    return content, extra_headers, request_metadata
+        },
+    }
+    content = [
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{image}"},
+        },
+        {"type": "text", "text": prompt},
+    ]
+    return content, request_metadata
+
+
+def _write_health_debug(
+    path: Path, *, payload_shape: dict[str, Any], response: Any = None, error: Any = None
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "provider": "NVIDIA NIM",
+                "model_id": NEMOTRON_MODEL,
+                "payload_shape": payload_shape,
+                "raw_response": _response_to_debug_text(response),
+                "error": str(error) if error else None,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _require_response_content(response: Any, test_name: str) -> str:
+    choices = getattr(response, "choices", None)
+    if not choices:
+        raise ModelResponseError(f"Nemotron {test_name} returned no response choices.")
+    message = getattr(choices[0], "message", None)
+    content = getattr(message, "content", None)
+    if not isinstance(content, str) or not content.strip():
+        raise ModelResponseError(f"Nemotron {test_name} returned empty content.")
+    return content
+
+
+def _run_nemotron_health_tests(client: Any, image: str, debug_prefix: Path) -> None:
+    """Gate full grading on text and image calls using NVIDIA's sample format."""
+    text_payload = {
+        "model": NEMOTRON_MODEL,
+        "messages": [{"role": "user", "content": "Reply with OK."}],
+        "temperature": 0,
+        "max_tokens": 16,
+    }
+    text_path = Path(f"{debug_prefix}_text_health.json")
+    try:
+        text_response = client.chat.completions.create(**text_payload)
+        _require_response_content(text_response, "text health test")
+        _write_health_debug(
+            text_path, payload_shape=text_payload, response=text_response
+        )
+    except Exception as exc:
+        _write_health_debug(text_path, payload_shape=text_payload, error=exc)
+        raise
+
+    image_content, image_metadata = _prepare_request_image(
+        "Nemotron", "Describe this image in one sentence.", image
+    )
+    image_payload = {
+        "model": NEMOTRON_MODEL,
+        "messages": [{"role": "user", "content": image_content}],
+        "temperature": 0,
+        "max_tokens": 100,
+    }
+    image_payload_shape = {
+        **image_payload,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    image_metadata["payload_shape"],
+                    {"type": "text", "text": "Describe this image in one sentence."},
+                ],
+            }
+        ],
+    }
+    image_path = Path(f"{debug_prefix}_image_health.json")
+    try:
+        image_response = client.chat.completions.create(**image_payload)
+        _require_response_content(image_response, "image health test")
+        _write_health_debug(
+            image_path, payload_shape=image_payload_shape, response=image_response
+        )
+    except Exception as exc:
+        _write_health_debug(image_path, payload_shape=image_payload_shape, error=exc)
+        raise
 
 
 def _request_model(
@@ -772,34 +811,54 @@ def _request_model(
     image: str,
     max_tokens: int | None = None,
     request_timeout: float | None = None,
+    health_debug_prefix: Path | None = None,
 ) -> tuple[str, str, Any, dict[str, Any]]:
     config = MODEL_CONFIGS[model_name]
 
     try:
-        content, extra_headers, request_metadata = _prepare_request_image(
-            model_name, prompt, image
-        )
+        content, request_metadata = _prepare_request_image(model_name, prompt, image)
         client = _create_client(
             model_name, disable_sdk_retries=request_timeout is not None
         )
         if model_name == "Nemotron":
             for line in model_debug_lines([model_name]):
                 print(line)
+            if health_debug_prefix is None:
+                raise GradingError("Nemotron health-test debug path is missing.")
+            _run_nemotron_health_tests(client, image, health_debug_prefix)
         request_options: dict[str, Any] = {
             "model": config["model_id"],
             "max_tokens": max_tokens or config["max_tokens"],
             "temperature": 0,
             "messages": [{"role": "user", "content": content}],
         }
+        request_metadata["outgoing_payload_shape"] = {
+            "model": config["model_id"],
+            "max_tokens": request_options["max_tokens"],
+            "temperature": 0,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        request_metadata["payload_shape"],
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ],
+        }
         if request_timeout is not None:
             request_options["timeout"] = request_timeout
-        if extra_headers is not None:
-            request_options["extra_headers"] = extra_headers
         response = client.chat.completions.create(
             **request_options
         )
     except Exception as exc:
         message = str(exc)
+        if "NVCF asset pool must be given" in message:
+            message = (
+                "NVIDIA NIM rejected the image payload format. The request likely "
+                "needs NVIDIA's asset upload/image format instead of the current "
+                "base64 image_url."
+            )
         if _is_input_limit_error(message):
             message = (
                 "Input is too large for the current model limit. "
@@ -890,7 +949,17 @@ def run_evaluation(
                 raw_text,
                 raw_api_response,
                 request_metadata,
-            ) = _request_model(model_name, prompt, image)
+            ) = _request_model(
+                model_name,
+                prompt,
+                image,
+                health_debug_prefix=(
+                    DEBUG_DIR
+                    / f"{timestamp}_{run_id}_{file_stem}_nemotron"
+                    if model_name == "Nemotron"
+                    else None
+                ),
+            )
             if model_name == "Nemotron":
                 cleaned_json = _cleaned_json_text(raw_text)
                 parsed_before_validation = _load_json_with_repair(raw_text)

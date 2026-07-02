@@ -186,7 +186,13 @@ def display_failure(result: Any) -> None:
     error_message = _failure_reason(result)
     debug_path = get_result_field(result, "debug_path", None)
 
-    if "implausible all-4 evaluation" in error_message:
+    if "NVIDIA NIM rejected the image payload format" in error_message:
+        st.warning(
+            "NVIDIA NIM rejected the image payload format. The request likely "
+            "needs NVIDIA's asset upload/image format instead of the current "
+            "base64 image_url."
+        )
+    elif "implausible all-4 evaluation" in error_message:
         st.warning(
             "Nemotron returned an implausible all-4 evaluation. "
             "Raw output saved for debugging."

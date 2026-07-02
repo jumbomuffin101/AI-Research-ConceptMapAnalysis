@@ -6,6 +6,7 @@ import fitz
 from pathlib import Path
 import re
 import json
+from datetime import datetime, timezone
 
 load_dotenv()
 
@@ -72,10 +73,18 @@ MAPS = [
 def pdf_to_base64(pdf_path):
     doc = fitz.open(pdf_path)
     page = doc[0]
-    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-    image_bytes = pix.tobytes("png")
-    doc.close()
-    return base64.b64encode(image_bytes).decode("utf-8")
+    try:
+        for scale in (1.0, 0.75, 0.5, 0.4, 0.3, 0.25, 0.2):
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+            image_bytes = pix.tobytes("png")
+            if len(image_bytes) <= 180 * 1024:
+                return base64.b64encode(image_bytes).decode("utf-8")
+    finally:
+        doc.close()
+    raise RuntimeError(
+        "The concept map image could not be reduced below NVIDIA's "
+        "180 KB inline-image limit."
+    )
 
 
 def clean_json_output(text):
@@ -158,19 +167,119 @@ def request_grade(client, prompt, image):
                 "role": "user",
                 "content": [
                     {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image}"
+                        },
+                    },
+                    {
                         "type": "text",
                         "text": prompt,
                     },
+                ],
+            }
+        ],
+    )
+
+
+def _debug_response_text(response):
+    if response is None:
+        return ""
+    method = getattr(response, "model_dump_json", None)
+    if callable(method):
+        return method(indent=2)
+    return str(response)
+
+
+def _save_health_debug(path, payload_shape, response=None, error=None):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(
+        json.dumps(
+            {
+                "provider": "NVIDIA NIM",
+                "model_id": MODEL,
+                "payload_shape": payload_shape,
+                "raw_response": _debug_response_text(response),
+                "error": str(error) if error else None,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def run_health_tests(client, image, debug_prefix):
+    """Run text and image checks before sending the full rubric prompt."""
+    text_payload = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Reply with OK."}],
+        "temperature": 0,
+        "max_tokens": 16,
+    }
+    text_path = f"{debug_prefix}_text_health.json"
+    try:
+        response = client.chat.completions.create(**text_payload)
+        content, reason = _response_content(response)
+        if reason:
+            raise RuntimeError(f"Nemotron text health test failed: {reason}")
+        _save_health_debug(text_path, text_payload, response=response)
+    except Exception as exc:
+        _save_health_debug(text_path, text_payload, error=exc)
+        raise
+
+    image_url_shape = {
+        "type": "image_url",
+        "image_url": {
+            "url": "data:image/png;base64,<exact rendered image bytes>"
+        },
+    }
+    image_payload = {
+        "model": MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
                     {
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image/png;base64,{image}"
                         },
                     },
+                    {
+                        "type": "text",
+                        "text": "Describe this image in one sentence.",
+                    },
                 ],
             }
         ],
-    )
+        "temperature": 0,
+        "max_tokens": 100,
+    }
+    image_payload_shape = {
+        **image_payload,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    image_url_shape,
+                    {
+                        "type": "text",
+                        "text": "Describe this image in one sentence.",
+                    },
+                ],
+            }
+        ],
+    }
+    image_path = f"{debug_prefix}_image_health.json"
+    try:
+        response = client.chat.completions.create(**image_payload)
+        content, reason = _response_content(response)
+        if reason:
+            raise RuntimeError(f"Nemotron image health test failed: {reason}")
+        _save_health_debug(image_path, image_payload_shape, response=response)
+    except Exception as exc:
+        _save_health_debug(image_path, image_payload_shape, error=exc)
+        raise
 
 
 def _response_content(response):
@@ -192,12 +301,51 @@ def _response_content(response):
 def run_all():
     client = create_client()
     Path("outputs/gradingV5").mkdir(parents=True, exist_ok=True)
+    debug_dir = Path("outputs/gradingV5/debug")
+    debug_dir.mkdir(parents=True, exist_ok=True)
 
     for item in MAPS:
         image = pdf_to_base64(item["path"])
         prompt = build_prompt(item["map_file"])
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        debug_prefix = debug_dir / f"{timestamp}_{Path(item['map_file']).stem}"
+        image_debug_path = Path(f"{debug_prefix}_request.png")
+        image_debug_path.write_bytes(base64.b64decode(image, validate=True))
 
         try:
+            run_health_tests(client, image, debug_prefix)
+            outgoing_payload_shape = {
+                "model": MODEL,
+                "temperature": 0,
+                "max_tokens": 2000,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": (
+                                        "data:image/png;base64,"
+                                        "<exact rendered image bytes>"
+                                    )
+                                },
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+            }
+            Path(f"{debug_prefix}_grading_payload.json").write_text(
+                json.dumps(
+                    {
+                        "image_debug_path": str(image_debug_path),
+                        "outgoing_payload_shape": outgoing_payload_shape,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
             response = request_grade(client, prompt, image)
 
             raw_output_path = item["output"].replace(".json", "_raw.txt")
@@ -217,7 +365,14 @@ def run_all():
             print(cleaned_result)
 
         except Exception as e:
-            print(f"Error processing {item['label']}: {e}")
+            message = str(e)
+            if "NVCF asset pool must be given" in message:
+                message = (
+                    "NVIDIA NIM rejected the image payload format. The request "
+                    "likely needs NVIDIA's asset upload/image format instead of "
+                    "the current base64 image_url."
+                )
+            print(f"Error processing {item['label']}: {message}")
             continue
 
 
