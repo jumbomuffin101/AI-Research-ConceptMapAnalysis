@@ -40,7 +40,7 @@ MODEL_CONFIGS = {
     },
     "Nemotron": {
         "model_id": NEMOTRON_MODEL,
-        "max_tokens": 2000,
+        "max_tokens": 3500,
     },
 }
 
@@ -889,6 +889,14 @@ For every domain:
 - When overall_decision is "Yes", if_no_explanation must be an empty string.
 Example: "Integration is marked No because the concept map does not clearly connect patient data to clinical information or basic science."
 
+Output brevity requirements:
+- Each criterion explanation must be at most one short sentence.
+- Each evidence_from_map must contain at most 1-2 short items.
+- strengths must contain at most 2 short strings.
+- areas_for_improvement must contain at most 3 short strings.
+- grading_notes must be at most one short sentence.
+- Return raw JSON only with no markdown or prose outside the JSON object.
+
 Extracted evidence JSON:
 {json.dumps(evidence, indent=2)}
 """
@@ -942,6 +950,43 @@ def _run_nemotron_two_stage(
     raw_grading_path.write_text(
         _response_to_debug_text(grading_response), encoding="utf-8"
     )
+    malformed_raw_path: Path | None = None
+    retry_raw_path: Path | None = None
+    retry_prompt_path: Path | None = None
+    retry_used = False
+    try:
+        _load_json_with_repair(grading_text)
+    except MalformedResultError:
+        retry_used = True
+        malformed_raw_path = Path(
+            f"{debug_prefix}_grading_malformed_raw_response.json"
+        )
+        malformed_raw_path.write_text(
+            _response_to_debug_text(grading_response), encoding="utf-8"
+        )
+        retry_prompt = (
+            f"{grading_prompt}\n\n"
+            "Return minified JSON only. No markdown. No long explanations. "
+            "Keep all strings brief."
+        )
+        retry_prompt_path = Path(f"{debug_prefix}_grading_retry_prompt.txt")
+        retry_prompt_path.write_text(retry_prompt, encoding="utf-8")
+        retry_options: dict[str, Any] = {
+            "model": NEMOTRON_MODEL,
+            "temperature": 0,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": retry_prompt}],
+        }
+        if request_timeout is not None:
+            retry_options["timeout"] = request_timeout
+        grading_response = client.chat.completions.create(**retry_options)
+        grading_text = _require_response_content(
+            grading_response, "rubric grading retry"
+        )
+        retry_raw_path = Path(f"{debug_prefix}_grading_retry_raw_response.json")
+        retry_raw_path.write_text(
+            _response_to_debug_text(grading_response), encoding="utf-8"
+        )
     metadata = {
         "pipeline": "nemotron_two_stage_evidence_then_grading",
         "image_bytes": image_metadata["image_bytes"],
@@ -965,6 +1010,12 @@ def _run_nemotron_two_stage(
         "extracted_evidence_path": str(evidence_path),
         "grading_prompt_path": str(grading_prompt_path),
         "raw_grading_response_path": str(raw_grading_path),
+        "malformed_raw_response_path": (
+            str(malformed_raw_path) if malformed_raw_path else None
+        ),
+        "retry_prompt_path": str(retry_prompt_path) if retry_prompt_path else None,
+        "retry_raw_response_path": str(retry_raw_path) if retry_raw_path else None,
+        "malformed_json_retry_used": retry_used,
     }
     return grading_text, grading_response, metadata
 

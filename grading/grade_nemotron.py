@@ -161,7 +161,7 @@ def request_grade(client, prompt):
     return client.chat.completions.create(
         model=MODEL,
         temperature=0,
-        max_tokens=2000,
+        max_tokens=3500,
         messages=[{"role": "user", "content": prompt}],
     )
 
@@ -373,6 +373,14 @@ For every domain:
 - When overall_decision is "Yes", if_no_explanation must be an empty string.
 Example: "Integration is marked No because the concept map does not clearly connect patient data to clinical information or basic science."
 
+Output brevity requirements:
+- Each criterion explanation must be at most one short sentence.
+- Each evidence_from_map must contain at most 1-2 short items.
+- strengths must contain at most 2 short strings.
+- areas_for_improvement must contain at most 3 short strings.
+- grading_notes must be at most one short sentence.
+- Return raw JSON only with no markdown or prose outside the JSON object.
+
 Extracted evidence JSON:
 {json.dumps(evidence, indent=2)}
 """
@@ -417,7 +425,7 @@ def run_all():
             outgoing_payload_shape = {
                 "model": MODEL,
                 "temperature": 0,
-                "max_tokens": 2000,
+                "max_tokens": 3500,
                 "messages": [
                     {
                         "role": "user",
@@ -450,7 +458,35 @@ def run_all():
                 continue
 
             cleaned_result = clean_json_output(result)
-            parsed_result = json.loads(cleaned_result)
+            try:
+                parsed_result = json.loads(cleaned_result)
+            except json.JSONDecodeError:
+                Path(
+                    f"{debug_prefix}_grading_malformed_raw_response.json"
+                ).write_text(
+                    _debug_response_text(response), encoding="utf-8"
+                )
+                retry_prompt = (
+                    f"{grading_prompt}\n\n"
+                    "Return minified JSON only. No markdown. No long "
+                    "explanations. Keep all strings brief."
+                )
+                Path(f"{debug_prefix}_grading_retry_prompt.txt").write_text(
+                    retry_prompt, encoding="utf-8"
+                )
+                retry_response = request_grade(client, retry_prompt)
+                Path(
+                    f"{debug_prefix}_grading_retry_raw_response.json"
+                ).write_text(
+                    _debug_response_text(retry_response), encoding="utf-8"
+                )
+                retry_result, retry_reason = _response_content(retry_response)
+                if retry_reason:
+                    raise RuntimeError(
+                        f"Nemotron grading retry failed: {retry_reason}"
+                    )
+                cleaned_result = clean_json_output(retry_result)
+                parsed_result = json.loads(cleaned_result)
             Path(f"{debug_prefix}_final_parsed_grading.json").write_text(
                 json.dumps(parsed_result, indent=2), encoding="utf-8"
             )
