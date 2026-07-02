@@ -880,6 +880,15 @@ Use ONLY the extracted evidence JSON below to grade. Do not use an image.
 - Relevant but incomplete evidence must score 3.
 - Comprehensive and detailed evidence can score 4.
 
+For every domain:
+- overall_decision must be exactly "Yes" or "No".
+- When overall_decision is "No", if_no_explanation must give a specific,
+  domain-level reason grounded in the extracted evidence. Name the missing,
+  unclear, or insufficient content or relationships; do not leave it empty or
+  use a generic statement.
+- When overall_decision is "Yes", if_no_explanation must be an empty string.
+Example: "Integration is marked No because the concept map does not clearly connect patient data to clinical information or basic science."
+
 Extracted evidence JSON:
 {json.dumps(evidence, indent=2)}
 """
