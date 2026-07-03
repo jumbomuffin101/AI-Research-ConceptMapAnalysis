@@ -1107,6 +1107,202 @@ def _run_nemotron_compact_grading(
     return expanded_text, compact_response, metadata
 
 
+NEMOTRON_PLAIN_SECTIONS = {
+    "knowledge_acquisition": "Knowledge Acquisition",
+    "integration": "Integration",
+    "application": "Application",
+    "transfer": "Transfer",
+}
+
+
+def _build_nemotron_plain_text_prompt() -> str:
+    lines = [
+        "Independently grade every Spring 2025 rubric criterion using only the extracted visible evidence.",
+        "Do not infer from medical knowledge or grade what should be present.",
+        "Return plain text only, not JSON or markdown. Use exactly these headers and field names.",
+        "Every score must be an integer 1-4. Every decision must be Yes or No. Keep each reason and list item short.",
+        "",
+    ]
+    for group, header in NEMOTRON_PLAIN_SECTIONS.items():
+        lines.append(f"{header}:")
+        lines.extend(f"{field}: score 1-4" for field in CATEGORY_FIELDS[group])
+        lines.extend(["overall_decision: Yes/No", "reason: short reason", ""])
+    lines.extend(
+        [
+            "Final:",
+            "overall_meets_expectations: Yes/No",
+            "strengths: short item | short item",
+            "areas_for_improvement: short item | short item | short item",
+            "",
+            "Spring 2025 rubric:",
+            json.dumps(load_summative_rubric(), separators=(",", ":")),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _plain_section(text: str, header: str, next_header: str | None) -> str:
+    end = rf"(?=^\s*{re.escape(next_header)}\s*:|\Z)" if next_header else r"\Z"
+    match = re.search(
+        rf"(?ims)^\s*{re.escape(header)}\s*:\s*(.*?){end}", text
+    )
+    if not match:
+        raise MalformedResultError(f"Nemotron plain-text section '{header}' is missing.")
+    return match.group(1)
+
+
+def _plain_score(section: str, field: str) -> int:
+    match = re.search(
+        rf"(?im)^\s*{re.escape(field)}\s*:\s*(?:score\s*)?(-?\d+(?:\.\d+)?)\s*$",
+        section,
+    )
+    if not match:
+        raise MalformedResultError(f"Nemotron score '{field}' is missing.")
+    value = match.group(1)
+    if not re.fullmatch(r"[1-4]", value):
+        raise MalformedResultError(f"Nemotron score '{field}' must be an integer from 1 to 4.")
+    return int(value)
+
+
+def _plain_decision(section: str, field: str, notes: list[str]) -> str:
+    match = re.search(
+        rf"(?im)^\s*{re.escape(field)}\s*:\s*(Yes|No)\s*$", section
+    )
+    if match:
+        return match.group(1)
+    notes.append(f"Nemotron omitted {field}; it defaulted to No.")
+    return "No"
+
+
+def _plain_reason(section: str) -> str:
+    match = re.search(r"(?im)^\s*reason\s*:\s*(.+?)\s*$", section)
+    return match.group(1).strip() if match else ""
+
+
+def _plain_items(section: str, field: str) -> list[str]:
+    match = re.search(rf"(?im)^\s*{re.escape(field)}\s*:\s*(.*?)\s*$", section)
+    if not match or not match.group(1).strip():
+        return []
+    return [item.strip(" -\t") for item in re.split(r"\s*[|;]\s*", match.group(1)) if item.strip(" -\t")]
+
+
+def _specific_nemotron_reason(reason: str, group: str | None = None) -> bool:
+    normalized = reason.strip().lower()
+    generic = {
+        "meets expectations",
+        "does not meet expectations",
+        "insufficient evidence",
+        "good",
+        "complete",
+        "all criteria met",
+        "no clear evidence found in the concept map.",
+    }
+    if len(reason.split()) < 6 or normalized in generic:
+        return False
+    domain_terms = {
+        "knowledge_acquisition": ("science", "patient", "case", "data", "determinant", "diagnosis", "health"),
+        "integration": ("connect", "link", "relationship", "differential", "illness", "patient data", "science"),
+        "application": ("pathophysiology", "diagnosis", "patient data", "clinical", "science"),
+        "transfer": ("prior", "learned", "transfer", "clinical", "basic science", "understanding"),
+    }
+    return group is None or any(term in normalized for term in domain_terms[group])
+
+
+def _parse_nemotron_plain_text(text: str, map_file: str) -> dict[str, Any]:
+    if not isinstance(text, str) or not text.strip():
+        raise ModelResponseError("Nemotron returned empty plain-text grading output.")
+    rubric = load_summative_rubric()
+    result = build_spring_schema(map_file, NEMOTRON_MODEL)
+    notes: list[str] = []
+    section_headers = [*NEMOTRON_PLAIN_SECTIONS.values(), "Final"]
+    for index, (group, header) in enumerate(NEMOTRON_PLAIN_SECTIONS.items()):
+        section = _plain_section(text, header, section_headers[index + 1])
+        reason = _plain_reason(section)
+        evidence = (
+            [reason]
+            if _specific_nemotron_reason(reason, group)
+            else ["No clear evidence found in the concept map."]
+        )
+        for field in CATEGORY_FIELDS[group]:
+            score = _plain_score(section, field)
+            descriptor = str(rubric[group][field][str(score)]).rstrip(".")
+            result[group][field] = {
+                "score": score,
+                "explanation": f"Score {score}: {descriptor}.",
+                "evidence_from_map": list(evidence),
+            }
+        decision = _plain_decision(section, "overall_decision", notes)
+        result[group]["overall_decision"] = decision
+        result[group]["if_no_explanation"] = (
+            reason
+            if decision == "No" and _specific_nemotron_reason(reason, group)
+            else (
+                "The model did not provide a domain-level explanation."
+                if decision == "No"
+                else ""
+            )
+        )
+    final_section = _plain_section(text, "Final", None)
+    result["overall_meets_expectations"] = _plain_decision(
+        final_section, "overall_meets_expectations", notes
+    )
+    result["strengths"] = _plain_items(final_section, "strengths")[:2]
+    result["areas_for_improvement"] = _plain_items(
+        final_section, "areas_for_improvement"
+    )[:3]
+    result["grading_notes"] = " ".join(notes)
+    return result
+
+
+def _all_four_reasons_are_specific(result: dict[str, Any]) -> bool:
+    for group, fields in CATEGORY_FIELDS.items():
+        section = result.get(group, {})
+        first_item = section.get(fields[0], {}) if isinstance(section, dict) else {}
+        evidence = first_item.get("evidence_from_map") if isinstance(first_item, dict) else None
+        if not isinstance(evidence, list) or not evidence or not _specific_nemotron_reason(str(evidence[0]), group):
+            return False
+    return True
+
+
+def _run_nemotron_plain_text_grading(
+    client: Any,
+    image: str,
+    map_file: str,
+    debug_prefix: Path,
+    request_timeout: float | None,
+) -> tuple[str, Any, dict[str, Any]]:
+    plain_prompt = _build_nemotron_plain_text_prompt()
+    prompt_path = Path(f"{debug_prefix}_plain_grading_prompt.txt")
+    prompt_path.write_text(plain_prompt, encoding="utf-8")
+    plain_content, image_metadata = _prepare_request_image(
+        "Nemotron", plain_prompt, image
+    )
+    options: dict[str, Any] = {
+        "model": NEMOTRON_MODEL,
+        "temperature": 0,
+        "max_tokens": 2000,
+        "messages": [{"role": "user", "content": plain_content}],
+    }
+    if request_timeout is not None:
+        options["timeout"] = request_timeout
+    response = client.chat.completions.create(**options)
+    plain_text = _require_response_content(response, "plain-text rubric grading")
+    raw_path = Path(f"{debug_prefix}_plain_grading_raw_response.txt")
+    raw_path.write_text(plain_text, encoding="utf-8")
+    parsed = _parse_nemotron_plain_text(plain_text, map_file)
+    parsed_path = Path(f"{debug_prefix}_plain_parsed_grading.json")
+    parsed_path.write_text(json.dumps(parsed, indent=2), encoding="utf-8")
+    metadata = {
+        "pipeline": "nemotron_plain_text_grading_local_expansion",
+        "image_bytes": image_metadata["image_bytes"],
+        "image_transport": image_metadata["image_transport"],
+        "plain_prompt_path": str(prompt_path),
+        "plain_raw_response_path": str(raw_path),
+        "plain_parsed_grading_path": str(parsed_path),
+    }
+    return json.dumps(parsed, separators=(",", ":")), response, metadata
+
+
 def _request_model(
     model_name: str,
     prompt: str,
@@ -1130,7 +1326,7 @@ def _request_model(
             if map_file is None:
                 raise GradingError("Nemotron map filename is missing.")
             _run_nemotron_health_tests(client, image, health_debug_prefix)
-            text, response, request_metadata = _run_nemotron_compact_grading(
+            text, response, request_metadata = _run_nemotron_plain_text_grading(
                 client=client,
                 image=image,
                 map_file=map_file,
@@ -1296,7 +1492,10 @@ def run_evaluation(
                 ).write_text(
                     json.dumps(parsed_after_validation, indent=2), encoding="utf-8"
                 )
-                if _is_implausible_all_four_result(data):
+                if (
+                    _is_implausible_all_four_result(data)
+                    and not _all_four_reasons_are_specific(data)
+                ):
                     raise ModelResponseError(
                         "Nemotron returned an implausible all-4 evaluation. "
                         "Raw output saved for debugging.",

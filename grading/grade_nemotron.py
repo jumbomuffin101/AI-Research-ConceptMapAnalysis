@@ -157,12 +157,23 @@ Return ONLY raw valid JSON using this exact structure:
 """
 
 
-def request_grade(client, prompt):
+def request_grade(client, prompt, image=None):
+    content = (
+        [
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{image}"},
+            },
+            {"type": "text", "text": prompt},
+        ]
+        if image is not None
+        else prompt
+    )
     return client.chat.completions.create(
         model=MODEL,
         temperature=0,
         max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": content}],
     )
 
 
@@ -460,6 +471,140 @@ def expand_compact(data, map_file):
     return result
 
 
+PLAIN_SECTIONS = {
+    "knowledge_acquisition": "Knowledge Acquisition",
+    "integration": "Integration",
+    "application": "Application",
+    "transfer": "Transfer",
+}
+
+
+def build_plain_prompt():
+    lines = [
+        "Independently grade every Spring 2025 rubric criterion using only the extracted visible evidence.",
+        "Do not infer from medical knowledge or grade what should be present.",
+        "Return plain text only, not JSON or markdown. Use exactly these headers and field names.",
+        "Every score must be an integer 1-4. Every decision must be Yes or No. Keep each reason and list item short.",
+        "",
+    ]
+    for group, header in PLAIN_SECTIONS.items():
+        lines.append(f"{header}:")
+        lines.extend(f"{field}: score 1-4" for field in CATEGORY_FIELDS[group])
+        lines.extend(["overall_decision: Yes/No", "reason: short reason", ""])
+    lines.extend(
+        [
+            "Final:",
+            "overall_meets_expectations: Yes/No",
+            "strengths: short item | short item",
+            "areas_for_improvement: short item | short item | short item",
+            "",
+            "Spring 2025 rubric:",
+            json.dumps(_spring_rubric(), separators=(",", ":")),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def plain_section(text, header, next_header=None):
+    end = rf"(?=^\s*{re.escape(next_header)}\s*:|\Z)" if next_header else r"\Z"
+    match = re.search(rf"(?ims)^\s*{re.escape(header)}\s*:\s*(.*?){end}", text)
+    if not match:
+        raise RuntimeError(f"Plain-text section '{header}' is missing.")
+    return match.group(1)
+
+
+def plain_score(section, field):
+    match = re.search(
+        rf"(?im)^\s*{re.escape(field)}\s*:\s*(?:score\s*)?(-?\d+(?:\.\d+)?)\s*$",
+        section,
+    )
+    if not match:
+        raise RuntimeError(f"Score '{field}' is missing.")
+    value = match.group(1)
+    if not re.fullmatch(r"[1-4]", value):
+        raise RuntimeError(f"Score '{field}' must be an integer from 1 to 4.")
+    return int(value)
+
+
+def plain_decision(section, field, notes):
+    match = re.search(rf"(?im)^\s*{re.escape(field)}\s*:\s*(Yes|No)\s*$", section)
+    if match:
+        return match.group(1)
+    notes.append(f"Nemotron omitted {field}; it defaulted to No.")
+    return "No"
+
+
+def specific_reason(reason, group=None):
+    generic = {
+        "meets expectations", "does not meet expectations", "insufficient evidence",
+        "good", "complete", "all criteria met",
+        "no clear evidence found in the concept map.",
+    }
+    normalized = reason.strip().lower()
+    if len(reason.split()) < 6 or normalized in generic:
+        return False
+    domain_terms = {
+        "knowledge_acquisition": ("science", "patient", "case", "data", "determinant", "diagnosis", "health"),
+        "integration": ("connect", "link", "relationship", "differential", "illness", "patient data", "science"),
+        "application": ("pathophysiology", "diagnosis", "patient data", "clinical", "science"),
+        "transfer": ("prior", "learned", "transfer", "clinical", "basic science", "understanding"),
+    }
+    return group is None or any(term in normalized for term in domain_terms[group])
+
+
+def parse_plain_grading(text, map_file):
+    rubric_data = _spring_rubric()
+    result = _spring_schema(map_file)
+    notes = []
+    headers = [*PLAIN_SECTIONS.values(), "Final"]
+    for index, (group, header) in enumerate(PLAIN_SECTIONS.items()):
+        section = plain_section(text, header, headers[index + 1])
+        reason_match = re.search(r"(?im)^\s*reason\s*:\s*(.+?)\s*$", section)
+        reason = reason_match.group(1).strip() if reason_match else ""
+        evidence = [reason] if specific_reason(reason, group) else [
+            "No clear evidence found in the concept map."
+        ]
+        for field in CATEGORY_FIELDS[group]:
+            score = plain_score(section, field)
+            descriptor = str(rubric_data[group][field][str(score)]).rstrip(".")
+            result[group][field] = {
+                "score": score,
+                "explanation": f"Score {score}: {descriptor}.",
+                "evidence_from_map": list(evidence),
+            }
+        decision = plain_decision(section, "overall_decision", notes)
+        result[group]["overall_decision"] = decision
+        result[group]["if_no_explanation"] = (
+            reason if decision == "No" and specific_reason(reason, group)
+            else "The model did not provide a domain-level explanation." if decision == "No"
+            else ""
+        )
+    final = plain_section(text, "Final")
+    result["overall_meets_expectations"] = plain_decision(
+        final, "overall_meets_expectations", notes
+    )
+    for target, source, limit in (
+        ("strengths", "strengths", 2),
+        ("areas_for_improvement", "areas_for_improvement", 3),
+    ):
+        match = re.search(rf"(?im)^\s*{source}\s*:\s*(.*?)\s*$", final)
+        result[target] = (
+            [item.strip(" -\t") for item in re.split(r"\s*[|;]\s*", match.group(1)) if item.strip(" -\t")][:limit]
+            if match and match.group(1).strip()
+            else []
+        )
+    result["grading_notes"] = " ".join(notes)
+    return result
+
+
+def all_four_reasons_specific(result):
+    for group, fields in CATEGORY_FIELDS.items():
+        evidence = result[group][fields[0]].get("evidence_from_map", [])
+        if not evidence or not specific_reason(str(evidence[0]), group):
+            return False
+    return True
+
+
 def _is_all_four_result(result):
     scores = []
     for group, fields in CATEGORY_FIELDS.items():
@@ -489,46 +634,18 @@ def run_all():
 
         try:
             run_health_tests(client, image, debug_prefix)
-            evidence = extract_evidence(client, image, debug_prefix)
-            compact_prompt = build_compact_prompt(evidence)
-            Path(f"{debug_prefix}_compact_grading_prompt.txt").write_text(
-                compact_prompt, encoding="utf-8"
+            plain_prompt = build_plain_prompt()
+            Path(f"{debug_prefix}_plain_grading_prompt.txt").write_text(
+                plain_prompt, encoding="utf-8"
             )
-            response = request_grade(client, compact_prompt)
-            Path(f"{debug_prefix}_compact_grading_raw_response.json").write_text(
-                _debug_response_text(response), encoding="utf-8"
-            )
+            response = request_grade(client, plain_prompt, image)
             result, reason = _response_content(response)
             if reason:
-                raise RuntimeError(f"Nemotron compact grading failed: {reason}")
-            try:
-                compact_data = json.loads(clean_json_output(result))
-            except json.JSONDecodeError:
-                Path(
-                    f"{debug_prefix}_compact_malformed_raw_response.json"
-                ).write_text(_debug_response_text(response), encoding="utf-8")
-                retry_prompt = (
-                    f"{compact_prompt}\n\nReturn compact minified JSON only. "
-                    "No explanations. No markdown. No extra text."
-                )
-                Path(f"{debug_prefix}_compact_retry_prompt.txt").write_text(
-                    retry_prompt, encoding="utf-8"
-                )
-                response = request_grade(client, retry_prompt)
-                Path(
-                    f"{debug_prefix}_compact_retry_raw_response.json"
-                ).write_text(_debug_response_text(response), encoding="utf-8")
-                result, reason = _response_content(response)
-                if reason:
-                    raise RuntimeError(
-                        f"Nemotron compact grading retry failed: {reason}"
-                    )
-                compact_data = json.loads(clean_json_output(result))
-            validate_compact(compact_data)
-            Path(f"{debug_prefix}_compact_grading.json").write_text(
-                json.dumps(compact_data, indent=2), encoding="utf-8"
+                raise RuntimeError(f"Nemotron plain-text grading failed: {reason}")
+            Path(f"{debug_prefix}_plain_grading_raw_response.txt").write_text(
+                result, encoding="utf-8"
             )
-            parsed_result = expand_compact(compact_data, item["map_file"])
+            parsed_result = parse_plain_grading(result, item["map_file"])
             cleaned_result = json.dumps(parsed_result, separators=(",", ":"))
             Path(f"{debug_prefix}_final_parsed_grading.json").write_text(
                 json.dumps(parsed_result, indent=2), encoding="utf-8"
@@ -538,7 +655,10 @@ def run_all():
                 _debug_response_text(response),
                 encoding="utf-8",
             )
-            if _is_all_four_result(parsed_result):
+            if (
+                _is_all_four_result(parsed_result)
+                and not all_four_reasons_specific(parsed_result)
+            ):
                 raise RuntimeError(
                     "Nemotron returned an implausible all-4 evaluation. "
                     "Raw output saved for debugging."
