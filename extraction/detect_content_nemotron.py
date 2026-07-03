@@ -12,7 +12,7 @@ client = OpenAI(
     base_url="https://integrate.api.nvidia.com/v1"
 )
 
-MODEL = "nvidia/llama-3.1-nemotron-nano-vl-8b-v1"
+MODEL = "meta/llama-3.2-90b-vision-instruct"
 PDF_PATH = "maps/ConceptMapWeak.pdf"
 OUTPUT_PATH = "outputs/detected_content_weak_nemotron_vl.json"
 

@@ -26,7 +26,7 @@ def create_client():
     return create_nvidia_client()
 
 
-MODEL = "nvidia/llama-3.1-nemotron-nano-vl-8b-v1"
+MODEL = "meta/llama-3.2-90b-vision-instruct"
 
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
@@ -674,36 +674,18 @@ def run_all():
 
         try:
             run_health_tests(client, image, debug_prefix)
-            plain_prompt = build_plain_prompt()
-            Path(f"{debug_prefix}_plain_grading_prompt.txt").write_text(
-                plain_prompt, encoding="utf-8"
+            prompt = build_prompt(item["map_file"])
+            Path(f"{debug_prefix}_grading_prompt.txt").write_text(
+                prompt, encoding="utf-8"
             )
-            response = request_grade(client, plain_prompt, image)
+            response = request_grade(client, prompt, image)
             result, reason = _response_content(response)
             if reason:
-                raise RuntimeError(f"Nemotron plain-text grading failed: {reason}")
-            Path(f"{debug_prefix}_plain_grading_raw_response.txt").write_text(
+                raise RuntimeError(f"Llama grading failed: {reason}")
+            Path(f"{debug_prefix}_grading_raw_response.txt").write_text(
                 result, encoding="utf-8"
             )
-            try:
-                parsed_result = parse_plain_grading(result, item["map_file"])
-            except RuntimeError:
-                retry_prompt = (
-                    "Use the exact headings and field names shown below. Do not rename, omit, or reformat them.\n\n"
-                    f"{plain_prompt}"
-                )
-                response = request_grade(client, retry_prompt, image)
-                retry_result, retry_reason = _response_content(response)
-                if retry_reason:
-                    raise RuntimeError(
-                        f"Nemotron plain-text grading retry failed: {retry_reason}"
-                    )
-                Path(
-                    f"{debug_prefix}_plain_grading_retry_raw_response.txt"
-                ).write_text(retry_result, encoding="utf-8")
-                parsed_result = parse_plain_grading(
-                    retry_result, item["map_file"]
-                )
+            parsed_result = json.loads(clean_json_output(result))
             cleaned_result = json.dumps(parsed_result, separators=(",", ":"))
             Path(f"{debug_prefix}_final_parsed_grading.json").write_text(
                 json.dumps(parsed_result, indent=2), encoding="utf-8"

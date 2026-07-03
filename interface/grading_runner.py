@@ -24,7 +24,7 @@ OUTPUT_DIR = PROJECT_ROOT / "outputs" / "web_demo"
 DEBUG_DIR = OUTPUT_DIR / "debug"
 
 GEMMA_MODEL = "google/gemma-4-26b-a4b-it:free"
-NEMOTRON_MODEL = "nvidia/llama-3.1-nemotron-nano-vl-8b-v1"
+NEMOTRON_MODEL = "meta/llama-3.2-90b-vision-instruct"
 
 GRADER_MODULES = {
     "Gemma": None,
@@ -1393,14 +1393,6 @@ def _request_model(
             if map_file is None:
                 raise GradingError("Nemotron map filename is missing.")
             _run_nemotron_health_tests(client, image, health_debug_prefix)
-            text, response, request_metadata = _run_nemotron_plain_text_grading(
-                client=client,
-                image=image,
-                map_file=map_file,
-                debug_prefix=health_debug_prefix,
-                request_timeout=request_timeout,
-            )
-            return config["model_id"], text, response, request_metadata
 
         content, request_metadata = _prepare_request_image(
             model_name, prompt, image
@@ -1411,6 +1403,12 @@ def _request_model(
             "temperature": 0,
             "messages": [{"role": "user", "content": content}],
         }
+        payload_shape = [
+            {"type": "text", "text": prompt},
+            request_metadata["payload_shape"],
+        ]
+        if model_name == "Nemotron":
+            payload_shape.reverse()
         request_metadata["outgoing_payload_shape"] = {
             "model": config["model_id"],
             "max_tokens": request_options["max_tokens"],
@@ -1418,10 +1416,7 @@ def _request_model(
             "messages": [
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        request_metadata["payload_shape"],
-                    ],
+                    "content": payload_shape,
                 }
             ],
         }

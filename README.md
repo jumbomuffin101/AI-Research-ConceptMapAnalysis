@@ -73,7 +73,7 @@ Interactive Web Dashboard
 ### Primary Models
 
 - `google/gemma-4-26b-a4b-it:free`
-- `nvidia/llama-3.1-nemotron-nano-vl-8b-v1`
+- `meta/llama-3.2-90b-vision-instruct`
 
 Gemma uses OpenRouter. Nemotron uses NVIDIA's official NIM API. Both models generate full Spring 2025 rubric-aligned JSON grading.
 
