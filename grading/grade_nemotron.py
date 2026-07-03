@@ -352,56 +352,112 @@ def extract_evidence(client, image, debug_prefix):
     return evidence
 
 
-def _half_schema(map_file, groups, include_summary):
-    full_schema = _spring_schema(map_file)
-    schema = {group: full_schema[group] for group in groups}
-    if include_summary:
-        for field in (
-            "overall_meets_expectations",
-            "strengths",
-            "areas_for_improvement",
-            "grading_notes",
-        ):
-            schema[field] = full_schema[field]
-    return schema
+COMPACT_LENGTHS = {"ka": 5, "int": 5, "app": 2, "tr": 3}
+COMPACT_OVERALLS = (
+    "ka_overall",
+    "int_overall",
+    "app_overall",
+    "tr_overall",
+    "overall",
+)
+SCORE_EXPLANATIONS = {
+    1: "Little or irrelevant evidence was identified for this criterion.",
+    2: "Evidence was partly relevant, too general, or limited.",
+    3: "Evidence was relevant and mostly synthesized.",
+    4: "Evidence was synthesized, detailed, and well-supported.",
+}
+DOMAIN_MAP = {
+    "knowledge_acquisition": ("ka", "ka_overall", "ka", "Knowledge Acquisition"),
+    "integration": ("int", "int_overall", "int", "Integration"),
+    "application": ("app", "app_overall", "app", "Application"),
+    "transfer": ("tr", "tr_overall", "tr", "Transfer"),
+}
 
 
-def build_half_prompt(
-    map_file, groups, evidence, include_summary, completed_domains=None
-):
-    rubric_data = _spring_rubric()
-    rubric_half = {group: rubric_data[group] for group in groups}
-    schema = _half_schema(map_file, groups, include_summary)
-    completed_text = (
-        "\nCompleted domain results from Call 1:\n"
-        + json.dumps(completed_domains, separators=(",", ":"))
-        if completed_domains
-        else ""
-    )
-    summary_rules = (
-        "\nAlso return overall_meets_expectations, strengths (max 2 short strings), "
-        "areas_for_improvement (max 3 short strings), and grading_notes (max one "
-        "short sentence)."
-        if include_summary
-        else ""
-    )
-    return f"""Grade only these Spring 2025 rubric domains: {", ".join(groups)}.
-Use ONLY the extracted evidence JSON. Do not infer from medical knowledge or grade what should be present.
-Scores must be integers 1-4 only. Domain decisions must be exactly "Yes" or "No".
-Missing evidence scores 1; vague or partial evidence scores 2; relevant but incomplete evidence scores 3; comprehensive detailed evidence can score 4.
-Each explanation must be at most one short sentence. Each evidence_from_map must contain at most one short item.
-When overall_decision is "No", if_no_explanation must give a specific domain-level reason; otherwise it must be an empty string.{summary_rules}
-Return valid minified JSON only. No markdown or prose.
+def build_compact_prompt(evidence):
+    schema = {
+        "ka": [1, 1, 1, 1, 1],
+        "int": [1, 1, 1, 1, 1],
+        "app": [1, 1],
+        "tr": [1, 1, 1],
+        "ka_overall": "No",
+        "int_overall": "No",
+        "app_overall": "No",
+        "tr_overall": "No",
+        "overall": "No",
+        "evidence": {"ka": [], "int": [], "app": [], "tr": []},
+        "improvements": [],
+    }
+    return f"""Independently grade the complete Spring 2025 concept map rubric using only the extracted visible evidence.
+Do not infer from medical knowledge or grade what should be present.
+Assign every criterion score as an integer 1-4 and every overall value as exactly "Yes" or "No".
+The score arrays must follow the rubric criterion order shown below.
+Keep at most one short evidence item per domain and at most two short improvements. Return compact minified JSON only. No explanations, markdown, or extra text.
 
-Rubric:
-{json.dumps(rubric_half, separators=(",", ":"))}
+Spring 2025 rubric:
+{json.dumps(_spring_rubric(), separators=(",", ":"))}
 
-Extracted evidence JSON:
-{json.dumps(evidence, separators=(",", ":"))}{completed_text}
+Extracted evidence:
+{json.dumps(evidence, separators=(",", ":"))}
 
-Exact JSON structure:
+Exact compact JSON structure:
 {json.dumps(schema, separators=(",", ":"))}
 """
+
+
+def validate_compact(data):
+    for key, expected_length in COMPACT_LENGTHS.items():
+        scores = data.get(key)
+        if not isinstance(scores, list) or len(scores) != expected_length:
+            raise RuntimeError(f"Compact field '{key}' has the wrong score count.")
+        if any(
+            not isinstance(score, int)
+            or isinstance(score, bool)
+            or not 1 <= score <= 4
+            for score in scores
+        ):
+            raise RuntimeError(f"Compact field '{key}' has invalid scores.")
+    for key in COMPACT_OVERALLS:
+        if data.get(key) not in {"Yes", "No"}:
+            raise RuntimeError(f"Compact field '{key}' must be Yes or No.")
+
+
+def compact_evidence(data, key):
+    evidence = data.get("evidence")
+    values = evidence.get(key) if isinstance(evidence, dict) else None
+    if isinstance(values, list):
+        cleaned = [item.strip() for item in values if isinstance(item, str) and item.strip()]
+        if cleaned:
+            return cleaned
+    return ["No clear evidence found in the concept map."]
+
+
+def expand_compact(data, map_file):
+    result = _spring_schema(map_file)
+    strengths = []
+    for group, (score_key, overall_key, evidence_key, label) in DOMAIN_MAP.items():
+        domain = result[group]
+        domain_evidence = compact_evidence(data, evidence_key)
+        for field, score in zip(CATEGORY_FIELDS[group], data[score_key]):
+            domain[field] = {
+                "score": score,
+                "explanation": SCORE_EXPLANATIONS[score],
+                "evidence_from_map": list(domain_evidence),
+            }
+        decision = data[overall_key]
+        domain["overall_decision"] = decision
+        domain["if_no_explanation"] = (
+            f"{label} is marked No because Nemotron identified insufficient visible evidence for this domain."
+            if decision == "No"
+            else ""
+        )
+        if decision == "Yes" and domain_evidence[0] != "No clear evidence found in the concept map.":
+            strengths.append(domain_evidence[0])
+    result["overall_meets_expectations"] = data["overall"]
+    result["strengths"] = strengths[:2]
+    result["areas_for_improvement"] = data.get("improvements", [])
+    result["grading_notes"] = ""
+    return result
 
 
 def _is_all_four_result(result):
@@ -434,80 +490,52 @@ def run_all():
         try:
             run_health_tests(client, image, debug_prefix)
             evidence = extract_evidence(client, image, debug_prefix)
-            first_groups = ("knowledge_acquisition", "integration")
-            second_groups = ("application", "transfer")
-            first_prompt = build_half_prompt(
-                item["map_file"], first_groups, evidence, False
+            compact_prompt = build_compact_prompt(evidence)
+            Path(f"{debug_prefix}_compact_grading_prompt.txt").write_text(
+                compact_prompt, encoding="utf-8"
             )
-            Path(f"{debug_prefix}_grading_call1_prompt.txt").write_text(
-                first_prompt, encoding="utf-8"
+            response = request_grade(client, compact_prompt)
+            Path(f"{debug_prefix}_compact_grading_raw_response.json").write_text(
+                _debug_response_text(response), encoding="utf-8"
             )
-            first_response = request_grade(client, first_prompt)
-            Path(f"{debug_prefix}_grading_call1_raw_response.json").write_text(
-                _debug_response_text(first_response), encoding="utf-8"
-            )
-            first_result, first_reason = _response_content(first_response)
-            if first_reason:
-                raise RuntimeError(f"Nemotron grading call 1 failed: {first_reason}")
-            first_data = json.loads(clean_json_output(first_result))
-            missing_first = [group for group in first_groups if group not in first_data]
-            if missing_first:
-                raise RuntimeError(
-                    "Nemotron grading call 1 is missing: " + ", ".join(missing_first)
+            result, reason = _response_content(response)
+            if reason:
+                raise RuntimeError(f"Nemotron compact grading failed: {reason}")
+            try:
+                compact_data = json.loads(clean_json_output(result))
+            except json.JSONDecodeError:
+                Path(
+                    f"{debug_prefix}_compact_malformed_raw_response.json"
+                ).write_text(_debug_response_text(response), encoding="utf-8")
+                retry_prompt = (
+                    f"{compact_prompt}\n\nReturn compact minified JSON only. "
+                    "No explanations. No markdown. No extra text."
                 )
-
-            second_prompt = build_half_prompt(
-                item["map_file"],
-                second_groups,
-                evidence,
-                True,
-                {group: first_data[group] for group in first_groups},
-            )
-            Path(f"{debug_prefix}_grading_call2_prompt.txt").write_text(
-                second_prompt, encoding="utf-8"
-            )
-            second_response = request_grade(client, second_prompt)
-            Path(f"{debug_prefix}_grading_call2_raw_response.json").write_text(
-                _debug_response_text(second_response), encoding="utf-8"
-            )
-            second_result, second_reason = _response_content(second_response)
-            if second_reason:
-                raise RuntimeError(f"Nemotron grading call 2 failed: {second_reason}")
-            second_data = json.loads(clean_json_output(second_result))
-            required_second = (
-                *second_groups,
-                "overall_meets_expectations",
-                "strengths",
-                "areas_for_improvement",
-                "grading_notes",
-            )
-            missing_second = [
-                field for field in required_second if field not in second_data
-            ]
-            if missing_second:
-                raise RuntimeError(
-                    "Nemotron grading call 2 is missing: "
-                    + ", ".join(missing_second)
+                Path(f"{debug_prefix}_compact_retry_prompt.txt").write_text(
+                    retry_prompt, encoding="utf-8"
                 )
-
-            parsed_result = {"map_file": item["map_file"], "model": MODEL}
-            parsed_result.update({group: first_data[group] for group in first_groups})
-            parsed_result.update(
-                {field: second_data[field] for field in required_second}
+                response = request_grade(client, retry_prompt)
+                Path(
+                    f"{debug_prefix}_compact_retry_raw_response.json"
+                ).write_text(_debug_response_text(response), encoding="utf-8")
+                result, reason = _response_content(response)
+                if reason:
+                    raise RuntimeError(
+                        f"Nemotron compact grading retry failed: {reason}"
+                    )
+                compact_data = json.loads(clean_json_output(result))
+            validate_compact(compact_data)
+            Path(f"{debug_prefix}_compact_grading.json").write_text(
+                json.dumps(compact_data, indent=2), encoding="utf-8"
             )
+            parsed_result = expand_compact(compact_data, item["map_file"])
             cleaned_result = json.dumps(parsed_result, separators=(",", ":"))
             Path(f"{debug_prefix}_final_parsed_grading.json").write_text(
                 json.dumps(parsed_result, indent=2), encoding="utf-8"
             )
             raw_output_path = item["output"].replace(".json", "_raw.txt")
             Path(raw_output_path).write_text(
-                json.dumps(
-                    {
-                        "grading_call_1": _debug_response_text(first_response),
-                        "grading_call_2": _debug_response_text(second_response),
-                    },
-                    indent=2,
-                ),
+                _debug_response_text(response),
                 encoding="utf-8",
             )
             if _is_all_four_result(parsed_result):

@@ -866,66 +866,133 @@ def _parse_nemotron_evidence(raw_text: str) -> dict[str, list[str]]:
     return parsed
 
 
-def _nemotron_half_schema(
-    map_file: str, groups: tuple[str, ...], include_summary: bool
-) -> dict[str, Any]:
-    full_schema = build_spring_schema(map_file, NEMOTRON_MODEL)
-    schema = {group: full_schema[group] for group in groups}
-    if include_summary:
-        for field in (
-            "overall_meets_expectations",
-            "strengths",
-            "areas_for_improvement",
-            "grading_notes",
-        ):
-            schema[field] = full_schema[field]
-    return schema
+NEMOTRON_COMPACT_LENGTHS = {"ka": 5, "int": 5, "app": 2, "tr": 3}
+NEMOTRON_COMPACT_OVERALLS = (
+    "ka_overall",
+    "int_overall",
+    "app_overall",
+    "tr_overall",
+    "overall",
+)
+NEMOTRON_SCORE_EXPLANATIONS = {
+    1: "Little or irrelevant evidence was identified for this criterion.",
+    2: "Evidence was partly relevant, too general, or limited.",
+    3: "Evidence was relevant and mostly synthesized.",
+    4: "Evidence was synthesized, detailed, and well-supported.",
+}
+NEMOTRON_DOMAIN_MAP = {
+    "knowledge_acquisition": ("ka", "ka_overall", "ka", "Knowledge Acquisition"),
+    "integration": ("int", "int_overall", "int", "Integration"),
+    "application": ("app", "app_overall", "app", "Application"),
+    "transfer": ("tr", "tr_overall", "tr", "Transfer"),
+}
 
 
-def _build_nemotron_half_prompt(
-    *,
-    map_file: str,
-    groups: tuple[str, ...],
-    evidence: dict[str, list[str]],
-    include_summary: bool,
-    completed_domains: dict[str, Any] | None = None,
-) -> str:
-    rubric = load_summative_rubric()
-    rubric_half = {group: rubric[group] for group in groups}
-    schema = _nemotron_half_schema(map_file, groups, include_summary)
-    completed_text = (
-        "\nCompleted domain results from Call 1:\n"
-        + json.dumps(completed_domains, separators=(",", ":"))
-        if completed_domains
-        else ""
-    )
-    summary_rules = (
-        "\nAlso return overall_meets_expectations, strengths (max 2 short strings), "
-        "areas_for_improvement (max 3 short strings), and grading_notes (max one "
-        "short sentence)."
-        if include_summary
-        else ""
-    )
-    return f"""Grade only these Spring 2025 rubric domains: {", ".join(groups)}.
-Use ONLY the extracted evidence JSON. Do not infer from medical knowledge or grade what should be present.
-Scores must be integers 1-4 only. Domain decisions must be exactly "Yes" or "No".
-Missing evidence scores 1; vague or partial evidence scores 2; relevant but incomplete evidence scores 3; comprehensive detailed evidence can score 4.
-Each explanation must be at most one short sentence. Each evidence_from_map must contain at most one short item.
-When overall_decision is "No", if_no_explanation must give a specific domain-level reason; otherwise it must be an empty string.{summary_rules}
-Return valid minified JSON only. No markdown or prose.
+def _build_nemotron_compact_prompt(evidence: dict[str, list[str]]) -> str:
+    compact_schema = {
+        "ka": [1, 1, 1, 1, 1],
+        "int": [1, 1, 1, 1, 1],
+        "app": [1, 1],
+        "tr": [1, 1, 1],
+        "ka_overall": "No",
+        "int_overall": "No",
+        "app_overall": "No",
+        "tr_overall": "No",
+        "overall": "No",
+        "evidence": {"ka": [], "int": [], "app": [], "tr": []},
+        "improvements": [],
+    }
+    return f"""Independently grade the complete Spring 2025 concept map rubric using only the extracted visible evidence.
+Do not infer from medical knowledge or grade what should be present.
+Assign every criterion score as an integer 1-4 and every overall value as exactly "Yes" or "No".
+The score arrays must follow the rubric criterion order shown below.
+Keep at most one short evidence item per domain and at most two short improvements. Return compact minified JSON only. No explanations, markdown, or extra text.
 
-Rubric:
-{json.dumps(rubric_half, separators=(",", ":"))}
+Spring 2025 rubric:
+{json.dumps(load_summative_rubric(), separators=(",", ":"))}
 
-Extracted evidence JSON:
-{json.dumps(evidence, separators=(",", ":"))}{completed_text}
+Extracted evidence:
+{json.dumps(evidence, separators=(",", ":"))}
 
-Exact JSON structure:
-{json.dumps(schema, separators=(",", ":"))}
+Exact compact JSON structure:
+{json.dumps(compact_schema, separators=(",", ":"))}
 """
 
 
-def _run_nemotron_split_grading(
+def _validate_nemotron_compact(data: dict[str, Any]) -> None:
+    for key, expected_length in NEMOTRON_COMPACT_LENGTHS.items():
+        scores = data.get(key)
+        if not isinstance(scores, list) or len(scores) != expected_length:
+            raise MalformedResultError(
+                f"Nemotron compact field '{key}' must contain {expected_length} scores."
+            )
+        if any(
+            not isinstance(score, int)
+            or isinstance(score, bool)
+            or not 1 <= score <= 4
+            for score in scores
+        ):
+            raise MalformedResultError(
+                f"Nemotron compact field '{key}' must contain integers from 1 to 4."
+            )
+    for key in NEMOTRON_COMPACT_OVERALLS:
+        if data.get(key) not in {"Yes", "No"}:
+            raise MalformedResultError(
+                f"Nemotron compact field '{key}' must be exactly 'Yes' or 'No'."
+            )
+    evidence = data.get("evidence", {})
+    if evidence is not None and not isinstance(evidence, dict):
+        raise MalformedResultError("Nemotron compact 'evidence' must be an object.")
+    improvements = data.get("improvements", [])
+    if not isinstance(improvements, list) or not all(
+        isinstance(item, str) for item in improvements
+    ):
+        raise MalformedResultError(
+            "Nemotron compact 'improvements' must be a list of strings."
+        )
+
+
+def _compact_evidence(data: dict[str, Any], key: str) -> list[str]:
+    evidence = data.get("evidence")
+    values = evidence.get(key) if isinstance(evidence, dict) else None
+    if isinstance(values, list):
+        cleaned = [item.strip() for item in values if isinstance(item, str) and item.strip()]
+        if cleaned:
+            return cleaned
+    return ["No clear evidence found in the concept map."]
+
+
+def _expand_nemotron_compact(
+    data: dict[str, Any], map_file: str
+) -> dict[str, Any]:
+    result = build_spring_schema(map_file, NEMOTRON_MODEL)
+    strengths: list[str] = []
+    for group, (score_key, overall_key, evidence_key, label) in NEMOTRON_DOMAIN_MAP.items():
+        domain = result[group]
+        domain_evidence = _compact_evidence(data, evidence_key)
+        for field, score in zip(CATEGORY_FIELDS[group], data[score_key]):
+            domain[field] = {
+                "score": score,
+                "explanation": NEMOTRON_SCORE_EXPLANATIONS[score],
+                "evidence_from_map": list(domain_evidence),
+            }
+        decision = data[overall_key]
+        domain["overall_decision"] = decision
+        domain["if_no_explanation"] = (
+            f"{label} is marked No because Nemotron identified insufficient visible evidence for this domain."
+            if decision == "No"
+            else ""
+        )
+        if decision == "Yes" and domain_evidence[0] != "No clear evidence found in the concept map.":
+            strengths.append(domain_evidence[0])
+    result["overall_meets_expectations"] = data["overall"]
+    result["strengths"] = strengths[:2]
+    result["areas_for_improvement"] = data.get("improvements", [])
+    result["grading_notes"] = ""
+    return result
+
+
+def _run_nemotron_compact_grading(
     client: Any,
     image: str,
     map_file: str,
@@ -953,97 +1020,62 @@ def _run_nemotron_split_grading(
     evidence_path = Path(f"{debug_prefix}_extracted_evidence.json")
     evidence_path.write_text(json.dumps(evidence, indent=2), encoding="utf-8")
 
-    first_groups = ("knowledge_acquisition", "integration")
-    second_groups = ("application", "transfer")
-    first_prompt = _build_nemotron_half_prompt(
-        map_file=map_file,
-        groups=first_groups,
-        evidence=evidence,
-        include_summary=False,
-    )
-    first_prompt_path = Path(f"{debug_prefix}_grading_call1_prompt.txt")
-    first_prompt_path.write_text(first_prompt, encoding="utf-8")
-    first_options: dict[str, Any] = {
+    compact_prompt = _build_nemotron_compact_prompt(evidence)
+    compact_prompt_path = Path(f"{debug_prefix}_compact_grading_prompt.txt")
+    compact_prompt_path.write_text(compact_prompt, encoding="utf-8")
+    compact_options: dict[str, Any] = {
         "model": NEMOTRON_MODEL,
         "temperature": 0,
         "max_tokens": 2000,
-        "messages": [{"role": "user", "content": first_prompt}],
+        "messages": [{"role": "user", "content": compact_prompt}],
     }
     if request_timeout is not None:
-        first_options["timeout"] = request_timeout
-    first_response = client.chat.completions.create(**first_options)
-    first_text = _require_response_content(first_response, "grading call 1")
-    first_raw_path = Path(f"{debug_prefix}_grading_call1_raw_response.json")
-    first_raw_path.write_text(
-        _response_to_debug_text(first_response), encoding="utf-8"
+        compact_options["timeout"] = request_timeout
+    compact_response = client.chat.completions.create(**compact_options)
+    compact_text = _require_response_content(compact_response, "compact grading")
+    compact_raw_path = Path(f"{debug_prefix}_compact_grading_raw_response.json")
+    compact_raw_path.write_text(
+        _response_to_debug_text(compact_response), encoding="utf-8"
     )
+    malformed_path: Path | None = None
+    retry_prompt_path: Path | None = None
+    retry_raw_path: Path | None = None
     try:
-        first_data = _load_json_with_repair(first_text)
-    except MalformedResultError as exc:
-        raise ModelResponseError(
-            "Nemotron grading call 1 returned malformed JSON.",
-            raw_response=_response_to_debug_text(first_response),
-        ) from exc
-    missing_first = [group for group in first_groups if group not in first_data]
-    if missing_first:
-        raise MalformedResultError(
-            "Nemotron grading call 1 is missing: " + ", ".join(missing_first)
+        compact_data = _load_json_with_repair(compact_text)
+        _validate_nemotron_compact(compact_data)
+    except MalformedResultError:
+        malformed_path = Path(f"{debug_prefix}_compact_malformed_raw_response.json")
+        malformed_path.write_text(
+            _response_to_debug_text(compact_response), encoding="utf-8"
         )
-
-    second_prompt = _build_nemotron_half_prompt(
-        map_file=map_file,
-        groups=second_groups,
-        evidence=evidence,
-        include_summary=True,
-        completed_domains={group: first_data[group] for group in first_groups},
-    )
-    second_prompt_path = Path(f"{debug_prefix}_grading_call2_prompt.txt")
-    second_prompt_path.write_text(second_prompt, encoding="utf-8")
-    second_options: dict[str, Any] = {
-        "model": NEMOTRON_MODEL,
-        "temperature": 0,
-        "max_tokens": 2000,
-        "messages": [{"role": "user", "content": second_prompt}],
-    }
-    if request_timeout is not None:
-        second_options["timeout"] = request_timeout
-    second_response = client.chat.completions.create(**second_options)
-    second_text = _require_response_content(second_response, "grading call 2")
-    second_raw_path = Path(f"{debug_prefix}_grading_call2_raw_response.json")
-    second_raw_path.write_text(
-        _response_to_debug_text(second_response), encoding="utf-8"
-    )
-    try:
-        second_data = _load_json_with_repair(second_text)
-    except MalformedResultError as exc:
-        raise ModelResponseError(
-            "Nemotron grading call 2 returned malformed JSON.",
-            raw_response=json.dumps(
-                {
-                    "grading_call_1": _response_to_debug_text(first_response),
-                    "grading_call_2": _response_to_debug_text(second_response),
-                }
-            ),
-        ) from exc
-    required_second = (
-        *second_groups,
-        "overall_meets_expectations",
-        "strengths",
-        "areas_for_improvement",
-        "grading_notes",
-    )
-    missing_second = [field for field in required_second if field not in second_data]
-    if missing_second:
-        raise MalformedResultError(
-            "Nemotron grading call 2 is missing: " + ", ".join(missing_second)
+        retry_prompt = (
+            f"{compact_prompt}\n\nReturn compact minified JSON only. "
+            "No explanations. No markdown. No extra text."
         )
-
-    merged: dict[str, Any] = {"map_file": map_file, "model": NEMOTRON_MODEL}
-    merged.update({group: first_data[group] for group in first_groups})
-    merged.update({field: second_data[field] for field in required_second})
-    merged_text = json.dumps(merged, separators=(",", ":"))
+        retry_prompt_path = Path(f"{debug_prefix}_compact_retry_prompt.txt")
+        retry_prompt_path.write_text(retry_prompt, encoding="utf-8")
+        retry_options: dict[str, Any] = {
+            "model": NEMOTRON_MODEL,
+            "temperature": 0,
+            "max_tokens": 2000,
+            "messages": [{"role": "user", "content": retry_prompt}],
+        }
+        if request_timeout is not None:
+            retry_options["timeout"] = request_timeout
+        compact_response = client.chat.completions.create(**retry_options)
+        compact_text = _require_response_content(compact_response, "compact grading retry")
+        retry_raw_path = Path(f"{debug_prefix}_compact_retry_raw_response.json")
+        retry_raw_path.write_text(
+            _response_to_debug_text(compact_response), encoding="utf-8"
+        )
+        compact_data = _load_json_with_repair(compact_text)
+        _validate_nemotron_compact(compact_data)
+    compact_json_path = Path(f"{debug_prefix}_compact_grading.json")
+    compact_json_path.write_text(json.dumps(compact_data, indent=2), encoding="utf-8")
+    expanded = _expand_nemotron_compact(compact_data, map_file)
+    expanded_text = json.dumps(expanded, separators=(",", ":"))
     metadata = {
-        "pipeline": "nemotron_evidence_then_two_split_grading_calls",
+        "pipeline": "nemotron_evidence_then_compact_grading_local_expansion",
         "image_bytes": image_metadata["image_bytes"],
         "image_transport": image_metadata["image_transport"],
         "evidence_payload_shape": {
@@ -1059,18 +1091,20 @@ def _run_nemotron_split_grading(
             ],
         },
         "extracted_evidence_path": str(evidence_path),
-        "grading_call1_prompt_path": str(first_prompt_path),
-        "grading_call1_raw_response_path": str(first_raw_path),
-        "grading_call2_prompt_path": str(second_prompt_path),
-        "grading_call2_raw_response_path": str(second_raw_path),
+        "compact_prompt_path": str(compact_prompt_path),
+        "compact_raw_response_path": str(compact_raw_path),
+        "compact_json_path": str(compact_json_path),
+        "compact_malformed_raw_response_path": (
+            str(malformed_path) if malformed_path else None
+        ),
+        "compact_retry_prompt_path": (
+            str(retry_prompt_path) if retry_prompt_path else None
+        ),
+        "compact_retry_raw_response_path": (
+            str(retry_raw_path) if retry_raw_path else None
+        ),
     }
-    raw_responses = json.dumps(
-        {
-            "grading_call_1": _response_to_debug_text(first_response),
-            "grading_call_2": _response_to_debug_text(second_response),
-        }
-    )
-    return merged_text, raw_responses, metadata
+    return expanded_text, compact_response, metadata
 
 
 def _request_model(
@@ -1096,7 +1130,7 @@ def _request_model(
             if map_file is None:
                 raise GradingError("Nemotron map filename is missing.")
             _run_nemotron_health_tests(client, image, health_debug_prefix)
-            text, response, request_metadata = _run_nemotron_split_grading(
+            text, response, request_metadata = _run_nemotron_compact_grading(
                 client=client,
                 image=image,
                 map_file=map_file,
