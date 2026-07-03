@@ -477,6 +477,13 @@ PLAIN_SECTIONS = {
     "application": "Application",
     "transfer": "Transfer",
 }
+PLAIN_ALIASES = {
+    "knowledge_acquisition": ("Knowledge Acquisition", "knowledge_acquisition", "KA"),
+    "integration": ("Integration",),
+    "application": ("Application",),
+    "transfer": ("Transfer",),
+    "final": ("Final", "Overall"),
+}
 
 
 def build_plain_prompt():
@@ -505,17 +512,30 @@ def build_plain_prompt():
     return "\n".join(lines)
 
 
-def plain_section(text, header, next_header=None):
-    end = rf"(?=^\s*{re.escape(next_header)}\s*:|\Z)" if next_header else r"\Z"
-    match = re.search(rf"(?ims)^\s*{re.escape(header)}\s*:\s*(.*?){end}", text)
-    if not match:
-        raise RuntimeError(f"Plain-text section '{header}' is missing.")
-    return match.group(1)
+def heading_pattern(aliases):
+    variants = [re.escape(alias).replace(r"\ ", r"[\s_]+") for alias in aliases]
+    return rf"(?im)^\s*(?:\#{{1,6}}\s*)?(?:\*\*)?(?:{'|'.join(variants)})\s*:?(?:\*\*)?\s*$"
+
+
+def plain_section(text, section_key):
+    headings = []
+    for key, aliases in PLAIN_ALIASES.items():
+        headings.extend(
+            (match.start(), match.end(), key)
+            for match in re.finditer(heading_pattern(aliases), text)
+        )
+    headings.sort()
+    for index, (_, end, key) in enumerate(headings):
+        if key == section_key:
+            next_start = headings[index + 1][0] if index + 1 < len(headings) else len(text)
+            return text[end:next_start]
+    return None
 
 
 def plain_score(section, field):
+    field_pattern = re.escape(field).replace("_", r"[\s_-]+")
     match = re.search(
-        rf"(?im)^\s*{re.escape(field)}\s*:\s*(?:score\s*)?(-?\d+(?:\.\d+)?)\s*$",
+        rf"(?im)^\s*{field_pattern}\s*:\s*(?:score\s*)?(-?\d+(?:\.\d+)?)\s*$",
         section,
     )
     if not match:
@@ -556,30 +576,50 @@ def parse_plain_grading(text, map_file):
     rubric_data = _spring_rubric()
     result = _spring_schema(map_file)
     notes = []
-    headers = [*PLAIN_SECTIONS.values(), "Final"]
-    for index, (group, header) in enumerate(PLAIN_SECTIONS.items()):
-        section = plain_section(text, header, headers[index + 1])
-        reason_match = re.search(r"(?im)^\s*reason\s*:\s*(.+?)\s*$", section)
+    global_decisions = re.findall(
+        r"(?im)^\s*overall_decision\s*:\s*(Yes|No)\s*$", text
+    )
+    global_reasons = re.findall(r"(?im)^\s*reason\s*:\s*(.+?)\s*$", text)
+    for index, group in enumerate(PLAIN_SECTIONS):
+        section = plain_section(text, group)
+        reason_match = (
+            re.search(r"(?im)^\s*reason\s*:\s*(.+?)\s*$", section)
+            if section is not None
+            else None
+        )
         reason = reason_match.group(1).strip() if reason_match else ""
+        if not reason and index < len(global_reasons):
+            reason = global_reasons[index].strip()
         evidence = [reason] if specific_reason(reason, group) else [
             "No clear evidence found in the concept map."
         ]
         for field in CATEGORY_FIELDS[group]:
-            score = plain_score(section, field)
+            score = plain_score(text, field)
             descriptor = str(rubric_data[group][field][str(score)]).rstrip(".")
             result[group][field] = {
                 "score": score,
                 "explanation": f"Score {score}: {descriptor}.",
                 "evidence_from_map": list(evidence),
             }
-        decision = plain_decision(section, "overall_decision", notes)
+        decision_match = (
+            re.search(r"(?im)^\s*overall_decision\s*:\s*(Yes|No)\s*$", section)
+            if section is not None
+            else None
+        )
+        if decision_match:
+            decision = decision_match.group(1)
+        elif index < len(global_decisions):
+            decision = global_decisions[index]
+        else:
+            decision = "No"
+            notes.append(f"Nemotron omitted {group}.overall_decision; it defaulted to No.")
         result[group]["overall_decision"] = decision
         result[group]["if_no_explanation"] = (
             reason if decision == "No" and specific_reason(reason, group)
             else "The model did not provide a domain-level explanation." if decision == "No"
             else ""
         )
-    final = plain_section(text, "Final")
+    final = plain_section(text, "final") or text
     result["overall_meets_expectations"] = plain_decision(
         final, "overall_meets_expectations", notes
     )
@@ -645,7 +685,25 @@ def run_all():
             Path(f"{debug_prefix}_plain_grading_raw_response.txt").write_text(
                 result, encoding="utf-8"
             )
-            parsed_result = parse_plain_grading(result, item["map_file"])
+            try:
+                parsed_result = parse_plain_grading(result, item["map_file"])
+            except RuntimeError:
+                retry_prompt = (
+                    "Use the exact headings and field names shown below. Do not rename, omit, or reformat them.\n\n"
+                    f"{plain_prompt}"
+                )
+                response = request_grade(client, retry_prompt, image)
+                retry_result, retry_reason = _response_content(response)
+                if retry_reason:
+                    raise RuntimeError(
+                        f"Nemotron plain-text grading retry failed: {retry_reason}"
+                    )
+                Path(
+                    f"{debug_prefix}_plain_grading_retry_raw_response.txt"
+                ).write_text(retry_result, encoding="utf-8")
+                parsed_result = parse_plain_grading(
+                    retry_result, item["map_file"]
+                )
             cleaned_result = json.dumps(parsed_result, separators=(",", ":"))
             Path(f"{debug_prefix}_final_parsed_grading.json").write_text(
                 json.dumps(parsed_result, indent=2), encoding="utf-8"

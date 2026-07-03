@@ -1113,6 +1113,13 @@ NEMOTRON_PLAIN_SECTIONS = {
     "application": "Application",
     "transfer": "Transfer",
 }
+NEMOTRON_SECTION_ALIASES = {
+    "knowledge_acquisition": ("Knowledge Acquisition", "knowledge_acquisition", "KA"),
+    "integration": ("Integration",),
+    "application": ("Application",),
+    "transfer": ("Transfer",),
+    "final": ("Final", "Overall"),
+}
 
 
 def _build_nemotron_plain_text_prompt() -> str:
@@ -1141,19 +1148,33 @@ def _build_nemotron_plain_text_prompt() -> str:
     return "\n".join(lines)
 
 
-def _plain_section(text: str, header: str, next_header: str | None) -> str:
-    end = rf"(?=^\s*{re.escape(next_header)}\s*:|\Z)" if next_header else r"\Z"
-    match = re.search(
-        rf"(?ims)^\s*{re.escape(header)}\s*:\s*(.*?){end}", text
-    )
-    if not match:
-        raise MalformedResultError(f"Nemotron plain-text section '{header}' is missing.")
-    return match.group(1)
+def _heading_pattern(aliases: tuple[str, ...]) -> str:
+    variants = []
+    for alias in aliases:
+        variants.append(re.escape(alias).replace(r"\ ", r"[\s_]+"))
+    return rf"(?im)^\s*(?:\#{{1,6}}\s*)?(?:\*\*)?(?:{'|'.join(variants)})\s*:?(?:\*\*)?\s*$"
+
+
+def _plain_section(text: str, section_key: str) -> str | None:
+    headings: list[tuple[int, int, str]] = []
+    for key, aliases in NEMOTRON_SECTION_ALIASES.items():
+        headings.extend(
+            (match.start(), match.end(), key)
+            for match in re.finditer(_heading_pattern(aliases), text)
+        )
+    headings.sort()
+    for index, (_, end, key) in enumerate(headings):
+        if key != section_key:
+            continue
+        next_start = headings[index + 1][0] if index + 1 < len(headings) else len(text)
+        return text[end:next_start]
+    return None
 
 
 def _plain_score(section: str, field: str) -> int:
+    field_pattern = re.escape(field).replace("_", r"[\s_-]+")
     match = re.search(
-        rf"(?im)^\s*{re.escape(field)}\s*:\s*(?:score\s*)?(-?\d+(?:\.\d+)?)\s*$",
+        rf"(?im)^\s*{field_pattern}\s*:\s*(?:score\s*)?(-?\d+(?:\.\d+)?)\s*$",
         section,
     )
     if not match:
@@ -1214,24 +1235,40 @@ def _parse_nemotron_plain_text(text: str, map_file: str) -> dict[str, Any]:
     rubric = load_summative_rubric()
     result = build_spring_schema(map_file, NEMOTRON_MODEL)
     notes: list[str] = []
-    section_headers = [*NEMOTRON_PLAIN_SECTIONS.values(), "Final"]
-    for index, (group, header) in enumerate(NEMOTRON_PLAIN_SECTIONS.items()):
-        section = _plain_section(text, header, section_headers[index + 1])
-        reason = _plain_reason(section)
+    global_decisions = re.findall(
+        r"(?im)^\s*overall_decision\s*:\s*(Yes|No)\s*$", text
+    )
+    global_reasons = re.findall(r"(?im)^\s*reason\s*:\s*(.+?)\s*$", text)
+    for index, group in enumerate(NEMOTRON_PLAIN_SECTIONS):
+        section = _plain_section(text, group)
+        reason = _plain_reason(section) if section is not None else ""
+        if not reason and index < len(global_reasons):
+            reason = global_reasons[index].strip()
         evidence = (
             [reason]
             if _specific_nemotron_reason(reason, group)
             else ["No clear evidence found in the concept map."]
         )
         for field in CATEGORY_FIELDS[group]:
-            score = _plain_score(section, field)
+            score = _plain_score(text, field)
             descriptor = str(rubric[group][field][str(score)]).rstrip(".")
             result[group][field] = {
                 "score": score,
                 "explanation": f"Score {score}: {descriptor}.",
                 "evidence_from_map": list(evidence),
             }
-        decision = _plain_decision(section, "overall_decision", notes)
+        decision_match = (
+            re.search(r"(?im)^\s*overall_decision\s*:\s*(Yes|No)\s*$", section)
+            if section is not None
+            else None
+        )
+        if decision_match:
+            decision = decision_match.group(1)
+        elif index < len(global_decisions):
+            decision = global_decisions[index]
+        else:
+            decision = "No"
+            notes.append(f"Nemotron omitted {group}.overall_decision; it defaulted to No.")
         result[group]["overall_decision"] = decision
         result[group]["if_no_explanation"] = (
             reason
@@ -1242,7 +1279,7 @@ def _parse_nemotron_plain_text(text: str, map_file: str) -> dict[str, Any]:
                 else ""
             )
         )
-    final_section = _plain_section(text, "Final", None)
+    final_section = _plain_section(text, "final") or text
     result["overall_meets_expectations"] = _plain_decision(
         final_section, "overall_meets_expectations", notes
     )
@@ -1289,7 +1326,34 @@ def _run_nemotron_plain_text_grading(
     plain_text = _require_response_content(response, "plain-text rubric grading")
     raw_path = Path(f"{debug_prefix}_plain_grading_raw_response.txt")
     raw_path.write_text(plain_text, encoding="utf-8")
-    parsed = _parse_nemotron_plain_text(plain_text, map_file)
+    retry_raw_path: Path | None = None
+    try:
+        parsed = _parse_nemotron_plain_text(plain_text, map_file)
+    except MalformedResultError:
+        retry_prompt = (
+            "Use the exact headings and field names shown below. Do not rename, omit, or reformat them.\n\n"
+            f"{plain_prompt}"
+        )
+        retry_content, _ = _prepare_request_image("Nemotron", retry_prompt, image)
+        retry_options = dict(options)
+        retry_options["messages"] = [{"role": "user", "content": retry_content}]
+        retry_response = client.chat.completions.create(**retry_options)
+        retry_text = _require_response_content(
+            retry_response, "plain-text rubric grading retry"
+        )
+        retry_raw_path = Path(f"{debug_prefix}_plain_grading_retry_raw_response.txt")
+        retry_raw_path.write_text(retry_text, encoding="utf-8")
+        try:
+            parsed = _parse_nemotron_plain_text(retry_text, map_file)
+        except MalformedResultError as exc:
+            raise ModelResponseError(
+                "Nemotron plain-text grading could not be parsed after one retry.",
+                raw_response=json.dumps(
+                    {"initial_plain_text": plain_text, "retry_plain_text": retry_text}
+                ),
+            ) from exc
+        response = retry_response
+        plain_text = retry_text
     parsed_path = Path(f"{debug_prefix}_plain_parsed_grading.json")
     parsed_path.write_text(json.dumps(parsed, indent=2), encoding="utf-8")
     metadata = {
@@ -1298,6 +1362,9 @@ def _run_nemotron_plain_text_grading(
         "image_transport": image_metadata["image_transport"],
         "plain_prompt_path": str(prompt_path),
         "plain_raw_response_path": str(raw_path),
+        "plain_retry_raw_response_path": (
+            str(retry_raw_path) if retry_raw_path else None
+        ),
         "plain_parsed_grading_path": str(parsed_path),
     }
     return json.dumps(parsed, separators=(",", ":")), response, metadata
