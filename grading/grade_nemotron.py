@@ -161,7 +161,7 @@ def request_grade(client, prompt):
     return client.chat.completions.create(
         model=MODEL,
         temperature=0,
-        max_tokens=3500,
+        max_tokens=2000,
         messages=[{"role": "user", "content": prompt}],
     )
 
@@ -352,37 +352,55 @@ def extract_evidence(client, image, debug_prefix):
     return evidence
 
 
-def build_evidence_grading_prompt(map_file, evidence):
-    return f"""{build_prompt(map_file)}
+def _half_schema(map_file, groups, include_summary):
+    full_schema = _spring_schema(map_file)
+    schema = {group: full_schema[group] for group in groups}
+    if include_summary:
+        for field in (
+            "overall_meets_expectations",
+            "strengths",
+            "areas_for_improvement",
+            "grading_notes",
+        ):
+            schema[field] = full_schema[field]
+    return schema
 
-Use ONLY the extracted evidence JSON below to grade. Do not use an image.
-- Do not infer from medical knowledge.
-- Do not grade based on what should be present.
-- Score 4 only if the extracted evidence clearly supports the full rubric descriptor.
-- Missing evidence must score 1.
-- Vague or partial evidence must score 2.
-- Relevant but incomplete evidence must score 3.
-- Comprehensive and detailed evidence can score 4.
 
-For every domain:
-- overall_decision must be exactly "Yes" or "No".
-- When overall_decision is "No", if_no_explanation must give a specific,
-  domain-level reason grounded in the extracted evidence. Name the missing,
-  unclear, or insufficient content or relationships; do not leave it empty or
-  use a generic statement.
-- When overall_decision is "Yes", if_no_explanation must be an empty string.
-Example: "Integration is marked No because the concept map does not clearly connect patient data to clinical information or basic science."
+def build_half_prompt(
+    map_file, groups, evidence, include_summary, completed_domains=None
+):
+    rubric_data = _spring_rubric()
+    rubric_half = {group: rubric_data[group] for group in groups}
+    schema = _half_schema(map_file, groups, include_summary)
+    completed_text = (
+        "\nCompleted domain results from Call 1:\n"
+        + json.dumps(completed_domains, separators=(",", ":"))
+        if completed_domains
+        else ""
+    )
+    summary_rules = (
+        "\nAlso return overall_meets_expectations, strengths (max 2 short strings), "
+        "areas_for_improvement (max 3 short strings), and grading_notes (max one "
+        "short sentence)."
+        if include_summary
+        else ""
+    )
+    return f"""Grade only these Spring 2025 rubric domains: {", ".join(groups)}.
+Use ONLY the extracted evidence JSON. Do not infer from medical knowledge or grade what should be present.
+Scores must be integers 1-4 only. Domain decisions must be exactly "Yes" or "No".
+Missing evidence scores 1; vague or partial evidence scores 2; relevant but incomplete evidence scores 3; comprehensive detailed evidence can score 4.
+Each explanation must be at most one short sentence. Each evidence_from_map must contain at most one short item.
+When overall_decision is "No", if_no_explanation must give a specific domain-level reason; otherwise it must be an empty string.{summary_rules}
+Return valid minified JSON only. No markdown or prose.
 
-Output brevity requirements:
-- Each criterion explanation must be at most one short sentence.
-- Each evidence_from_map must contain at most 1-2 short items.
-- strengths must contain at most 2 short strings.
-- areas_for_improvement must contain at most 3 short strings.
-- grading_notes must be at most one short sentence.
-- Return raw JSON only with no markdown or prose outside the JSON object.
+Rubric:
+{json.dumps(rubric_half, separators=(",", ":"))}
 
 Extracted evidence JSON:
-{json.dumps(evidence, indent=2)}
+{json.dumps(evidence, separators=(",", ":"))}{completed_text}
+
+Exact JSON structure:
+{json.dumps(schema, separators=(",", ":"))}
 """
 
 
@@ -416,79 +434,81 @@ def run_all():
         try:
             run_health_tests(client, image, debug_prefix)
             evidence = extract_evidence(client, image, debug_prefix)
-            grading_prompt = build_evidence_grading_prompt(
-                item["map_file"], evidence
+            first_groups = ("knowledge_acquisition", "integration")
+            second_groups = ("application", "transfer")
+            first_prompt = build_half_prompt(
+                item["map_file"], first_groups, evidence, False
             )
-            Path(f"{debug_prefix}_grading_prompt.txt").write_text(
-                grading_prompt, encoding="utf-8"
+            Path(f"{debug_prefix}_grading_call1_prompt.txt").write_text(
+                first_prompt, encoding="utf-8"
             )
-            outgoing_payload_shape = {
-                "model": MODEL,
-                "temperature": 0,
-                "max_tokens": 3500,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": grading_prompt,
-                    }
-                ],
-            }
-            Path(f"{debug_prefix}_grading_payload.json").write_text(
+            first_response = request_grade(client, first_prompt)
+            Path(f"{debug_prefix}_grading_call1_raw_response.json").write_text(
+                _debug_response_text(first_response), encoding="utf-8"
+            )
+            first_result, first_reason = _response_content(first_response)
+            if first_reason:
+                raise RuntimeError(f"Nemotron grading call 1 failed: {first_reason}")
+            first_data = json.loads(clean_json_output(first_result))
+            missing_first = [group for group in first_groups if group not in first_data]
+            if missing_first:
+                raise RuntimeError(
+                    "Nemotron grading call 1 is missing: " + ", ".join(missing_first)
+                )
+
+            second_prompt = build_half_prompt(
+                item["map_file"],
+                second_groups,
+                evidence,
+                True,
+                {group: first_data[group] for group in first_groups},
+            )
+            Path(f"{debug_prefix}_grading_call2_prompt.txt").write_text(
+                second_prompt, encoding="utf-8"
+            )
+            second_response = request_grade(client, second_prompt)
+            Path(f"{debug_prefix}_grading_call2_raw_response.json").write_text(
+                _debug_response_text(second_response), encoding="utf-8"
+            )
+            second_result, second_reason = _response_content(second_response)
+            if second_reason:
+                raise RuntimeError(f"Nemotron grading call 2 failed: {second_reason}")
+            second_data = json.loads(clean_json_output(second_result))
+            required_second = (
+                *second_groups,
+                "overall_meets_expectations",
+                "strengths",
+                "areas_for_improvement",
+                "grading_notes",
+            )
+            missing_second = [
+                field for field in required_second if field not in second_data
+            ]
+            if missing_second:
+                raise RuntimeError(
+                    "Nemotron grading call 2 is missing: "
+                    + ", ".join(missing_second)
+                )
+
+            parsed_result = {"map_file": item["map_file"], "model": MODEL}
+            parsed_result.update({group: first_data[group] for group in first_groups})
+            parsed_result.update(
+                {field: second_data[field] for field in required_second}
+            )
+            cleaned_result = json.dumps(parsed_result, separators=(",", ":"))
+            Path(f"{debug_prefix}_final_parsed_grading.json").write_text(
+                json.dumps(parsed_result, indent=2), encoding="utf-8"
+            )
+            raw_output_path = item["output"].replace(".json", "_raw.txt")
+            Path(raw_output_path).write_text(
                 json.dumps(
                     {
-                        "image_debug_path": str(image_debug_path),
-                        "outgoing_payload_shape": outgoing_payload_shape,
+                        "grading_call_1": _debug_response_text(first_response),
+                        "grading_call_2": _debug_response_text(second_response),
                     },
                     indent=2,
                 ),
                 encoding="utf-8",
-            )
-            response = request_grade(client, grading_prompt)
-            Path(f"{debug_prefix}_grading_raw_response.json").write_text(
-                _debug_response_text(response), encoding="utf-8"
-            )
-
-            raw_output_path = item["output"].replace(".json", "_raw.txt")
-            with open(raw_output_path, "w", encoding="utf-8") as f:
-                f.write(str(response))
-
-            result, reason = _response_content(response)
-            if reason:
-                print(f"Nemotron returned no usable content for {item['label']}: {reason}")
-                continue
-
-            cleaned_result = clean_json_output(result)
-            try:
-                parsed_result = json.loads(cleaned_result)
-            except json.JSONDecodeError:
-                Path(
-                    f"{debug_prefix}_grading_malformed_raw_response.json"
-                ).write_text(
-                    _debug_response_text(response), encoding="utf-8"
-                )
-                retry_prompt = (
-                    f"{grading_prompt}\n\n"
-                    "Return minified JSON only. No markdown. No long "
-                    "explanations. Keep all strings brief."
-                )
-                Path(f"{debug_prefix}_grading_retry_prompt.txt").write_text(
-                    retry_prompt, encoding="utf-8"
-                )
-                retry_response = request_grade(client, retry_prompt)
-                Path(
-                    f"{debug_prefix}_grading_retry_raw_response.json"
-                ).write_text(
-                    _debug_response_text(retry_response), encoding="utf-8"
-                )
-                retry_result, retry_reason = _response_content(retry_response)
-                if retry_reason:
-                    raise RuntimeError(
-                        f"Nemotron grading retry failed: {retry_reason}"
-                    )
-                cleaned_result = clean_json_output(retry_result)
-                parsed_result = json.loads(cleaned_result)
-            Path(f"{debug_prefix}_final_parsed_grading.json").write_text(
-                json.dumps(parsed_result, indent=2), encoding="utf-8"
             )
             if _is_all_four_result(parsed_result):
                 raise RuntimeError(

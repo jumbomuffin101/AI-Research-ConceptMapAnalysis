@@ -40,7 +40,7 @@ MODEL_CONFIGS = {
     },
     "Nemotron": {
         "model_id": NEMOTRON_MODEL,
-        "max_tokens": 3500,
+        "max_tokens": 2000,
     },
 }
 
@@ -866,48 +866,70 @@ def _parse_nemotron_evidence(raw_text: str) -> dict[str, list[str]]:
     return parsed
 
 
-def _build_nemotron_evidence_grading_prompt(
-    rubric_prompt: str, evidence: dict[str, list[str]]
+def _nemotron_half_schema(
+    map_file: str, groups: tuple[str, ...], include_summary: bool
+) -> dict[str, Any]:
+    full_schema = build_spring_schema(map_file, NEMOTRON_MODEL)
+    schema = {group: full_schema[group] for group in groups}
+    if include_summary:
+        for field in (
+            "overall_meets_expectations",
+            "strengths",
+            "areas_for_improvement",
+            "grading_notes",
+        ):
+            schema[field] = full_schema[field]
+    return schema
+
+
+def _build_nemotron_half_prompt(
+    *,
+    map_file: str,
+    groups: tuple[str, ...],
+    evidence: dict[str, list[str]],
+    include_summary: bool,
+    completed_domains: dict[str, Any] | None = None,
 ) -> str:
-    return f"""{rubric_prompt}
+    rubric = load_summative_rubric()
+    rubric_half = {group: rubric[group] for group in groups}
+    schema = _nemotron_half_schema(map_file, groups, include_summary)
+    completed_text = (
+        "\nCompleted domain results from Call 1:\n"
+        + json.dumps(completed_domains, separators=(",", ":"))
+        if completed_domains
+        else ""
+    )
+    summary_rules = (
+        "\nAlso return overall_meets_expectations, strengths (max 2 short strings), "
+        "areas_for_improvement (max 3 short strings), and grading_notes (max one "
+        "short sentence)."
+        if include_summary
+        else ""
+    )
+    return f"""Grade only these Spring 2025 rubric domains: {", ".join(groups)}.
+Use ONLY the extracted evidence JSON. Do not infer from medical knowledge or grade what should be present.
+Scores must be integers 1-4 only. Domain decisions must be exactly "Yes" or "No".
+Missing evidence scores 1; vague or partial evidence scores 2; relevant but incomplete evidence scores 3; comprehensive detailed evidence can score 4.
+Each explanation must be at most one short sentence. Each evidence_from_map must contain at most one short item.
+When overall_decision is "No", if_no_explanation must give a specific domain-level reason; otherwise it must be an empty string.{summary_rules}
+Return valid minified JSON only. No markdown or prose.
 
-Use ONLY the extracted evidence JSON below to grade. Do not use an image.
-- Do not infer from medical knowledge.
-- Do not grade based on what should be present.
-- Score 4 only if the extracted evidence clearly supports the full rubric descriptor.
-- Missing evidence must score 1.
-- Vague or partial evidence must score 2.
-- Relevant but incomplete evidence must score 3.
-- Comprehensive and detailed evidence can score 4.
-
-For every domain:
-- overall_decision must be exactly "Yes" or "No".
-- When overall_decision is "No", if_no_explanation must give a specific,
-  domain-level reason grounded in the extracted evidence. Name the missing,
-  unclear, or insufficient content or relationships; do not leave it empty or
-  use a generic statement.
-- When overall_decision is "Yes", if_no_explanation must be an empty string.
-Example: "Integration is marked No because the concept map does not clearly connect patient data to clinical information or basic science."
-
-Output brevity requirements:
-- Each criterion explanation must be at most one short sentence.
-- Each evidence_from_map must contain at most 1-2 short items.
-- strengths must contain at most 2 short strings.
-- areas_for_improvement must contain at most 3 short strings.
-- grading_notes must be at most one short sentence.
-- Return raw JSON only with no markdown or prose outside the JSON object.
+Rubric:
+{json.dumps(rubric_half, separators=(",", ":"))}
 
 Extracted evidence JSON:
-{json.dumps(evidence, indent=2)}
+{json.dumps(evidence, separators=(",", ":"))}{completed_text}
+
+Exact JSON structure:
+{json.dumps(schema, separators=(",", ":"))}
 """
 
 
-def _run_nemotron_two_stage(
+def _run_nemotron_split_grading(
     client: Any,
     image: str,
-    rubric_prompt: str,
+    map_file: str,
     debug_prefix: Path,
-    max_tokens: int,
     request_timeout: float | None,
 ) -> tuple[str, Any, dict[str, Any]]:
     evidence_prompt = _build_nemotron_evidence_prompt()
@@ -931,64 +953,97 @@ def _run_nemotron_two_stage(
     evidence_path = Path(f"{debug_prefix}_extracted_evidence.json")
     evidence_path.write_text(json.dumps(evidence, indent=2), encoding="utf-8")
 
-    grading_prompt = _build_nemotron_evidence_grading_prompt(
-        rubric_prompt, evidence
+    first_groups = ("knowledge_acquisition", "integration")
+    second_groups = ("application", "transfer")
+    first_prompt = _build_nemotron_half_prompt(
+        map_file=map_file,
+        groups=first_groups,
+        evidence=evidence,
+        include_summary=False,
     )
-    grading_prompt_path = Path(f"{debug_prefix}_grading_prompt.txt")
-    grading_prompt_path.write_text(grading_prompt, encoding="utf-8")
-    grading_options: dict[str, Any] = {
+    first_prompt_path = Path(f"{debug_prefix}_grading_call1_prompt.txt")
+    first_prompt_path.write_text(first_prompt, encoding="utf-8")
+    first_options: dict[str, Any] = {
         "model": NEMOTRON_MODEL,
         "temperature": 0,
-        "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": grading_prompt}],
+        "max_tokens": 2000,
+        "messages": [{"role": "user", "content": first_prompt}],
     }
     if request_timeout is not None:
-        grading_options["timeout"] = request_timeout
-    grading_response = client.chat.completions.create(**grading_options)
-    grading_text = _require_response_content(grading_response, "rubric grading")
-    raw_grading_path = Path(f"{debug_prefix}_grading_raw_response.json")
-    raw_grading_path.write_text(
-        _response_to_debug_text(grading_response), encoding="utf-8"
+        first_options["timeout"] = request_timeout
+    first_response = client.chat.completions.create(**first_options)
+    first_text = _require_response_content(first_response, "grading call 1")
+    first_raw_path = Path(f"{debug_prefix}_grading_call1_raw_response.json")
+    first_raw_path.write_text(
+        _response_to_debug_text(first_response), encoding="utf-8"
     )
-    malformed_raw_path: Path | None = None
-    retry_raw_path: Path | None = None
-    retry_prompt_path: Path | None = None
-    retry_used = False
     try:
-        _load_json_with_repair(grading_text)
-    except MalformedResultError:
-        retry_used = True
-        malformed_raw_path = Path(
-            f"{debug_prefix}_grading_malformed_raw_response.json"
+        first_data = _load_json_with_repair(first_text)
+    except MalformedResultError as exc:
+        raise ModelResponseError(
+            "Nemotron grading call 1 returned malformed JSON.",
+            raw_response=_response_to_debug_text(first_response),
+        ) from exc
+    missing_first = [group for group in first_groups if group not in first_data]
+    if missing_first:
+        raise MalformedResultError(
+            "Nemotron grading call 1 is missing: " + ", ".join(missing_first)
         )
-        malformed_raw_path.write_text(
-            _response_to_debug_text(grading_response), encoding="utf-8"
+
+    second_prompt = _build_nemotron_half_prompt(
+        map_file=map_file,
+        groups=second_groups,
+        evidence=evidence,
+        include_summary=True,
+        completed_domains={group: first_data[group] for group in first_groups},
+    )
+    second_prompt_path = Path(f"{debug_prefix}_grading_call2_prompt.txt")
+    second_prompt_path.write_text(second_prompt, encoding="utf-8")
+    second_options: dict[str, Any] = {
+        "model": NEMOTRON_MODEL,
+        "temperature": 0,
+        "max_tokens": 2000,
+        "messages": [{"role": "user", "content": second_prompt}],
+    }
+    if request_timeout is not None:
+        second_options["timeout"] = request_timeout
+    second_response = client.chat.completions.create(**second_options)
+    second_text = _require_response_content(second_response, "grading call 2")
+    second_raw_path = Path(f"{debug_prefix}_grading_call2_raw_response.json")
+    second_raw_path.write_text(
+        _response_to_debug_text(second_response), encoding="utf-8"
+    )
+    try:
+        second_data = _load_json_with_repair(second_text)
+    except MalformedResultError as exc:
+        raise ModelResponseError(
+            "Nemotron grading call 2 returned malformed JSON.",
+            raw_response=json.dumps(
+                {
+                    "grading_call_1": _response_to_debug_text(first_response),
+                    "grading_call_2": _response_to_debug_text(second_response),
+                }
+            ),
+        ) from exc
+    required_second = (
+        *second_groups,
+        "overall_meets_expectations",
+        "strengths",
+        "areas_for_improvement",
+        "grading_notes",
+    )
+    missing_second = [field for field in required_second if field not in second_data]
+    if missing_second:
+        raise MalformedResultError(
+            "Nemotron grading call 2 is missing: " + ", ".join(missing_second)
         )
-        retry_prompt = (
-            f"{grading_prompt}\n\n"
-            "Return minified JSON only. No markdown. No long explanations. "
-            "Keep all strings brief."
-        )
-        retry_prompt_path = Path(f"{debug_prefix}_grading_retry_prompt.txt")
-        retry_prompt_path.write_text(retry_prompt, encoding="utf-8")
-        retry_options: dict[str, Any] = {
-            "model": NEMOTRON_MODEL,
-            "temperature": 0,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": retry_prompt}],
-        }
-        if request_timeout is not None:
-            retry_options["timeout"] = request_timeout
-        grading_response = client.chat.completions.create(**retry_options)
-        grading_text = _require_response_content(
-            grading_response, "rubric grading retry"
-        )
-        retry_raw_path = Path(f"{debug_prefix}_grading_retry_raw_response.json")
-        retry_raw_path.write_text(
-            _response_to_debug_text(grading_response), encoding="utf-8"
-        )
+
+    merged: dict[str, Any] = {"map_file": map_file, "model": NEMOTRON_MODEL}
+    merged.update({group: first_data[group] for group in first_groups})
+    merged.update({field: second_data[field] for field in required_second})
+    merged_text = json.dumps(merged, separators=(",", ":"))
     metadata = {
-        "pipeline": "nemotron_two_stage_evidence_then_grading",
+        "pipeline": "nemotron_evidence_then_two_split_grading_calls",
         "image_bytes": image_metadata["image_bytes"],
         "image_transport": image_metadata["image_transport"],
         "evidence_payload_shape": {
@@ -1003,21 +1058,19 @@ def _run_nemotron_two_stage(
                 }
             ],
         },
-        "grading_payload_shape": {
-            "model": NEMOTRON_MODEL,
-            "messages": [{"role": "user", "content": grading_prompt}],
-        },
         "extracted_evidence_path": str(evidence_path),
-        "grading_prompt_path": str(grading_prompt_path),
-        "raw_grading_response_path": str(raw_grading_path),
-        "malformed_raw_response_path": (
-            str(malformed_raw_path) if malformed_raw_path else None
-        ),
-        "retry_prompt_path": str(retry_prompt_path) if retry_prompt_path else None,
-        "retry_raw_response_path": str(retry_raw_path) if retry_raw_path else None,
-        "malformed_json_retry_used": retry_used,
+        "grading_call1_prompt_path": str(first_prompt_path),
+        "grading_call1_raw_response_path": str(first_raw_path),
+        "grading_call2_prompt_path": str(second_prompt_path),
+        "grading_call2_raw_response_path": str(second_raw_path),
     }
-    return grading_text, grading_response, metadata
+    raw_responses = json.dumps(
+        {
+            "grading_call_1": _response_to_debug_text(first_response),
+            "grading_call_2": _response_to_debug_text(second_response),
+        }
+    )
+    return merged_text, raw_responses, metadata
 
 
 def _request_model(
@@ -1027,6 +1080,7 @@ def _request_model(
     max_tokens: int | None = None,
     request_timeout: float | None = None,
     health_debug_prefix: Path | None = None,
+    map_file: str | None = None,
 ) -> tuple[str, str, Any, dict[str, Any]]:
     config = MODEL_CONFIGS[model_name]
 
@@ -1039,13 +1093,14 @@ def _request_model(
                 print(line)
             if health_debug_prefix is None:
                 raise GradingError("Nemotron health-test debug path is missing.")
+            if map_file is None:
+                raise GradingError("Nemotron map filename is missing.")
             _run_nemotron_health_tests(client, image, health_debug_prefix)
-            text, response, request_metadata = _run_nemotron_two_stage(
+            text, response, request_metadata = _run_nemotron_split_grading(
                 client=client,
                 image=image,
-                rubric_prompt=prompt,
+                map_file=map_file,
                 debug_prefix=health_debug_prefix,
-                max_tokens=max_tokens or config["max_tokens"],
                 request_timeout=request_timeout,
             )
             return config["model_id"], text, response, request_metadata
@@ -1094,7 +1149,7 @@ def _request_model(
         provider = "NVIDIA NIM" if model_name == "Nemotron" else "OpenRouter"
         raise ModelResponseError(
             f"{model_name} {provider} API request failed: {message}",
-            raw_response=repr(exc),
+            raw_response=getattr(exc, "raw_response", repr(exc)),
         ) from exc
 
     choices = getattr(response, "choices", None)
@@ -1183,6 +1238,11 @@ def run_evaluation(
                 health_debug_prefix=(
                     DEBUG_DIR
                     / f"{timestamp}_{run_id}_{file_stem}_nemotron"
+                    if model_name == "Nemotron"
+                    else None
+                ),
+                map_file=(
+                    Path(original_filename).name
                     if model_name == "Nemotron"
                     else None
                 ),
