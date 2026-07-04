@@ -28,7 +28,7 @@ NEMOTRON_MODEL = "meta/llama-3.2-90b-vision-instruct"
 
 GRADER_MODULES = {
     "Gemma": None,
-    "Nemotron": None,
+    "Llama": None,
 }
 
 MODEL_SELECTION_ALIASES: dict[str, str] = {}
@@ -38,9 +38,9 @@ MODEL_CONFIGS = {
         "model_id": GEMMA_MODEL,
         "max_tokens": 2000,
     },
-    "Nemotron": {
+    "Llama": {
         "model_id": NEMOTRON_MODEL,
-        "max_tokens": 2000,
+        "max_tokens": 4000,
     },
 }
 
@@ -50,7 +50,7 @@ MODEL_PROVIDER_INFO = {
         "base_url": "https://openrouter.ai/api/v1",
         "model": GEMMA_MODEL,
     },
-    "Nemotron": {
+    "Llama": {
         "provider": "NVIDIA NIM",
         "base_url": "https://integrate.api.nvidia.com/v1",
         "model": NEMOTRON_MODEL,
@@ -149,7 +149,7 @@ EvaluationOutcome = EvaluationResult | EvaluationFailure
 def selected_model_names(selection: str) -> list[str]:
     """Translate the UI selection into model registry keys."""
     if selection == "Both":
-        return ["Gemma", "Nemotron"]
+        return ["Gemma", "Llama"]
     selection = MODEL_SELECTION_ALIASES.get(selection, selection)
     if selection not in MODEL_CONFIGS:
         raise GradingError(f"Unknown model selection: {selection}")
@@ -162,8 +162,8 @@ def model_debug_lines(model_names: Iterable[str] | None = None) -> list[str]:
         return [
             "Gemma provider: OpenRouter",
             f"Gemma model: {GEMMA_MODEL}",
-            "Nemotron provider: NVIDIA NIM",
-            f"Nemotron model: {NEMOTRON_MODEL}",
+            "Llama provider: NVIDIA NIM",
+            f"Llama model: {NEMOTRON_MODEL}",
         ]
 
     lines = []
@@ -195,13 +195,13 @@ def render_pdf_image(pdf_path: Path, model_name: str) -> str:
             page = document[0]
             scales = (
                 (1.0, 0.75, 0.5, 0.4, 0.3, 0.25, 0.2)
-                if model_name == "Nemotron"
+                if model_name == "Llama"
                 else (1.0,)
             )
             for scale in scales:
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
                 image_bytes = pixmap.tobytes("png")
-                if model_name != "Nemotron" or len(image_bytes) <= 180 * 1024:
+                if model_name != "Llama" or len(image_bytes) <= 180 * 1024:
                     return base64.b64encode(image_bytes).decode("utf-8")
             raise GradingError(
                 "The concept map image could not be reduced below NVIDIA's "
@@ -293,8 +293,13 @@ Use this exact JSON structure:
 
 def build_model_prompt(model_name: str, map_file: str, model_id: str) -> str:
     """Build the same full Spring 2025 prompt for either model."""
-    _ = model_name
-    return build_web_prompt(map_file, model_id)
+    prompt = build_web_prompt(map_file, model_id)
+    if model_name == "Llama":
+        prompt += (
+            "\nReturn ONLY raw valid minified JSON. No markdown. No prose. "
+            "The first character must be { and the last character must be }.\n"
+        )
+    return prompt
 
 
 def _strip_json_fences(raw_text: str) -> str:
@@ -574,9 +579,9 @@ def _save_nemotron_debug_image(
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     image_bytes = base64.b64decode(image, validate=True)
     if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise GradingError("The rendered Nemotron request image is not a valid PNG.")
+        raise GradingError("The rendered Llama request image is not a valid PNG.")
     image_path = DEBUG_DIR / (
-        f"{timestamp}_{run_id}_{file_stem}_nemotron_request.png"
+        f"{timestamp}_{run_id}_{file_stem}_llama_request.png"
     )
     image_path.write_bytes(image_bytes)
     return image_path
@@ -601,7 +606,7 @@ def _save_nemotron_trace(
     """Persist a complete, per-run NVIDIA request/response trace."""
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     debug_path = DEBUG_DIR / (
-        f"{timestamp}_{run_id}_{file_stem}_nemotron_trace.json"
+        f"{timestamp}_{run_id}_{file_stem}_llama_trace.json"
     )
     payload = {
         "timestamp": timestamp,
@@ -621,6 +626,44 @@ def _save_nemotron_trace(
         "error_message": error_message,
     }
     debug_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return debug_path
+
+
+def _save_llama_raw_debug(
+    *,
+    timestamp: str,
+    run_id: str,
+    file_stem: str,
+    attempt: int,
+    raw_text: str,
+    response: Any,
+    prompt: str,
+    max_tokens: int,
+) -> Path:
+    """Save Llama content and generation metadata before JSON parsing."""
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    choices = getattr(response, "choices", None)
+    finish_reason = (
+        getattr(choices[0], "finish_reason", None) if choices else None
+    )
+    debug_path = DEBUG_DIR / (
+        f"{timestamp}_{run_id}_{file_stem}_llama_attempt{attempt}_raw.json"
+    )
+    debug_path.write_text(
+        json.dumps(
+            {
+                "provider": "NVIDIA NIM",
+                "model": NEMOTRON_MODEL,
+                "raw_text": raw_text,
+                "cleaned_text": _strip_json_fences(raw_text),
+                "prompt_length": len(prompt),
+                "max_tokens": max_tokens,
+                "finish_reason": finish_reason,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     return debug_path
 
 
@@ -692,7 +735,7 @@ def create_nvidia_client(*, disable_sdk_retries: bool = False) -> Any:
 def _create_client(
     model_name: str, *, disable_sdk_retries: bool = False
 ) -> Any:
-    if model_name == "Nemotron":
+    if model_name == "Llama":
         return create_nvidia_client(disable_sdk_retries=disable_sdk_retries)
     return create_openrouter_client(disable_sdk_retries=disable_sdk_retries)
 
@@ -731,7 +774,7 @@ def _prepare_request_image(
         "image_url": {"url": f"data:image/png;base64,{image}"},
     }
     text_item = {"type": "text", "text": prompt}
-    content = [image_item, text_item] if model_name == "Nemotron" else [
+    content = [image_item, text_item] if model_name == "Llama" else [
         text_item,
         image_item,
     ]
@@ -760,11 +803,11 @@ def _write_health_debug(
 def _require_response_content(response: Any, test_name: str) -> str:
     choices = getattr(response, "choices", None)
     if not choices:
-        raise ModelResponseError(f"Nemotron {test_name} returned no response choices.")
+        raise ModelResponseError(f"Llama {test_name} returned no response choices.")
     message = getattr(choices[0], "message", None)
     content = getattr(message, "content", None)
     if not isinstance(content, str) or not content.strip():
-        raise ModelResponseError(f"Nemotron {test_name} returned empty content.")
+        raise ModelResponseError(f"Llama {test_name} returned empty content.")
     return content
 
 
@@ -788,7 +831,7 @@ def _run_nemotron_health_tests(client: Any, image: str, debug_prefix: Path) -> N
         raise
 
     image_content, image_metadata = _prepare_request_image(
-        "Nemotron", "Describe this image in one sentence.", image
+        "Llama", "Describe this image in one sentence.", image
     )
     image_payload = {
         "model": NEMOTRON_MODEL,
@@ -1378,6 +1421,7 @@ def _request_model(
     request_timeout: float | None = None,
     health_debug_prefix: Path | None = None,
     map_file: str | None = None,
+    perform_health_test: bool = True,
 ) -> tuple[str, str, Any, dict[str, Any]]:
     config = MODEL_CONFIGS[model_name]
 
@@ -1385,13 +1429,13 @@ def _request_model(
         client = _create_client(
             model_name, disable_sdk_retries=request_timeout is not None
         )
-        if model_name == "Nemotron":
+        if model_name == "Llama" and perform_health_test:
             for line in model_debug_lines([model_name]):
                 print(line)
             if health_debug_prefix is None:
-                raise GradingError("Nemotron health-test debug path is missing.")
+                raise GradingError("Llama health-test debug path is missing.")
             if map_file is None:
-                raise GradingError("Nemotron map filename is missing.")
+                raise GradingError("Llama map filename is missing.")
             _run_nemotron_health_tests(client, image, health_debug_prefix)
 
         content, request_metadata = _prepare_request_image(
@@ -1407,7 +1451,7 @@ def _request_model(
             {"type": "text", "text": prompt},
             request_metadata["payload_shape"],
         ]
-        if model_name == "Nemotron":
+        if model_name == "Llama":
             payload_shape.reverse()
         request_metadata["outgoing_payload_shape"] = {
             "model": config["model_id"],
@@ -1438,7 +1482,7 @@ def _request_model(
                 "Input is too large for the current model limit. "
                 "Try a smaller PDF/image or use the local CLI pipeline."
             )
-        provider = "NVIDIA NIM" if model_name == "Nemotron" else "OpenRouter"
+        provider = "NVIDIA NIM" if model_name == "Llama" else "OpenRouter"
         raise ModelResponseError(
             f"{model_name} {provider} API request failed: {message}",
             raw_response=getattr(exc, "raw_response", repr(exc)),
@@ -1459,6 +1503,10 @@ def _request_model(
         ) from exc
 
     if not isinstance(text, str) or not text.strip():
+        if model_name == "Llama":
+            raise ModelResponseError(
+                "Llama returned empty content.", raw_response=response
+            )
         raise ModelResponseError(
             f"{model_name} returned no usable content.",
             raw_response=response,
@@ -1511,7 +1559,7 @@ def run_evaluation(
             prompt = build_model_prompt(
                 model_name, Path(original_filename).name, model_id
             )
-            if model_name == "Nemotron":
+            if model_name == "Llama":
                 image_debug_path = _save_nemotron_debug_image(
                     image=image,
                     timestamp=timestamp,
@@ -1529,40 +1577,79 @@ def run_evaluation(
                 image,
                 health_debug_prefix=(
                     DEBUG_DIR
-                    / f"{timestamp}_{run_id}_{file_stem}_nemotron"
-                    if model_name == "Nemotron"
+                    / f"{timestamp}_{run_id}_{file_stem}_llama"
+                    if model_name == "Llama"
                     else None
                 ),
                 map_file=(
                     Path(original_filename).name
-                    if model_name == "Nemotron"
+                    if model_name == "Llama"
                     else None
                 ),
             )
-            if model_name == "Nemotron":
-                cleaned_json = _cleaned_json_text(raw_text)
+            if model_name == "Llama":
+                _save_llama_raw_debug(
+                    timestamp=timestamp,
+                    run_id=run_id,
+                    file_stem=file_stem,
+                    attempt=1,
+                    raw_text=raw_text,
+                    response=raw_api_response,
+                    prompt=prompt,
+                    max_tokens=MODEL_CONFIGS["Llama"]["max_tokens"],
+                )
+            try:
+                parsed_before_validation = (
+                    _load_json_with_repair(raw_text)
+                    if model_name == "Llama"
+                    else None
+                )
+                data = parse_model_json(raw_text)
+            except MalformedResultError:
+                if model_name != "Llama":
+                    raise
+                retry_prompt = (
+                    f"{prompt}\n\nYour previous answer was not valid JSON. "
+                    "Return the same evaluation as valid minified JSON only."
+                )
+                (
+                    returned_model_id,
+                    raw_text,
+                    raw_api_response,
+                    request_metadata,
+                ) = _request_model(
+                    model_name,
+                    retry_prompt,
+                    image,
+                    health_debug_prefix=None,
+                    map_file=Path(original_filename).name,
+                    perform_health_test=False,
+                )
+                _save_llama_raw_debug(
+                    timestamp=timestamp,
+                    run_id=run_id,
+                    file_stem=file_stem,
+                    attempt=2,
+                    raw_text=raw_text,
+                    response=raw_api_response,
+                    prompt=retry_prompt,
+                    max_tokens=MODEL_CONFIGS["Llama"]["max_tokens"],
+                )
+                prompt = retry_prompt
                 parsed_before_validation = _load_json_with_repair(raw_text)
-            data = parse_model_json(raw_text)
-            if model_name == "Nemotron":
+                data = parse_model_json(raw_text)
+            cleaned_json = _cleaned_json_text(raw_text) if model_name == "Llama" else None
+            if model_name == "Llama":
                 parsed_after_validation = json.loads(json.dumps(data))
                 Path(
                     DEBUG_DIR
                     / (
-                        f"{timestamp}_{run_id}_{file_stem}_nemotron_"
+                        f"{timestamp}_{run_id}_{file_stem}_llama_"
                         "final_parsed_grading.json"
                     )
                 ).write_text(
                     json.dumps(parsed_after_validation, indent=2), encoding="utf-8"
                 )
-                if (
-                    _is_implausible_all_four_result(data)
-                    and not _all_four_reasons_are_specific(data)
-                ):
-                    raise ModelResponseError(
-                        "Nemotron returned an implausible all-4 evaluation. "
-                        "Raw output saved for debugging.",
-                        raw_response=raw_api_response,
-                    )
                 _save_nemotron_trace(
                     timestamp=timestamp,
                     run_id=run_id,
@@ -1586,7 +1673,7 @@ def run_evaluation(
                 EvaluationResult(model_name, returned_model_id, data, output_path)
             )
         except (ModelResponseError, MalformedResultError) as exc:
-            if model_name == "Nemotron" and image_debug_path is not None:
+            if model_name == "Llama" and image_debug_path is not None:
                 debug_path = _save_nemotron_trace(
                     timestamp=timestamp,
                     run_id=run_id,

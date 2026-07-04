@@ -186,7 +186,9 @@ def display_failure(result: Any) -> None:
     error_message = _failure_reason(result)
     debug_path = get_result_field(result, "debug_path", None)
 
-    if "NVIDIA NIM rejected the image payload format" in error_message:
+    if error_message == "Llama returned empty content.":
+        st.warning("Llama returned empty content.")
+    elif "NVIDIA NIM rejected the image payload format" in error_message:
         st.warning(
             "NVIDIA NIM rejected the image payload format. The request likely "
             "needs NVIDIA's asset upload/image format instead of the current "
@@ -194,7 +196,7 @@ def display_failure(result: Any) -> None:
         )
     elif "implausible all-4 evaluation" in error_message:
         st.warning(
-            "Nemotron returned an implausible all-4 evaluation. "
+            "Llama returned an implausible all-4 evaluation. "
             "Raw output saved for debugging."
         )
     elif "Input is too large for the current model limit" in error_message:

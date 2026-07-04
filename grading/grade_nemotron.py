@@ -59,13 +59,13 @@ MAPS = [
         "label": "Map 1",
         "map_file": "ConceptMap1.pdf",
         "path": "maps/ConceptMap1.pdf",
-        "output": "outputs/gradingV5/grounded_map1_nemotron_vl.json",
+        "output": "outputs/gradingV5/grounded_map1_llama.json",
     },
     {
         "label": "Map 2",
         "map_file": "ConceptMap2.pdf",
         "path": "maps/ConceptMap2.pdf",
-        "output": "outputs/gradingV5/grounded_map2_nemotron_vl.json",
+        "output": "outputs/gradingV5/grounded_map2_llama.json",
     },
 ]
 
@@ -154,6 +154,8 @@ The final overall decision answers: This map meets expectations.
 
 Return ONLY raw valid JSON using this exact structure:
 {json.dumps(_spring_schema(map_file), indent=2)}
+
+Return ONLY raw valid minified JSON. No markdown. No prose. The first character must be {{ and the last character must be }}.
 """
 
 
@@ -172,7 +174,7 @@ def request_grade(client, prompt, image=None):
     return client.chat.completions.create(
         model=MODEL,
         temperature=0,
-        max_tokens=2000,
+        max_tokens=4000,
         messages=[{"role": "user", "content": content}],
     )
 
@@ -184,6 +186,27 @@ def _debug_response_text(response):
     if callable(method):
         return method(indent=2)
     return str(response)
+
+
+def save_llama_raw_debug(path, response, raw_text, prompt, attempt):
+    choices = getattr(response, "choices", None)
+    finish_reason = getattr(choices[0], "finish_reason", None) if choices else None
+    Path(path).write_text(
+        json.dumps(
+            {
+                "provider": "NVIDIA NIM",
+                "model": MODEL,
+                "attempt": attempt,
+                "raw_text": raw_text,
+                "cleaned_text": clean_json_output(raw_text),
+                "prompt_length": len(prompt),
+                "max_tokens": 4000,
+                "finish_reason": finish_reason,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _save_health_debug(path, payload_shape, response=None, error=None):
@@ -216,7 +239,7 @@ def run_health_tests(client, image, debug_prefix):
         response = client.chat.completions.create(**text_payload)
         content, reason = _response_content(response)
         if reason:
-            raise RuntimeError(f"Nemotron text health test failed: {reason}")
+            raise RuntimeError(f"Llama text health test failed: {reason}")
         _save_health_debug(text_path, text_payload, response=response)
     except Exception as exc:
         _save_health_debug(text_path, text_payload, error=exc)
@@ -270,7 +293,7 @@ def run_health_tests(client, image, debug_prefix):
         response = client.chat.completions.create(**image_payload)
         content, reason = _response_content(response)
         if reason:
-            raise RuntimeError(f"Nemotron image health test failed: {reason}")
+            raise RuntimeError(f"Llama image health test failed: {reason}")
         _save_health_debug(image_path, image_payload_shape, response=response)
     except Exception as exc:
         _save_health_debug(image_path, image_payload_shape, error=exc)
@@ -345,12 +368,12 @@ def extract_evidence(client, image, debug_prefix):
     )
     content, reason = _response_content(response)
     if reason:
-        raise RuntimeError(f"Nemotron evidence extraction failed: {reason}")
+        raise RuntimeError(f"Llama evidence extraction failed: {reason}")
     evidence = json.loads(clean_json_output(content))
     missing = [field for field in EVIDENCE_FIELDS if field not in evidence]
     if missing:
         raise RuntimeError(
-            "Nemotron evidence extraction is missing fields: " + ", ".join(missing)
+            "Llama evidence extraction is missing fields: " + ", ".join(missing)
         )
     for field in EVIDENCE_FIELDS:
         if not isinstance(evidence[field], list) or not all(
@@ -458,7 +481,7 @@ def expand_compact(data, map_file):
         decision = data[overall_key]
         domain["overall_decision"] = decision
         domain["if_no_explanation"] = (
-            f"{label} is marked No because Nemotron identified insufficient visible evidence for this domain."
+            f"{label} is marked No because Llama identified insufficient visible evidence for this domain."
             if decision == "No"
             else ""
         )
@@ -550,7 +573,7 @@ def plain_decision(section, field, notes):
     match = re.search(rf"(?im)^\s*{re.escape(field)}\s*:\s*(Yes|No)\s*$", section)
     if match:
         return match.group(1)
-    notes.append(f"Nemotron omitted {field}; it defaulted to No.")
+    notes.append(f"Llama omitted {field}; it defaulted to No.")
     return "No"
 
 
@@ -612,7 +635,7 @@ def parse_plain_grading(text, map_file):
             decision = global_decisions[index]
         else:
             decision = "No"
-            notes.append(f"Nemotron omitted {group}.overall_decision; it defaulted to No.")
+            notes.append(f"Llama omitted {group}.overall_decision; it defaulted to No.")
         result[group]["overall_decision"] = decision
         result[group]["if_no_explanation"] = (
             reason if decision == "No" and specific_reason(reason, group)
@@ -685,7 +708,32 @@ def run_all():
             Path(f"{debug_prefix}_grading_raw_response.txt").write_text(
                 result, encoding="utf-8"
             )
-            parsed_result = json.loads(clean_json_output(result))
+            save_llama_raw_debug(
+                f"{debug_prefix}_llama_attempt1_raw.json",
+                response,
+                result,
+                prompt,
+                1,
+            )
+            try:
+                parsed_result = json.loads(clean_json_output(result))
+            except json.JSONDecodeError:
+                retry_prompt = (
+                    f"{prompt}\n\nYour previous answer was not valid JSON. "
+                    "Return the same evaluation as valid minified JSON only."
+                )
+                response = request_grade(client, retry_prompt, image)
+                result, reason = _response_content(response)
+                if reason:
+                    raise RuntimeError(f"Llama grading retry failed: {reason}")
+                save_llama_raw_debug(
+                    f"{debug_prefix}_llama_attempt2_raw.json",
+                    response,
+                    result,
+                    retry_prompt,
+                    2,
+                )
+                parsed_result = json.loads(clean_json_output(result))
             cleaned_result = json.dumps(parsed_result, separators=(",", ":"))
             Path(f"{debug_prefix}_final_parsed_grading.json").write_text(
                 json.dumps(parsed_result, indent=2), encoding="utf-8"
@@ -695,14 +743,6 @@ def run_all():
                 _debug_response_text(response),
                 encoding="utf-8",
             )
-            if (
-                _is_all_four_result(parsed_result)
-                and not all_four_reasons_specific(parsed_result)
-            ):
-                raise RuntimeError(
-                    "Nemotron returned an implausible all-4 evaluation. "
-                    "Raw output saved for debugging."
-                )
             with open(item["output"], "w", encoding="utf-8") as f:
                 json.dump(parsed_result, f, indent=2)
 

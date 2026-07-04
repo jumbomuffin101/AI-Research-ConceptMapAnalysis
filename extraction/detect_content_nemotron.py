@@ -14,7 +14,7 @@ client = OpenAI(
 
 MODEL = "meta/llama-3.2-90b-vision-instruct"
 PDF_PATH = "maps/ConceptMapWeak.pdf"
-OUTPUT_PATH = "outputs/detected_content_weak_nemotron_vl.json"
+OUTPUT_PATH = "outputs/detected_content_weak_llama.json"
 
 def pdf_to_base64(pdf_path):
     doc = fitz.open(pdf_path)
