@@ -31,8 +31,6 @@ GRADER_MODULES = {
     "Llama": None,
 }
 
-MODEL_SELECTION_ALIASES: dict[str, str] = {}
-
 MODEL_CONFIGS = {
     "Gemma": {
         "model_id": GEMMA_MODEL,
@@ -148,12 +146,16 @@ EvaluationOutcome = EvaluationResult | EvaluationFailure
 
 def selected_model_names(selection: str) -> list[str]:
     """Translate the UI selection into model registry keys."""
-    if selection == "Both":
-        return ["Gemma", "Llama"]
-    selection = MODEL_SELECTION_ALIASES.get(selection, selection)
-    if selection not in MODEL_CONFIGS:
-        raise GradingError(f"Unknown model selection: {selection}")
-    return [selection]
+    normalized = selection.strip()
+    routes = {
+        "Gemma": ["Gemma"],
+        "Llama": ["Llama"],
+        "Both": ["Gemma", "Llama"],
+    }
+    try:
+        return routes[normalized]
+    except KeyError as exc:
+        raise GradingError(f"Unknown model selection: {normalized}") from exc
 
 
 def model_debug_lines(model_names: Iterable[str] | None = None) -> list[str]:
