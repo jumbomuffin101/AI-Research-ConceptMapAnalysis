@@ -186,7 +186,9 @@ def display_failure(result: Any) -> None:
     error_message = _failure_reason(result)
     debug_path = get_result_field(result, "debug_path", None)
 
-    if error_message == "Llama returned empty content.":
+    if error_message == "Llama could not read enough visible content from the concept map image.":
+        st.warning(error_message)
+    elif error_message == "Llama returned empty content.":
         st.warning("Llama returned empty content.")
     elif "NVIDIA NIM rejected the image payload format" in error_message:
         st.warning(

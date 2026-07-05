@@ -74,17 +74,11 @@ def pdf_to_base64(pdf_path):
     doc = fitz.open(pdf_path)
     page = doc[0]
     try:
-        for scale in (1.0, 0.75, 0.5, 0.4, 0.3, 0.25, 0.2):
-            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
-            image_bytes = pix.tobytes("png")
-            if len(image_bytes) <= 180 * 1024:
-                return base64.b64encode(image_bytes).decode("utf-8")
+        pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
+        image_bytes = pix.tobytes("png")
+        return base64.b64encode(image_bytes).decode("utf-8")
     finally:
         doc.close()
-    raise RuntimeError(
-        "The concept map image could not be reduced below NVIDIA's "
-        "180 KB inline-image limit."
-    )
 
 
 def clean_json_output(text):
@@ -226,6 +220,19 @@ def _save_health_debug(path, payload_shape, response=None, error=None):
     )
 
 
+def extract_visible_terms(text):
+    terms = []
+    for candidate in re.split(r"[\r\n|;,]+", text):
+        term = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", candidate).strip(" \t\"'")
+        if not term or not re.search(r"[A-Za-z]", term):
+            continue
+        if term.lower().startswith(("here are", "visible words", "the image shows")):
+            continue
+        if term not in terms:
+            terms.append(term)
+    return terms[:10]
+
+
 def run_health_tests(client, image, debug_prefix):
     """Run text and image checks before sending the full rubric prompt."""
     text_payload = {
@@ -251,6 +258,10 @@ def run_health_tests(client, image, debug_prefix):
             "url": "data:image/png;base64,<exact rendered image bytes>"
         },
     }
+    preflight_prompt = (
+        "List 10 visible words or phrases from this concept map image. "
+        "Return plain text."
+    )
     image_payload = {
         "model": MODEL,
         "messages": [
@@ -265,7 +276,7 @@ def run_health_tests(client, image, debug_prefix):
                     },
                     {
                         "type": "text",
-                        "text": "Describe this image in one sentence.",
+                        "text": preflight_prompt,
                     },
                 ],
             }
@@ -282,21 +293,30 @@ def run_health_tests(client, image, debug_prefix):
                     image_url_shape,
                     {
                         "type": "text",
-                        "text": "Describe this image in one sentence.",
+                        "text": preflight_prompt,
                     },
                 ],
             }
         ],
     }
     image_path = f"{debug_prefix}_image_health.json"
+    image_response = None
     try:
-        response = client.chat.completions.create(**image_payload)
-        content, reason = _response_content(response)
+        image_response = client.chat.completions.create(**image_payload)
+        content, reason = _response_content(image_response)
         if reason:
             raise RuntimeError(f"Llama image health test failed: {reason}")
-        _save_health_debug(image_path, image_payload_shape, response=response)
+        visible_terms = extract_visible_terms(content)
+        _save_health_debug(image_path, image_payload_shape, response=image_response)
+        if len(visible_terms) < 3:
+            raise RuntimeError(
+                "Llama could not read enough visible content from the concept map image."
+            )
+        return visible_terms
     except Exception as exc:
-        _save_health_debug(image_path, image_payload_shape, error=exc)
+        _save_health_debug(
+            image_path, image_payload_shape, response=image_response, error=exc
+        )
         raise
 
 
@@ -696,8 +716,18 @@ def run_all():
         image_debug_path.write_bytes(base64.b64decode(image, validate=True))
 
         try:
-            run_health_tests(client, image, debug_prefix)
+            visible_terms = run_health_tests(client, image, debug_prefix)
             prompt = build_prompt(item["map_file"])
+            prompt += (
+                "\nGrade visible concept map content. Do not require perfect OCR. "
+                "Use visible nodes, labels, and relationships as evidence. "
+                "Do not output 'No clear evidence found in the concept map.' for "
+                "criteria supported by the detected visible terms. Still do not "
+                "hallucinate content that is not visible.\n"
+                "Visible map text detected by the model: "
+                + "; ".join(visible_terms)
+                + "\n"
+            )
             Path(f"{debug_prefix}_grading_prompt.txt").write_text(
                 prompt, encoding="utf-8"
             )

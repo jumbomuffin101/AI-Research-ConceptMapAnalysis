@@ -195,20 +195,10 @@ def render_pdf_image(pdf_path: Path, model_name: str) -> str:
             if document.page_count < 1:
                 raise InvalidPDFError("The uploaded PDF has no pages.")
             page = document[0]
-            scales = (
-                (1.0, 0.75, 0.5, 0.4, 0.3, 0.25, 0.2)
-                if model_name == "Llama"
-                else (1.0,)
-            )
-            for scale in scales:
-                pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
-                image_bytes = pixmap.tobytes("png")
-                if model_name != "Llama" or len(image_bytes) <= 180 * 1024:
-                    return base64.b64encode(image_bytes).decode("utf-8")
-            raise GradingError(
-                "The concept map image could not be reduced below NVIDIA's "
-                "180 KB inline-image limit."
-            )
+            scale = 3.0 if model_name == "Llama" else 1.0
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+            image_bytes = pixmap.tobytes("png")
+            return base64.b64encode(image_bytes).decode("utf-8")
     except InvalidPDFError:
         raise
     except (
@@ -784,7 +774,12 @@ def _prepare_request_image(
 
 
 def _write_health_debug(
-    path: Path, *, payload_shape: dict[str, Any], response: Any = None, error: Any = None
+    path: Path,
+    *,
+    payload_shape: dict[str, Any],
+    response: Any = None,
+    error: Any = None,
+    extracted_terms: list[str] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -794,6 +789,7 @@ def _write_health_debug(
                 "model_id": NEMOTRON_MODEL,
                 "payload_shape": payload_shape,
                 "raw_response": _response_to_debug_text(response),
+                "extracted_visible_terms": extracted_terms,
                 "error": str(error) if error else None,
             },
             indent=2,
@@ -813,7 +809,24 @@ def _require_response_content(response: Any, test_name: str) -> str:
     return content
 
 
-def _run_nemotron_health_tests(client: Any, image: str, debug_prefix: Path) -> None:
+def _extract_visible_terms(text: str) -> list[str]:
+    candidates = re.split(r"[\r\n|;,]+", text)
+    terms: list[str] = []
+    for candidate in candidates:
+        term = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", candidate).strip(" \t\"'")
+        if not term or not re.search(r"[A-Za-z]", term):
+            continue
+        lowered = term.lower()
+        if lowered.startswith(("here are", "visible words", "the image shows")):
+            continue
+        if term not in terms:
+            terms.append(term)
+    return terms[:10]
+
+
+def _run_nemotron_health_tests(
+    client: Any, image: str, debug_prefix: Path
+) -> tuple[list[str], str]:
     """Gate full grading on text and image calls using NVIDIA's sample format."""
     text_payload = {
         "model": NEMOTRON_MODEL,
@@ -832,8 +845,12 @@ def _run_nemotron_health_tests(client: Any, image: str, debug_prefix: Path) -> N
         _write_health_debug(text_path, payload_shape=text_payload, error=exc)
         raise
 
+    preflight_prompt = (
+        "List 10 visible words or phrases from this concept map image. "
+        "Return plain text."
+    )
     image_content, image_metadata = _prepare_request_image(
-        "Llama", "Describe this image in one sentence.", image
+        "Llama", preflight_prompt, image
     )
     image_payload = {
         "model": NEMOTRON_MODEL,
@@ -848,20 +865,36 @@ def _run_nemotron_health_tests(client: Any, image: str, debug_prefix: Path) -> N
                 "role": "user",
                 "content": [
                     image_metadata["payload_shape"],
-                    {"type": "text", "text": "Describe this image in one sentence."},
+                    {"type": "text", "text": preflight_prompt},
                 ],
             }
         ],
     }
     image_path = Path(f"{debug_prefix}_image_health.json")
+    image_response: Any | None = None
     try:
         image_response = client.chat.completions.create(**image_payload)
-        _require_response_content(image_response, "image health test")
+        preflight_text = _require_response_content(image_response, "image preflight")
+        visible_terms = _extract_visible_terms(preflight_text)
         _write_health_debug(
-            image_path, payload_shape=image_payload_shape, response=image_response
+            image_path,
+            payload_shape=image_payload_shape,
+            response=image_response,
+            extracted_terms=visible_terms,
         )
+        if len(visible_terms) < 3:
+            raise ModelResponseError(
+                "Llama could not read enough visible content from the concept map image.",
+                raw_response=image_response,
+            )
+        return visible_terms, preflight_text
     except Exception as exc:
-        _write_health_debug(image_path, payload_shape=image_payload_shape, error=exc)
+        _write_health_debug(
+            image_path,
+            payload_shape=image_payload_shape,
+            response=image_response,
+            error=exc,
+        )
         raise
 
 
@@ -1438,11 +1471,30 @@ def _request_model(
                 raise GradingError("Llama health-test debug path is missing.")
             if map_file is None:
                 raise GradingError("Llama map filename is missing.")
-            _run_nemotron_health_tests(client, image, health_debug_prefix)
+            visible_terms, preflight_raw_text = _run_nemotron_health_tests(
+                client, image, health_debug_prefix
+            )
+            prompt += (
+                "\nGrade visible concept map content. Do not require perfect OCR. "
+                "Use visible nodes, labels, and relationships as evidence. "
+                "Do not output 'No clear evidence found in the concept map.' for "
+                "criteria supported by the detected visible terms. Still do not "
+                "hallucinate content that is not visible.\n"
+                "Visible map text detected by the model: "
+                + "; ".join(visible_terms)
+                + "\n"
+            )
 
         content, request_metadata = _prepare_request_image(
             model_name, prompt, image
         )
+        if model_name == "Llama" and perform_health_test:
+            request_metadata["visible_terms"] = visible_terms
+            request_metadata["preflight_raw_text"] = preflight_raw_text
+            request_metadata["preflight_debug_path"] = str(
+                Path(f"{health_debug_prefix}_image_health.json")
+            )
+            request_metadata["effective_prompt"] = prompt
         request_options: dict[str, Any] = {
             "model": config["model_id"],
             "max_tokens": max_tokens or config["max_tokens"],
@@ -1473,6 +1525,12 @@ def _request_model(
         )
     except Exception as exc:
         message = str(exc)
+        if (
+            isinstance(exc, ModelResponseError)
+            and message
+            == "Llama could not read enough visible content from the concept map image."
+        ):
+            raise
         if "NVCF asset pool must be given" in message:
             message = (
                 "NVIDIA NIM rejected the image payload format. The request likely "
@@ -1590,6 +1648,7 @@ def run_evaluation(
                 ),
             )
             if model_name == "Llama":
+                prompt = str(request_metadata.get("effective_prompt", prompt))
                 _save_llama_raw_debug(
                     timestamp=timestamp,
                     run_id=run_id,
