@@ -531,6 +531,21 @@ def _is_implausible_all_four_result(result: dict[str, Any]) -> bool:
     return bool(scores) and all(score == 4 for score in scores)
 
 
+def _is_implausible_all_one_result(result: dict[str, Any]) -> bool:
+    """Return true only when every required rubric criterion is scored one."""
+    scores: list[Any] = []
+    for group, fields in CATEGORY_FIELDS.items():
+        section = result.get(group)
+        if not isinstance(section, dict):
+            return False
+        for field in fields:
+            item = section.get(field)
+            if not isinstance(item, dict):
+                return False
+            scores.append(item.get("score"))
+    return bool(scores) and all(score == 1 for score in scores)
+
+
 def _response_to_debug_text(response: Any) -> str:
     """Convert an SDK response object into a debug-safe text payload."""
     if response is None:
@@ -808,6 +823,7 @@ def _write_health_debug(
     error: Any = None,
     prompt_length: int = 0,
     image_file_size: int = 0,
+    extracted_terms: list[str] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -820,6 +836,7 @@ def _write_health_debug(
                 "image_file_size": image_file_size,
                 "payload_shape": payload_shape,
                 "raw_response": _response_to_debug_text(response),
+                "extracted_visible_terms": extracted_terms,
                 "error": str(error) if error else None,
             },
             indent=2,
@@ -854,9 +871,36 @@ def _extract_visible_terms(text: str) -> list[str]:
     return terms[:10]
 
 
+def _extract_preflight_terms(text: str) -> list[str]:
+    """Extract the model's explicitly reported visible medical terms."""
+    parts = re.split(r"visible[_ ]terms\s*:", text, maxsplit=1, flags=re.IGNORECASE)
+    term_text = parts[1] if len(parts) == 2 else text
+    ignored = {
+        "concept map",
+        "medical concept map",
+        "image",
+        "nodes",
+        "labels",
+        "relationships",
+    }
+    terms: list[str] = []
+    for candidate in re.split(r"[\r\n|;,]+", term_text):
+        term = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", candidate).strip(" \t\"'")
+        if (
+            not term
+            or not re.search(r"[A-Za-z]", term)
+            or len(term) > 100
+            or term.lower() in ignored
+        ):
+            continue
+        if term not in terms:
+            terms.append(term)
+    return terms[:10]
+
+
 def _run_nemotron_health_tests(
     client: Any, image: str, debug_prefix: Path
-) -> str:
+) -> tuple[str, list[str]]:
     """Gate full grading on text and image calls using NVIDIA's sample format."""
     text_prompt = "Reply with OK."
     text_payload = {
@@ -888,7 +932,11 @@ def _run_nemotron_health_tests(
             "NVIDIA text endpoint failed", raw_response=text_response or repr(exc)
         ) from exc
 
-    preflight_prompt = "Describe this image in one sentence."
+    preflight_prompt = (
+        "Describe this concept map in one sentence. Then write VISIBLE_TERMS: "
+        "followed by up to 10 medical concepts or terms that are clearly visible, "
+        "separated by semicolons."
+    )
     image_content, image_metadata = _prepare_request_image(
         "Llama", preflight_prompt, image
     )
@@ -916,14 +964,16 @@ def _run_nemotron_health_tests(
     try:
         image_response = client.chat.completions.create(**image_payload)
         preflight_text = _require_response_content(image_response, "image preflight")
+        visible_terms = _extract_preflight_terms(preflight_text)
         _write_health_debug(
             image_path,
             payload_shape=image_payload_shape,
             response=image_response,
             prompt_length=len(preflight_prompt),
             image_file_size=image_file_size,
+            extracted_terms=visible_terms,
         )
-        return preflight_text.strip()
+        return preflight_text.strip(), visible_terms
     except Exception as exc:
         _write_health_debug(
             image_path,
@@ -1511,13 +1561,21 @@ def _request_model(
                 raise GradingError("Llama health-test debug path is missing.")
             if map_file is None:
                 raise GradingError("Llama map filename is missing.")
-            preflight_description = _run_nemotron_health_tests(
+            preflight_description, visible_terms = _run_nemotron_health_tests(
                 client, image, health_debug_prefix
             )
             prompt += (
                 "\nImage preflight description: "
                 + preflight_description
-                + "\nGrade only visible nodes, labels, and relationships; do not hallucinate.\n"
+                + "\nExtracted visible medical terms: "
+                + ("; ".join(visible_terms) if visible_terms else "None identified")
+                + "\nCalibration rules: Use visible nodes, labels, and relationships as evidence. "
+                "Do not require perfect OCR. Do not assign score 1 when relevant visible content exists. "
+                "Score 1 only when the criterion is absent, irrelevant, or unreadable. "
+                "Score 2 when content is visible but too general or weakly connected. "
+                "Score 3 when content is relevant and mostly synthesized. "
+                "Score 4 only when content is detailed, comprehensive, and clearly connected. "
+                "Do not hallucinate evidence.\n"
             )
 
         content, request_metadata = _prepare_request_image(
@@ -1525,6 +1583,7 @@ def _request_model(
         )
         if model_name == "Llama" and perform_health_test:
             request_metadata["preflight_description"] = preflight_description
+            request_metadata["visible_terms"] = visible_terms
             request_metadata["preflight_debug_path"] = str(
                 Path(f"{health_debug_prefix}_image_health.json")
             )
@@ -1663,6 +1722,8 @@ def run_evaluation(
         parsed_before_validation: dict[str, Any] | None = None
         parsed_after_validation: dict[str, Any] | None = None
         request_metadata: dict[str, Any] | None = None
+        preflight_terms: list[str] = []
+        llama_attempt = 1
         try:
             prompt = build_model_prompt(
                 model_name, Path(original_filename).name, model_id
@@ -1697,6 +1758,7 @@ def run_evaluation(
             )
             if model_name == "Llama":
                 prompt = str(request_metadata.get("effective_prompt", prompt))
+                preflight_terms = list(request_metadata.get("visible_terms", []))
                 _save_llama_raw_debug(
                     timestamp=timestamp,
                     run_id=run_id,
@@ -1718,6 +1780,7 @@ def run_evaluation(
             except MalformedResultError:
                 if model_name != "Llama":
                     raise
+                llama_attempt += 1
                 retry_prompt = (
                     f"{prompt}\n\nYour previous answer was not valid JSON. "
                     "Return the same evaluation as valid minified JSON only."
@@ -1735,11 +1798,12 @@ def run_evaluation(
                     map_file=Path(original_filename).name,
                     perform_health_test=False,
                 )
+                request_metadata["visible_terms"] = preflight_terms
                 _save_llama_raw_debug(
                     timestamp=timestamp,
                     run_id=run_id,
                     file_stem=file_stem,
-                    attempt=2,
+                    attempt=llama_attempt,
                     raw_text=raw_text,
                     response=raw_api_response,
                     prompt=retry_prompt,
@@ -1747,6 +1811,46 @@ def run_evaluation(
                     image_file_size=image_debug_path.stat().st_size,
                 )
                 prompt = retry_prompt
+                parsed_before_validation = _load_json_with_repair(raw_text)
+                data = parse_model_json(raw_text)
+            if (
+                model_name == "Llama"
+                and len(preflight_terms) >= 5
+                and _is_implausible_all_one_result(data)
+            ):
+                llama_attempt += 1
+                calibration_prompt = (
+                    f"{prompt}\n\nYou detected visible concept-map content. Regrade using "
+                    "that visible evidence. Do not mark criteria as 1 unless truly absent."
+                )
+                (
+                    returned_model_id,
+                    raw_text,
+                    raw_api_response,
+                    request_metadata,
+                ) = _request_model(
+                    model_name,
+                    calibration_prompt,
+                    image,
+                    health_debug_prefix=None,
+                    map_file=Path(original_filename).name,
+                    perform_health_test=False,
+                )
+                request_metadata["visible_terms"] = preflight_terms
+                request_metadata["calibration_retry"] = True
+                request_metadata["effective_prompt"] = calibration_prompt
+                _save_llama_raw_debug(
+                    timestamp=timestamp,
+                    run_id=run_id,
+                    file_stem=file_stem,
+                    attempt=llama_attempt,
+                    raw_text=raw_text,
+                    response=raw_api_response,
+                    prompt=calibration_prompt,
+                    max_tokens=MODEL_CONFIGS["Llama"]["max_tokens"],
+                    image_file_size=image_debug_path.stat().st_size,
+                )
+                prompt = calibration_prompt
                 parsed_before_validation = _load_json_with_repair(raw_text)
                 data = parse_model_json(raw_text)
             cleaned_json = _cleaned_json_text(raw_text) if model_name == "Llama" else None

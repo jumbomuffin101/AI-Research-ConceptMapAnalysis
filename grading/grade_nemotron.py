@@ -196,6 +196,7 @@ def _save_health_debug(
     error=None,
     prompt_length=0,
     image_file_size=0,
+    extracted_terms=None,
 ):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(
@@ -208,6 +209,7 @@ def _save_health_debug(
                 "image_file_size": image_file_size,
                 "payload_shape": payload_shape,
                 "raw_response": _debug_response_text(response),
+                "extracted_visible_terms": extracted_terms,
                 "error": str(error) if error else None,
             },
             indent=2,
@@ -223,6 +225,32 @@ def extract_visible_terms(text):
         if not term or not re.search(r"[A-Za-z]", term):
             continue
         if term.lower().startswith(("here are", "visible words", "the image shows")):
+            continue
+        if term not in terms:
+            terms.append(term)
+    return terms[:10]
+
+
+def extract_preflight_terms(text):
+    parts = re.split(r"visible[_ ]terms\s*:", text, maxsplit=1, flags=re.IGNORECASE)
+    term_text = parts[1] if len(parts) == 2 else text
+    ignored = {
+        "concept map",
+        "medical concept map",
+        "image",
+        "nodes",
+        "labels",
+        "relationships",
+    }
+    terms = []
+    for candidate in re.split(r"[\r\n|;,]+", term_text):
+        term = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", candidate).strip(" \t\"'")
+        if (
+            not term
+            or not re.search(r"[A-Za-z]", term)
+            or len(term) > 100
+            or term.lower() in ignored
+        ):
             continue
         if term not in terms:
             terms.append(term)
@@ -267,7 +295,11 @@ def run_health_tests(client, image, debug_prefix):
             "url": "data:image/jpeg;base64,<exact rendered image bytes>"
         },
     }
-    preflight_prompt = "Describe this image in one sentence."
+    preflight_prompt = (
+        "Describe this concept map in one sentence. Then write VISIBLE_TERMS: "
+        "followed by up to 10 medical concepts or terms that are clearly visible, "
+        "separated by semicolons."
+    )
     image_payload = {
         "model": MODEL,
         "messages": [
@@ -313,14 +345,16 @@ def run_health_tests(client, image, debug_prefix):
         content, reason = _response_content(image_response)
         if reason:
             raise RuntimeError(reason)
+        visible_terms = extract_preflight_terms(content)
         _save_health_debug(
             image_path,
             image_payload_shape,
             response=image_response,
             prompt_length=len(preflight_prompt),
             image_file_size=image_file_size,
+            extracted_terms=visible_terms,
         )
-        return content.strip()
+        return content.strip(), visible_terms
     except Exception as exc:
         _save_health_debug(
             image_path,
@@ -715,6 +749,20 @@ def _is_all_four_result(result):
     return bool(scores) and all(score == 4 for score in scores)
 
 
+def _is_all_one_result(result):
+    scores = []
+    for group, fields in CATEGORY_FIELDS.items():
+        section = result.get(group)
+        if not isinstance(section, dict):
+            return False
+        for field in fields:
+            item = section.get(field)
+            if not isinstance(item, dict):
+                return False
+            scores.append(item.get("score"))
+    return bool(scores) and all(score == 1 for score in scores)
+
+
 def run_all():
     client = create_client()
     Path("outputs/gradingV5").mkdir(parents=True, exist_ok=True)
@@ -729,12 +777,22 @@ def run_all():
         image_debug_path.write_bytes(base64.b64decode(image, validate=True))
 
         try:
-            image_description = run_health_tests(client, image, debug_prefix)
+            image_description, visible_terms = run_health_tests(
+                client, image, debug_prefix
+            )
             prompt = build_prompt(item["map_file"])
             prompt += (
                 "\nImage preflight description: "
                 + image_description
-                + "\nGrade only visible nodes, labels, and relationships; do not hallucinate.\n"
+                + "\nExtracted visible medical terms: "
+                + ("; ".join(visible_terms) if visible_terms else "None identified")
+                + "\nCalibration rules: Use visible nodes, labels, and relationships as evidence. "
+                "Do not require perfect OCR. Do not assign score 1 when relevant visible content exists. "
+                "Score 1 only when the criterion is absent, irrelevant, or unreadable. "
+                "Score 2 when content is visible but too general or weakly connected. "
+                "Score 3 when content is relevant and mostly synthesized. "
+                "Score 4 only when content is detailed, comprehensive, and clearly connected. "
+                "Do not hallucinate evidence.\n"
             )
             Path(f"{debug_prefix}_grading_prompt.txt").write_text(
                 prompt, encoding="utf-8"
@@ -753,9 +811,11 @@ def run_all():
                 prompt,
                 1,
             )
+            llama_attempt = 1
             try:
                 parsed_result = json.loads(clean_json_output(result))
             except json.JSONDecodeError:
+                llama_attempt += 1
                 retry_prompt = (
                     f"{prompt}\n\nYour previous answer was not valid JSON. "
                     "Return the same evaluation as valid minified JSON only."
@@ -769,8 +829,29 @@ def run_all():
                     response,
                     result,
                     retry_prompt,
-                    2,
+                    llama_attempt,
                 )
+                parsed_result = json.loads(clean_json_output(result))
+            if len(visible_terms) >= 5 and _is_all_one_result(parsed_result):
+                llama_attempt += 1
+                calibration_prompt = (
+                    f"{prompt}\n\nYou detected visible concept-map content. Regrade using "
+                    "that visible evidence. Do not mark criteria as 1 unless truly absent."
+                )
+                response = request_grade(client, calibration_prompt, image)
+                result, reason = _response_content(response)
+                if reason:
+                    raise RuntimeError(
+                        f"NVIDIA grading request failed during calibration: {reason}"
+                    )
+                save_llama_raw_debug(
+                    f"{debug_prefix}_llama_calibration_raw.json",
+                    response,
+                    result,
+                    calibration_prompt,
+                    llama_attempt,
+                )
+                prompt = calibration_prompt
                 parsed_result = json.loads(clean_json_output(result))
             cleaned_result = json.dumps(parsed_result, separators=(",", ":"))
             Path(f"{debug_prefix}_final_parsed_grading.json").write_text(
