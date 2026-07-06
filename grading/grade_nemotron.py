@@ -74,8 +74,10 @@ def pdf_to_base64(pdf_path):
     doc = fitz.open(pdf_path)
     page = doc[0]
     try:
-        pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
-        image_bytes = pix.tobytes("png")
+        pix = page.get_pixmap(
+            matrix=fitz.Matrix(2, 2), colorspace=fitz.csRGB, alpha=False
+        )
+        image_bytes = pix.tobytes("jpeg", jpg_quality=80)
         return base64.b64encode(image_bytes).decode("utf-8")
     finally:
         doc.close()
@@ -127,29 +129,13 @@ def _spring_schema(map_file):
 
 
 def build_prompt(map_file):
-    return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
-Do not invent additional grading criteria.
-
-Rubric:
-{json.dumps(_spring_rubric(), indent=2)}
-
-Global rules:
-- Every criterion score must be an integer 1, 2, 3, or 4 only.
-- Every domain overall_decision must be exactly "Yes" or "No".
-- overall_meets_expectations must be exactly "Yes" or "No".
-- Do not output Partial, Partially Meets, Borderline, Maybe, score 0, score 5, decimal scores, or any score outside 1-4.
-- If evidence is missing, write "No clear evidence found in the concept map."
-- Do not hallucinate evidence not visible in the concept map.
-
-Each criterion must include score, explanation, and evidence_from_map.
-Each domain must include overall_decision and if_no_explanation.
-If overall_decision is "No", if_no_explanation is required.
-The final overall decision answers: This map meets expectations.
-
-Return ONLY raw valid JSON using this exact structure:
-{json.dumps(_spring_schema(map_file), indent=2)}
-
-Return ONLY raw valid minified JSON. No markdown. No prose. The first character must be {{ and the last character must be }}.
+    rubric_json = json.dumps(_spring_rubric(), separators=(",", ":"))
+    schema_json = json.dumps(_spring_schema(map_file), separators=(",", ":"))
+    return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly. Do not invent criteria.
+Rubric:{rubric_json}
+Rules: criterion scores are integers 1-4 only; domain overall_decision and overall_meets_expectations are exactly Yes or No; never use Partial, decimals, 0, or 5. Each criterion needs score, one short explanation, and brief evidence_from_map from visible content. Do not hallucinate. Each domain needs overall_decision and if_no_explanation when No. Keep strengths, areas_for_improvement, and grading_notes brief.
+Return ONLY raw valid minified JSON matching this exact schema. No markdown or prose. First character {{; last character }}.
+Schema:{schema_json}
 """
 
 
@@ -158,7 +144,7 @@ def request_grade(client, prompt, image=None):
         [
             {
                 "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{image}"},
+                "image_url": {"url": f"data:image/jpeg;base64,{image}"},
             },
             {"type": "text", "text": prompt},
         ]
@@ -168,7 +154,7 @@ def request_grade(client, prompt, image=None):
     return client.chat.completions.create(
         model=MODEL,
         temperature=0,
-        max_tokens=4000,
+        max_tokens=2500,
         messages=[{"role": "user", "content": content}],
     )
 
@@ -194,7 +180,7 @@ def save_llama_raw_debug(path, response, raw_text, prompt, attempt):
                 "raw_text": raw_text,
                 "cleaned_text": clean_json_output(raw_text),
                 "prompt_length": len(prompt),
-                "max_tokens": 4000,
+                "max_tokens": 2500,
                 "finish_reason": finish_reason,
             },
             indent=2,
@@ -203,13 +189,23 @@ def save_llama_raw_debug(path, response, raw_text, prompt, attempt):
     )
 
 
-def _save_health_debug(path, payload_shape, response=None, error=None):
+def _save_health_debug(
+    path,
+    payload_shape,
+    response=None,
+    error=None,
+    prompt_length=0,
+    image_file_size=0,
+):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(
         json.dumps(
             {
                 "provider": "NVIDIA NIM",
+                "base_url": NVIDIA_BASE_URL,
                 "model_id": MODEL,
+                "prompt_length": prompt_length,
+                "image_file_size": image_file_size,
                 "payload_shape": payload_shape,
                 "raw_response": _debug_response_text(response),
                 "error": str(error) if error else None,
@@ -235,33 +231,43 @@ def extract_visible_terms(text):
 
 def run_health_tests(client, image, debug_prefix):
     """Run text and image checks before sending the full rubric prompt."""
+    text_prompt = "Reply with OK."
     text_payload = {
         "model": MODEL,
-        "messages": [{"role": "user", "content": "Reply with OK."}],
+        "messages": [{"role": "user", "content": text_prompt}],
         "temperature": 0,
         "max_tokens": 16,
     }
     text_path = f"{debug_prefix}_text_health.json"
+    response = None
     try:
         response = client.chat.completions.create(**text_payload)
         content, reason = _response_content(response)
         if reason:
-            raise RuntimeError(f"Llama text health test failed: {reason}")
-        _save_health_debug(text_path, text_payload, response=response)
+            raise RuntimeError(reason)
+        _save_health_debug(
+            text_path,
+            text_payload,
+            response=response,
+            prompt_length=len(text_prompt),
+        )
     except Exception as exc:
-        _save_health_debug(text_path, text_payload, error=exc)
-        raise
+        _save_health_debug(
+            text_path,
+            text_payload,
+            response=response,
+            error=exc,
+            prompt_length=len(text_prompt),
+        )
+        raise RuntimeError("NVIDIA text endpoint failed") from exc
 
     image_url_shape = {
         "type": "image_url",
         "image_url": {
-            "url": "data:image/png;base64,<exact rendered image bytes>"
+            "url": "data:image/jpeg;base64,<exact rendered image bytes>"
         },
     }
-    preflight_prompt = (
-        "List 10 visible words or phrases from this concept map image. "
-        "Return plain text."
-    )
+    preflight_prompt = "Describe this image in one sentence."
     image_payload = {
         "model": MODEL,
         "messages": [
@@ -271,7 +277,7 @@ def run_health_tests(client, image, debug_prefix):
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/png;base64,{image}"
+                            "url": f"data:image/jpeg;base64,{image}"
                         },
                     },
                     {
@@ -301,23 +307,30 @@ def run_health_tests(client, image, debug_prefix):
     }
     image_path = f"{debug_prefix}_image_health.json"
     image_response = None
+    image_file_size = len(base64.b64decode(image, validate=True))
     try:
         image_response = client.chat.completions.create(**image_payload)
         content, reason = _response_content(image_response)
         if reason:
-            raise RuntimeError(f"Llama image health test failed: {reason}")
-        visible_terms = extract_visible_terms(content)
-        _save_health_debug(image_path, image_payload_shape, response=image_response)
-        if len(visible_terms) < 3:
-            raise RuntimeError(
-                "Llama could not read enough visible content from the concept map image."
-            )
-        return visible_terms
+            raise RuntimeError(reason)
+        _save_health_debug(
+            image_path,
+            image_payload_shape,
+            response=image_response,
+            prompt_length=len(preflight_prompt),
+            image_file_size=image_file_size,
+        )
+        return content.strip()
     except Exception as exc:
         _save_health_debug(
-            image_path, image_payload_shape, response=image_response, error=exc
+            image_path,
+            image_payload_shape,
+            response=image_response,
+            error=exc,
+            prompt_length=len(preflight_prompt),
+            image_file_size=image_file_size,
         )
-        raise
+        raise RuntimeError("NVIDIA image input failed") from exc
 
 
 def _response_content(response):
@@ -375,7 +388,7 @@ def extract_evidence(client, image, debug_prefix):
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/png;base64,{image}"
+                            "url": f"data:image/jpeg;base64,{image}"
                         },
                     },
                     {"type": "text", "text": prompt},
@@ -712,21 +725,16 @@ def run_all():
         image = pdf_to_base64(item["path"])
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         debug_prefix = debug_dir / f"{timestamp}_{Path(item['map_file']).stem}"
-        image_debug_path = Path(f"{debug_prefix}_request.png")
+        image_debug_path = Path(f"{debug_prefix}_request.jpg")
         image_debug_path.write_bytes(base64.b64decode(image, validate=True))
 
         try:
-            visible_terms = run_health_tests(client, image, debug_prefix)
+            image_description = run_health_tests(client, image, debug_prefix)
             prompt = build_prompt(item["map_file"])
             prompt += (
-                "\nGrade visible concept map content. Do not require perfect OCR. "
-                "Use visible nodes, labels, and relationships as evidence. "
-                "Do not output 'No clear evidence found in the concept map.' for "
-                "criteria supported by the detected visible terms. Still do not "
-                "hallucinate content that is not visible.\n"
-                "Visible map text detected by the model: "
-                + "; ".join(visible_terms)
-                + "\n"
+                "\nImage preflight description: "
+                + image_description
+                + "\nGrade only visible nodes, labels, and relationships; do not hallucinate.\n"
             )
             Path(f"{debug_prefix}_grading_prompt.txt").write_text(
                 prompt, encoding="utf-8"
@@ -734,7 +742,7 @@ def run_all():
             response = request_grade(client, prompt, image)
             result, reason = _response_content(response)
             if reason:
-                raise RuntimeError(f"Llama grading failed: {reason}")
+                raise RuntimeError(f"NVIDIA grading request failed: {reason}")
             Path(f"{debug_prefix}_grading_raw_response.txt").write_text(
                 result, encoding="utf-8"
             )

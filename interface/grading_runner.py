@@ -38,7 +38,7 @@ MODEL_CONFIGS = {
     },
     "Llama": {
         "model_id": NEMOTRON_MODEL,
-        "max_tokens": 4000,
+        "max_tokens": 2500,
     },
 }
 
@@ -181,7 +181,7 @@ def model_debug_lines(model_names: Iterable[str] | None = None) -> list[str]:
 
 
 def render_pdf_image(pdf_path: Path, model_name: str) -> str:
-    """Render the uploaded PDF as a deployment-safe base64 PNG."""
+    """Render the uploaded PDF as a deployment-safe base64 image."""
     _ = model_name
     try:
         import fitz
@@ -195,9 +195,17 @@ def render_pdf_image(pdf_path: Path, model_name: str) -> str:
             if document.page_count < 1:
                 raise InvalidPDFError("The uploaded PDF has no pages.")
             page = document[0]
-            scale = 3.0 if model_name == "Llama" else 1.0
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
-            image_bytes = pixmap.tobytes("png")
+            scale = 2.0 if model_name == "Llama" else 1.0
+            pixmap = page.get_pixmap(
+                matrix=fitz.Matrix(scale, scale),
+                colorspace=fitz.csRGB,
+                alpha=False,
+            )
+            image_bytes = (
+                pixmap.tobytes("jpeg", jpg_quality=80)
+                if model_name == "Llama"
+                else pixmap.tobytes("png")
+            )
             return base64.b64encode(image_bytes).decode("utf-8")
     except InvalidPDFError:
         raise
@@ -284,14 +292,20 @@ Use this exact JSON structure:
 
 
 def build_model_prompt(model_name: str, map_file: str, model_id: str) -> str:
-    """Build the same full Spring 2025 prompt for either model."""
-    prompt = build_web_prompt(map_file, model_id)
-    if model_name == "Llama":
-        prompt += (
-            "\nReturn ONLY raw valid minified JSON. No markdown. No prose. "
-            "The first character must be { and the last character must be }.\n"
-        )
-    return prompt
+    """Build full-schema prompts while keeping Gemma's prompt unchanged."""
+    if model_name != "Llama":
+        return build_web_prompt(map_file, model_id)
+
+    rubric = json.dumps(load_summative_rubric(), separators=(",", ":"))
+    schema = json.dumps(
+        build_spring_schema(map_file, model_id), separators=(",", ":")
+    )
+    return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly. Do not invent criteria.
+Rubric:{rubric}
+Rules: criterion scores are integers 1-4 only; domain overall_decision and overall_meets_expectations are exactly Yes or No; never use Partial, decimals, 0, or 5. Each criterion needs score, one short explanation, and brief evidence_from_map from visible content. Do not hallucinate. Each domain needs overall_decision and if_no_explanation when No. Keep strengths, areas_for_improvement, and grading_notes brief.
+Return ONLY raw valid minified JSON matching this exact schema. No markdown or prose. First character {{; last character }}.
+Schema:{schema}
+"""
 
 
 def _strip_json_fences(raw_text: str) -> str:
@@ -567,13 +581,12 @@ def _save_failed_response(
 def _save_nemotron_debug_image(
     *, image: str, timestamp: str, run_id: str, file_stem: str
 ) -> Path:
-    """Save the exact PNG bytes included in the NVIDIA request."""
+    """Save the exact image bytes included in the NVIDIA request."""
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     image_bytes = base64.b64decode(image, validate=True)
-    if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise GradingError("The rendered Llama request image is not a valid PNG.")
+    _, extension = _image_media_type(image_bytes)
     image_path = DEBUG_DIR / (
-        f"{timestamp}_{run_id}_{file_stem}_llama_request.png"
+        f"{timestamp}_{run_id}_{file_stem}_llama_request{extension}"
     )
     image_path.write_bytes(image_bytes)
     return image_path
@@ -608,7 +621,9 @@ def _save_nemotron_trace(
         "map_filename": map_filename,
         "source_pdf_sha256": hashlib.sha256(pdf_path.read_bytes()).hexdigest(),
         "prompt_text": prompt,
+        "prompt_length": len(prompt),
         "image_debug_path": str(image_path),
+        "image_file_size": image_path.stat().st_size,
         "image_sha256": hashlib.sha256(image_path.read_bytes()).hexdigest(),
         "request_metadata": request_metadata,
         "raw_api_response": _response_to_debug_text(raw_api_response),
@@ -631,6 +646,7 @@ def _save_llama_raw_debug(
     response: Any,
     prompt: str,
     max_tokens: int,
+    image_file_size: int,
 ) -> Path:
     """Save Llama content and generation metadata before JSON parsing."""
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
@@ -645,11 +661,13 @@ def _save_llama_raw_debug(
         json.dumps(
             {
                 "provider": "NVIDIA NIM",
+                "base_url": "https://integrate.api.nvidia.com/v1",
                 "model": NEMOTRON_MODEL,
                 "raw_text": raw_text,
                 "cleaned_text": _strip_json_fences(raw_text),
                 "prompt_length": len(prompt),
                 "max_tokens": max_tokens,
+                "image_file_size": image_file_size,
                 "finish_reason": finish_reason,
             },
             indent=2,
@@ -746,24 +764,33 @@ def _is_input_limit_error(message: str) -> bool:
     )
 
 
+def _image_media_type(image_bytes: bytes) -> tuple[str, str]:
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", ".jpg"
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", ".png"
+    raise GradingError("The rendered request image is not a valid JPEG or PNG.")
+
+
 def _prepare_request_image(
     model_name: str, prompt: str, image: str
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Build NVIDIA's documented nested image_url message content."""
     image_bytes = base64.b64decode(image, validate=True)
+    media_type, _ = _image_media_type(image_bytes)
     request_metadata: dict[str, Any] = {
         "image_bytes": len(image_bytes),
         "image_transport": "inline_base64",
         "payload_shape": {
             "type": "image_url",
             "image_url": {
-                "url": "data:image/png;base64,<exact bytes saved in image_debug_path>"
+                "url": f"data:{media_type};base64,<exact bytes saved in image_debug_path>"
             },
         },
     }
     image_item = {
         "type": "image_url",
-        "image_url": {"url": f"data:image/png;base64,{image}"},
+        "image_url": {"url": f"data:{media_type};base64,{image}"},
     }
     text_item = {"type": "text", "text": prompt}
     content = [image_item, text_item] if model_name == "Llama" else [
@@ -779,17 +806,20 @@ def _write_health_debug(
     payload_shape: dict[str, Any],
     response: Any = None,
     error: Any = None,
-    extracted_terms: list[str] | None = None,
+    prompt_length: int = 0,
+    image_file_size: int = 0,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
                 "provider": "NVIDIA NIM",
+                "base_url": "https://integrate.api.nvidia.com/v1",
                 "model_id": NEMOTRON_MODEL,
+                "prompt_length": prompt_length,
+                "image_file_size": image_file_size,
                 "payload_shape": payload_shape,
                 "raw_response": _response_to_debug_text(response),
-                "extracted_visible_terms": extracted_terms,
                 "error": str(error) if error else None,
             },
             indent=2,
@@ -826,29 +856,39 @@ def _extract_visible_terms(text: str) -> list[str]:
 
 def _run_nemotron_health_tests(
     client: Any, image: str, debug_prefix: Path
-) -> tuple[list[str], str]:
+) -> str:
     """Gate full grading on text and image calls using NVIDIA's sample format."""
+    text_prompt = "Reply with OK."
     text_payload = {
         "model": NEMOTRON_MODEL,
-        "messages": [{"role": "user", "content": "Reply with OK."}],
+        "messages": [{"role": "user", "content": text_prompt}],
         "temperature": 0,
         "max_tokens": 16,
     }
     text_path = Path(f"{debug_prefix}_text_health.json")
+    text_response: Any | None = None
     try:
         text_response = client.chat.completions.create(**text_payload)
         _require_response_content(text_response, "text health test")
         _write_health_debug(
-            text_path, payload_shape=text_payload, response=text_response
+            text_path,
+            payload_shape=text_payload,
+            response=text_response,
+            prompt_length=len(text_prompt),
         )
     except Exception as exc:
-        _write_health_debug(text_path, payload_shape=text_payload, error=exc)
-        raise
+        _write_health_debug(
+            text_path,
+            payload_shape=text_payload,
+            response=text_response,
+            error=exc,
+            prompt_length=len(text_prompt),
+        )
+        raise ModelResponseError(
+            "NVIDIA text endpoint failed", raw_response=text_response or repr(exc)
+        ) from exc
 
-    preflight_prompt = (
-        "List 10 visible words or phrases from this concept map image. "
-        "Return plain text."
-    )
+    preflight_prompt = "Describe this image in one sentence."
     image_content, image_metadata = _prepare_request_image(
         "Llama", preflight_prompt, image
     )
@@ -872,30 +912,30 @@ def _run_nemotron_health_tests(
     }
     image_path = Path(f"{debug_prefix}_image_health.json")
     image_response: Any | None = None
+    image_file_size = image_metadata["image_bytes"]
     try:
         image_response = client.chat.completions.create(**image_payload)
         preflight_text = _require_response_content(image_response, "image preflight")
-        visible_terms = _extract_visible_terms(preflight_text)
         _write_health_debug(
             image_path,
             payload_shape=image_payload_shape,
             response=image_response,
-            extracted_terms=visible_terms,
+            prompt_length=len(preflight_prompt),
+            image_file_size=image_file_size,
         )
-        if len(visible_terms) < 3:
-            raise ModelResponseError(
-                "Llama could not read enough visible content from the concept map image.",
-                raw_response=image_response,
-            )
-        return visible_terms, preflight_text
+        return preflight_text.strip()
     except Exception as exc:
         _write_health_debug(
             image_path,
             payload_shape=image_payload_shape,
             response=image_response,
             error=exc,
+            prompt_length=len(preflight_prompt),
+            image_file_size=image_file_size,
         )
-        raise
+        raise ModelResponseError(
+            "NVIDIA image input failed", raw_response=image_response or repr(exc)
+        ) from exc
 
 
 NEMOTRON_EVIDENCE_FIELDS = (
@@ -1471,26 +1511,20 @@ def _request_model(
                 raise GradingError("Llama health-test debug path is missing.")
             if map_file is None:
                 raise GradingError("Llama map filename is missing.")
-            visible_terms, preflight_raw_text = _run_nemotron_health_tests(
+            preflight_description = _run_nemotron_health_tests(
                 client, image, health_debug_prefix
             )
             prompt += (
-                "\nGrade visible concept map content. Do not require perfect OCR. "
-                "Use visible nodes, labels, and relationships as evidence. "
-                "Do not output 'No clear evidence found in the concept map.' for "
-                "criteria supported by the detected visible terms. Still do not "
-                "hallucinate content that is not visible.\n"
-                "Visible map text detected by the model: "
-                + "; ".join(visible_terms)
-                + "\n"
+                "\nImage preflight description: "
+                + preflight_description
+                + "\nGrade only visible nodes, labels, and relationships; do not hallucinate.\n"
             )
 
         content, request_metadata = _prepare_request_image(
             model_name, prompt, image
         )
         if model_name == "Llama" and perform_health_test:
-            request_metadata["visible_terms"] = visible_terms
-            request_metadata["preflight_raw_text"] = preflight_raw_text
+            request_metadata["preflight_description"] = preflight_description
             request_metadata["preflight_debug_path"] = str(
                 Path(f"{health_debug_prefix}_image_health.json")
             )
@@ -1525,11 +1559,10 @@ def _request_model(
         )
     except Exception as exc:
         message = str(exc)
-        if (
-            isinstance(exc, ModelResponseError)
-            and message
-            == "Llama could not read enough visible content from the concept map image."
-        ):
+        if isinstance(exc, ModelResponseError) and message in {
+            "NVIDIA text endpoint failed",
+            "NVIDIA image input failed",
+        }:
             raise
         if "NVCF asset pool must be given" in message:
             message = (
@@ -1542,7 +1575,12 @@ def _request_model(
                 "Input is too large for the current model limit. "
                 "Try a smaller PDF/image or use the local CLI pipeline."
             )
-        provider = "NVIDIA NIM" if model_name == "Llama" else "OpenRouter"
+        if model_name == "Llama":
+            raise ModelResponseError(
+                f"NVIDIA grading request failed: {message}",
+                raw_response=getattr(exc, "raw_response", repr(exc)),
+            ) from exc
+        provider = "OpenRouter"
         raise ModelResponseError(
             f"{model_name} {provider} API request failed: {message}",
             raw_response=getattr(exc, "raw_response", repr(exc)),
@@ -1550,6 +1588,11 @@ def _request_model(
 
     choices = getattr(response, "choices", None)
     if not choices:
+        if model_name == "Llama":
+            raise ModelResponseError(
+                "NVIDIA grading request failed: no response choices.",
+                raw_response=response,
+            )
         raise ModelResponseError(
             f"{model_name} returned no response choices.",
             raw_response=response,
@@ -1557,6 +1600,11 @@ def _request_model(
     try:
         text = choices[0].message.content
     except (AttributeError, IndexError, TypeError) as exc:
+        if model_name == "Llama":
+            raise ModelResponseError(
+                "NVIDIA grading request failed: malformed API response.",
+                raw_response=response,
+            ) from exc
         raise ModelResponseError(
             f"{model_name} returned a malformed API response.",
             raw_response=response,
@@ -1565,7 +1613,7 @@ def _request_model(
     if not isinstance(text, str) or not text.strip():
         if model_name == "Llama":
             raise ModelResponseError(
-                "Llama returned empty content.", raw_response=response
+                "NVIDIA grading request failed: empty content.", raw_response=response
             )
         raise ModelResponseError(
             f"{model_name} returned no usable content.",
@@ -1658,6 +1706,7 @@ def run_evaluation(
                     response=raw_api_response,
                     prompt=prompt,
                     max_tokens=MODEL_CONFIGS["Llama"]["max_tokens"],
+                    image_file_size=image_debug_path.stat().st_size,
                 )
             try:
                 parsed_before_validation = (
@@ -1695,6 +1744,7 @@ def run_evaluation(
                     response=raw_api_response,
                     prompt=retry_prompt,
                     max_tokens=MODEL_CONFIGS["Llama"]["max_tokens"],
+                    image_file_size=image_debug_path.stat().st_size,
                 )
                 prompt = retry_prompt
                 parsed_before_validation = _load_json_with_repair(raw_text)

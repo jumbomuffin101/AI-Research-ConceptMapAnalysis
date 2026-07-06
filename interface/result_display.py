@@ -186,7 +186,11 @@ def display_failure(result: Any) -> None:
     error_message = _failure_reason(result)
     debug_path = get_result_field(result, "debug_path", None)
 
-    if error_message == "Llama could not read enough visible content from the concept map image.":
+    if error_message == "NVIDIA text endpoint failed":
+        st.warning("NVIDIA text endpoint failed")
+    elif error_message == "NVIDIA image input failed":
+        st.warning("NVIDIA image input failed")
+    elif error_message.startswith("NVIDIA grading request failed"):
         st.warning(error_message)
     elif error_message == "Llama returned empty content.":
         st.warning("Llama returned empty content.")
