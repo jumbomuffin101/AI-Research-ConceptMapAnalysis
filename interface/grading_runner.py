@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1687,6 +1688,227 @@ def _safe_stem(filename: str) -> str:
     return cleaned[:60] or "concept_map"
 
 
+def llama_vision_diagnostic_enabled() -> bool:
+    """Enable the temporary Llama vision diagnostic without changing the UI."""
+    value = os.getenv("LLAMA_VISION_DIAGNOSTIC")
+    if value is None:
+        try:
+            import streamlit as st
+
+            value = st.secrets.get("LLAMA_VISION_DIAGNOSTIC")
+        except Exception:
+            value = None
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _diagnostic_response_metrics(response: Any) -> dict[str, Any]:
+    choices = getattr(response, "choices", None)
+    usage = getattr(response, "usage", None)
+    if isinstance(usage, dict):
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+    else:
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        completion_tokens = getattr(usage, "completion_tokens", None)
+    return {
+        "prompt_token_count": prompt_tokens,
+        "completion_token_count": completion_tokens,
+        "finish_reason": getattr(choices[0], "finish_reason", None) if choices else None,
+    }
+
+
+def _render_llama_diagnostic_images(
+    pdf_path: Path, debug_prefix: Path
+) -> dict[int, dict[str, Any]]:
+    """Render exact 2x and 4x PNG inputs for the Llama vision comparison."""
+    try:
+        import fitz
+    except ImportError as exc:
+        raise GradingError(
+            "PyMuPDF is not installed. Install dependencies with `pip install -r requirements.txt`."
+        ) from exc
+
+    renders: dict[int, dict[str, Any]] = {}
+    try:
+        with fitz.open(pdf_path) as document:
+            if document.page_count < 1:
+                raise InvalidPDFError("The uploaded PDF has no pages.")
+            page = document[0]
+            for scale in (2, 4):
+                pixmap = page.get_pixmap(
+                    matrix=fitz.Matrix(scale, scale),
+                    colorspace=fitz.csRGB,
+                    alpha=False,
+                )
+                image_bytes = pixmap.tobytes("png")
+                image_path = Path(f"{debug_prefix}_matrix{scale}.png")
+                image_path.write_bytes(image_bytes)
+                renders[scale] = {
+                    "matrix": f"fitz.Matrix({scale}, {scale})",
+                    "width": pixmap.width,
+                    "height": pixmap.height,
+                    "file_size": len(image_bytes),
+                    "path": str(image_path),
+                    "base64": base64.b64encode(image_bytes).decode("utf-8"),
+                }
+    except InvalidPDFError:
+        raise
+    except Exception as exc:
+        raise InvalidPDFError("The uploaded file is not a valid, readable PDF.") from exc
+    return renders
+
+
+def _ocr_quality(raw_text: str) -> tuple[int, int]:
+    lines = {
+        line.strip()
+        for line in raw_text.splitlines()
+        if line.strip() and re.search(r"[A-Za-z]", line)
+    }
+    return len(lines), sum(len(line) for line in lines)
+
+
+def _run_llama_vision_diagnostics(
+    *, pdf_path: Path, grading_prompt: str, debug_prefix: Path
+) -> tuple[str, Any, dict[str, Any], Path]:
+    """Run vision probes, select the stronger render, then grade exactly once."""
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    client = create_nvidia_client()
+    renders = _render_llama_diagnostic_images(pdf_path, debug_prefix)
+    diagnostics_path = Path(f"{debug_prefix}_diagnostics.json")
+    diagnostics: dict[str, Any] = {
+        "provider": "NVIDIA NIM",
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "model": NEMOTRON_MODEL,
+        "renders": {
+            str(scale): {key: value for key, value in render.items() if key != "base64"}
+            for scale, render in renders.items()
+        },
+        "steps": {},
+    }
+
+    def call_step(
+        label: str, prompt_text: str, image_b64: str, max_tokens: int
+    ) -> tuple[str, Any]:
+        content, _ = _prepare_request_image("Llama", prompt_text, image_b64)
+        started = time.perf_counter()
+        response: Any | None = None
+        try:
+            response = client.chat.completions.create(
+                model=NEMOTRON_MODEL,
+                temperature=0,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": content}],
+            )
+            text = _require_response_content(response, label)
+            diagnostics["steps"][label] = {
+                "prompt": prompt_text,
+                "prompt_character_length": len(prompt_text),
+                "image_file_size": len(base64.b64decode(image_b64, validate=True)),
+                "response_time_seconds": round(time.perf_counter() - started, 3),
+                "raw_response": _response_to_debug_text(response),
+                **_diagnostic_response_metrics(response),
+            }
+            return text, response
+        except Exception as exc:
+            diagnostics["steps"][label] = {
+                "prompt": prompt_text,
+                "prompt_character_length": len(prompt_text),
+                "image_file_size": len(base64.b64decode(image_b64, validate=True)),
+                "response_time_seconds": round(time.perf_counter() - started, 3),
+                "raw_response": _response_to_debug_text(response),
+                "error": str(exc),
+                **_diagnostic_response_metrics(response),
+            }
+            raise ModelResponseError(
+                f"Llama vision diagnostic failed during {label}.",
+                raw_response=response or repr(exc),
+            ) from exc
+        finally:
+            diagnostics_path.write_text(
+                json.dumps(diagnostics, indent=2), encoding="utf-8"
+            )
+
+    ocr_prompt = (
+        "List the first 20 visible medical concepts, node labels, or phrases exactly "
+        "as they appear in this concept map. Do not summarize. Do not infer missing "
+        "text. Return one item per line."
+    )
+    ocr_results: dict[int, str] = {}
+    ocr_path = Path(f"{debug_prefix}_ocr.txt")
+    for scale in (2, 4):
+        ocr_results[scale], _ = call_step(
+            f"ocr_matrix_{scale}", ocr_prompt, renders[scale]["base64"], 500
+        )
+        ocr_path.write_text(
+            "\n\n".join(
+                f"=== Matrix({completed_scale},{completed_scale}) ===\n{text}"
+                for completed_scale, text in sorted(ocr_results.items())
+            ),
+            encoding="utf-8",
+        )
+    selected_scale = max((2, 4), key=lambda scale: _ocr_quality(ocr_results[scale]))
+    diagnostics["ocr_comparison"] = {
+        "matrix_2_quality": _ocr_quality(ocr_results[2]),
+        "matrix_4_quality": _ocr_quality(ocr_results[4]),
+        "selected_matrix": selected_scale,
+        "selection_rule": "Most nonempty OCR lines; total recognized characters breaks ties.",
+    }
+    ocr_path.write_text(
+        f"=== Selected Matrix({selected_scale},{selected_scale}) ===\n\n"
+        "=== Matrix(2,2) ===\n"
+        + ocr_results[2]
+        + "\n\n=== Matrix(4,4) ===\n"
+        + ocr_results[4],
+        encoding="utf-8",
+    )
+
+    selected = renders[selected_scale]
+    relationships_prompt = (
+        "Describe 10 relationships shown by arrows or connecting lines in this concept "
+        "map. Use only visible relationships. Do not infer relationships that are not shown."
+    )
+    relationships, _ = call_step(
+        "relationships", relationships_prompt, selected["base64"], 700
+    )
+    Path(f"{debug_prefix}_relationships.txt").write_text(
+        relationships, encoding="utf-8"
+    )
+
+    summary_prompt = """Write a detailed summary of this concept map including:
+- chief diagnosis
+- patient findings
+- basic science concepts
+- clinical concepts
+- determinants of health if present
+- major sections of the map
+
+Only use visible information."""
+    summary, _ = call_step("summary", summary_prompt, selected["base64"], 1400)
+    Path(f"{debug_prefix}_summary.txt").write_text(summary, encoding="utf-8")
+
+    grading_text, grading_response = call_step(
+        "grading",
+        grading_prompt,
+        selected["base64"],
+        MODEL_CONFIGS["Llama"]["max_tokens"],
+    )
+    grading_raw_path = Path(f"{debug_prefix}_grading_raw.txt")
+    grading_raw_path.write_text(grading_text, encoding="utf-8")
+    diagnostics["grading_prompt_length"] = len(grading_prompt)
+    diagnostics["selected_image_path"] = selected["path"]
+    diagnostics_path.write_text(json.dumps(diagnostics, indent=2), encoding="utf-8")
+    metadata = {
+        "diagnostic_mode": True,
+        "diagnostics_path": str(diagnostics_path),
+        "selected_matrix": selected_scale,
+        "selected_image_path": selected["path"],
+        "image_bytes": selected["file_size"],
+        "image_transport": "inline_base64",
+        "effective_prompt": grading_prompt,
+    }
+    return grading_text, grading_response, metadata, Path(selected["path"])
+
+
 def run_evaluation(
     pdf_path: Path,
     model_names: Iterable[str],
@@ -1713,7 +1935,8 @@ def run_evaluation(
 
     for model_name in names:
         model_id = MODEL_CONFIGS[model_name]["model_id"]
-        image = render_pdf_image(pdf_path, model_name)
+        diagnostic_mode = model_name == "Llama" and llama_vision_diagnostic_enabled()
+        image = "" if diagnostic_mode else render_pdf_image(pdf_path, model_name)
         raw_text: str | None = None
         raw_api_response: Any | None = None
         prompt = ""
@@ -1728,35 +1951,51 @@ def run_evaluation(
             prompt = build_model_prompt(
                 model_name, Path(original_filename).name, model_id
             )
-            if model_name == "Llama":
+            if model_name == "Llama" and not diagnostic_mode:
                 image_debug_path = _save_nemotron_debug_image(
                     image=image,
                     timestamp=timestamp,
                     run_id=run_id,
                     file_stem=file_stem,
                 )
-            (
-                returned_model_id,
-                raw_text,
-                raw_api_response,
-                request_metadata,
-            ) = _request_model(
-                model_name,
-                prompt,
-                image,
-                health_debug_prefix=(
-                    DEBUG_DIR
-                    / f"{timestamp}_{run_id}_{file_stem}_llama"
-                    if model_name == "Llama"
-                    else None
-                ),
-                map_file=(
-                    Path(original_filename).name
-                    if model_name == "Llama"
-                    else None
-                ),
-            )
-            if model_name == "Llama":
+            if diagnostic_mode:
+                debug_prefix = (
+                    DEBUG_DIR / f"{timestamp}_{run_id}_{file_stem}_llama"
+                )
+                (
+                    raw_text,
+                    raw_api_response,
+                    request_metadata,
+                    image_debug_path,
+                ) = _run_llama_vision_diagnostics(
+                    pdf_path=pdf_path,
+                    grading_prompt=prompt,
+                    debug_prefix=debug_prefix,
+                )
+                returned_model_id = model_id
+            else:
+                (
+                    returned_model_id,
+                    raw_text,
+                    raw_api_response,
+                    request_metadata,
+                ) = _request_model(
+                    model_name,
+                    prompt,
+                    image,
+                    health_debug_prefix=(
+                        DEBUG_DIR
+                        / f"{timestamp}_{run_id}_{file_stem}_llama"
+                        if model_name == "Llama"
+                        else None
+                    ),
+                    map_file=(
+                        Path(original_filename).name
+                        if model_name == "Llama"
+                        else None
+                    ),
+                )
+            if model_name == "Llama" and not diagnostic_mode:
                 prompt = str(request_metadata.get("effective_prompt", prompt))
                 preflight_terms = list(request_metadata.get("visible_terms", []))
                 _save_llama_raw_debug(
@@ -1778,7 +2017,7 @@ def run_evaluation(
                 )
                 data = parse_model_json(raw_text)
             except MalformedResultError:
-                if model_name != "Llama":
+                if model_name != "Llama" or diagnostic_mode:
                     raise
                 llama_attempt += 1
                 retry_prompt = (
@@ -1815,6 +2054,7 @@ def run_evaluation(
                 data = parse_model_json(raw_text)
             if (
                 model_name == "Llama"
+                and not diagnostic_mode
                 and len(preflight_terms) >= 5
                 and _is_implausible_all_one_result(data)
             ):
