@@ -1896,20 +1896,72 @@ Only use visible information."""
     return grading_text, grading_response, metadata, Path(selected["path"])
 
 
-LLAMA_EXTRACTION_PROMPT = """Read this concept-map tile and extract only information that is visibly present. Do not grade, summarize beyond the visible content, or infer missing information.
+LLAMA_EXTRACTION_PROMPT = """Read this concept-map tile and extract ONLY evidence that is visibly present. Do not grade, infer missing content, or use outside medical knowledge.
 
-Report concise plain text under these headings:
+Use these exact headings:
+VISIBLE_EVIDENCE_BY_CATEGORY
 - patient data
 - diagnoses/DDx
 - basic science concepts
 - clinical science concepts
 - health system science concepts
 - determinants of health
-- relationships/connections
 - pathophysiology flows
 - transfer/prior knowledge
 
-Preserve specific visible labels and describe only connections explicitly shown by arrows or lines. Write "None visible" when a category is absent or unreadable."""
+STRONG_CONNECTED_EVIDENCE
+List detailed evidence whose concepts are explicitly connected by visible arrows or lines. State the visible source, target, and relationship label when present.
+
+WEAK_OR_VAGUE_EVIDENCE
+List isolated labels, general terms, unreadable fragments, or concepts with weak/unclear connections.
+
+EXPLICIT_RELATIONSHIPS
+List visible source -> relationship -> target connections. Do not infer a connection merely because two concepts are medically related.
+
+MISSING_OR_UNCLEAR_BY_DOMAIN
+List evidence missing or unclear in this tile for Knowledge Acquisition, Integration, Application, and Transfer. This is tile-level only; do not claim an item is absent from the entire map.
+
+Prefix every extracted item with the tile number supplied below. Write "None visible" under a heading when appropriate."""
+
+
+def _llama_evidence_quality(extracted_evidence: str) -> dict[str, int]:
+    section_counts = {
+        "STRONG_CONNECTED_EVIDENCE": 0,
+        "WEAK_OR_VAGUE_EVIDENCE": 0,
+        "EXPLICIT_RELATIONSHIPS": 0,
+        "MISSING_OR_UNCLEAR_BY_DOMAIN": 0,
+    }
+    current_section: str | None = None
+    for raw_line in extracted_evidence.splitlines():
+        line = raw_line.strip()
+        normalized = line.rstrip(":").upper()
+        if normalized in section_counts:
+            current_section = normalized
+            continue
+        if normalized.startswith("VISIBLE_EVIDENCE_BY_CATEGORY"):
+            current_section = None
+            continue
+        if (
+            current_section
+            and line
+            and not line.startswith("=== TILE")
+            and "none visible" not in line.lower()
+        ):
+            section_counts[current_section] += 1
+
+    quality_score = (
+        2 * section_counts["STRONG_CONNECTED_EVIDENCE"]
+        + 2 * section_counts["EXPLICIT_RELATIONSHIPS"]
+        - section_counts["WEAK_OR_VAGUE_EVIDENCE"]
+        - section_counts["MISSING_OR_UNCLEAR_BY_DOMAIN"]
+    )
+    return {
+        "strong_connected_items": section_counts["STRONG_CONNECTED_EVIDENCE"],
+        "weak_or_vague_items": section_counts["WEAK_OR_VAGUE_EVIDENCE"],
+        "explicit_relationship_items": section_counts["EXPLICIT_RELATIONSHIPS"],
+        "missing_or_unclear_items": section_counts["MISSING_OR_UNCLEAR_BY_DOMAIN"],
+        "quality_score": quality_score,
+    }
 
 
 def _render_llama_tiles(
@@ -1997,8 +2049,13 @@ def _run_llama_staged_pipeline(
         started = time.perf_counter()
         response: Any | None = None
         try:
+            tile_prompt = (
+                f"{LLAMA_EXTRACTION_PROMPT}\n\nThis image is TILE {tile['index']} "
+                "of 4. Prefix each evidence item with "
+                f"[Tile {tile['index']}]."
+            )
             content, _ = _prepare_request_image(
-                "Llama", LLAMA_EXTRACTION_PROMPT, tile["base64"]
+                "Llama", tile_prompt, tile["base64"]
             )
             response = client.chat.completions.create(
                 model=NEMOTRON_MODEL,
@@ -2058,10 +2115,25 @@ def _run_llama_staged_pipeline(
     extracted_evidence = "\n\n".join(evidence_sections)
     evidence_path = Path(f"{debug_prefix}_extracted_evidence.txt")
     evidence_path.write_text(extracted_evidence, encoding="utf-8")
+    stage_metadata["evidence_quality"] = _llama_evidence_quality(
+        extracted_evidence
+    )
 
     grading_prompt = build_model_prompt("Llama", map_file, NEMOTRON_MODEL) + f"""
 
-Grade using ONLY the evidence Llama extracted from the concept-map tiles below. Do not infer from outside medical knowledge or from what the map should contain. Treat "None visible" as absent evidence. Every score and decision must be assigned independently from this extracted evidence.
+Grade using ONLY the evidence Llama extracted from the concept-map tiles below. Do not infer from outside medical knowledge or from what the map should contain. Consolidate evidence across all four tiles before treating a tile-level item as globally missing. Treat "None visible" as absent evidence only when no other tile supplies it.
+
+Discrimination rules:
+- Isolated concept labels without a visible meaningful relationship cannot justify score 3 or 4.
+- Score 4 only when evidence is detailed, synthesized, comprehensive, and explicitly connected.
+- Score 3 only when evidence is relevant and mostly synthesized with clear relationships.
+- Score 2 when evidence is present but general, incomplete, isolated, or weakly connected.
+- Score 1 when evidence is absent, irrelevant, unreadable, or unclear.
+- Missing evidence must lower the relevant criterion.
+- Do not give a weak map high scores merely because it contains some correct medical terms.
+- Every criterion scored 3 or 4 must cite a specific visible source-to-target relationship in evidence_from_map. Without specific relationship evidence, the maximum score is 2.
+
+Every score and Yes/No decision must be assigned independently by Llama from this extracted evidence.
 
 EXTRACTED CONCEPT-MAP EVIDENCE:
 {extracted_evidence}
@@ -2127,6 +2199,141 @@ EXTRACTED CONCEPT-MAP EVIDENCE:
         "effective_prompt": grading_prompt,
     }
     return grading_text, grading_response, request_metadata, full_path, grading_prompt
+
+
+LLAMA_RELATIONSHIP_PATTERN = re.compile(
+    r"(?:->|<-|→|←|↔|\b(?:connects?|connected|links?|linked|leads?\s+to|"
+    r"causes?|results?\s+in|because|drives?|supports?|associated\s+with|"
+    r"relationship|arrow)\b)",
+    flags=re.IGNORECASE,
+)
+
+
+def _append_grading_note(result: dict[str, Any], note: str) -> None:
+    existing = result.get("grading_notes")
+    existing_text = existing.strip() if isinstance(existing, str) else ""
+    result["grading_notes"] = f"{existing_text} {note}".strip()
+
+
+def _enforce_llama_relationship_caps(result: dict[str, Any]) -> int:
+    """Cap unsupported high Llama scores without inventing replacement evidence."""
+    corrected = 0
+    for group, fields in CATEGORY_FIELDS.items():
+        section = result.get(group)
+        if not isinstance(section, dict):
+            continue
+        for field in fields:
+            item = section.get(field)
+            if not isinstance(item, dict) or item.get("score") not in {3, 4}:
+                continue
+            evidence = item.get("evidence_from_map")
+            if isinstance(evidence, list):
+                evidence_values = [
+                    value for value in evidence if isinstance(value, str)
+                ]
+            elif isinstance(evidence, str):
+                evidence_values = [evidence]
+            else:
+                evidence_values = []
+            has_specific_relationship = any(
+                LLAMA_RELATIONSHIP_PATTERN.search(value)
+                and not any(
+                    phrase in value.lower()
+                    for phrase in (
+                        "no clear",
+                        "none visible",
+                        "not visible",
+                        "missing",
+                        "unclear",
+                        "no relationship",
+                    )
+                )
+                for value in evidence_values
+            )
+            if not has_specific_relationship:
+                item["score"] = 2
+                corrected += 1
+    if corrected:
+        _append_grading_note(
+            result,
+            f"Llama calibration capped {corrected} criterion score(s) at 2 because "
+            "their evidence_from_map did not identify a specific visible relationship.",
+        )
+    return corrected
+
+
+def _llama_score_profile(result: dict[str, Any]) -> list[int]:
+    return [
+        result[group][field]["score"]
+        for group, fields in CATEGORY_FIELDS.items()
+        for field in fields
+    ]
+
+
+def _check_llama_discrimination(
+    *,
+    result: dict[str, Any],
+    request_metadata: dict[str, Any],
+    pdf_path: Path,
+    map_file: str,
+) -> None:
+    """Flag nearly identical scores across materially different evidence profiles."""
+    quality = request_metadata.get("evidence_quality")
+    if not isinstance(quality, dict) or not isinstance(quality.get("quality_score"), int):
+        return
+
+    profile = _llama_score_profile(result)
+    source_hash = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+    history_path = DEBUG_DIR / "llama_score_profile_history.json"
+    try:
+        history = json.loads(history_path.read_text(encoding="utf-8"))
+        if not isinstance(history, list):
+            history = []
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        history = []
+
+    current_quality = quality["quality_score"]
+    for prior in history:
+        prior_profile = prior.get("score_profile")
+        prior_quality = prior.get("evidence_quality_score")
+        if (
+            prior.get("source_pdf_sha256") == source_hash
+            or not isinstance(prior_profile, list)
+            or len(prior_profile) != len(profile)
+            or not isinstance(prior_quality, int)
+        ):
+            continue
+        evidence_gap = abs(current_quality - prior_quality)
+        mean_score_gap = sum(
+            abs(current - previous)
+            for current, previous in zip(profile, prior_profile)
+        ) / len(profile)
+        if evidence_gap >= 6 and mean_score_gap <= 0.35:
+            _append_grading_note(
+                result,
+                "Low-discrimination warning: this map and a previously graded map "
+                "with materially different extracted-evidence quality received nearly "
+                "identical Llama score profiles.",
+            )
+            request_metadata["low_discrimination_comparison"] = {
+                "prior_map_file": prior.get("map_file"),
+                "evidence_quality_gap": evidence_gap,
+                "mean_score_gap": round(mean_score_gap, 3),
+            }
+            break
+
+    history.append(
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "map_file": map_file,
+            "source_pdf_sha256": source_hash,
+            "evidence_quality_score": current_quality,
+            "evidence_quality": quality,
+            "score_profile": profile,
+        }
+    )
+    history_path.write_text(json.dumps(history[-100:], indent=2), encoding="utf-8")
+    request_metadata["score_profile_history_path"] = str(history_path)
 
 
 def run_evaluation(
@@ -2202,6 +2409,14 @@ def run_evaluation(
                 _load_json_with_repair(raw_text) if model_name == "Llama" else None
             )
             data = parse_model_json(raw_text)
+            if llama_staged:
+                _enforce_llama_relationship_caps(data)
+                _check_llama_discrimination(
+                    result=data,
+                    request_metadata=request_metadata,
+                    pdf_path=pdf_path,
+                    map_file=Path(original_filename).name,
+                )
             cleaned_json = _cleaned_json_text(raw_text) if model_name == "Llama" else None
             if model_name == "Llama":
                 parsed_after_validation = json.loads(json.dumps(data))
