@@ -1688,20 +1688,7 @@ def _safe_stem(filename: str) -> str:
     return cleaned[:60] or "concept_map"
 
 
-def llama_vision_diagnostic_enabled() -> bool:
-    """Enable the temporary Llama vision diagnostic without changing the UI."""
-    value = os.getenv("LLAMA_VISION_DIAGNOSTIC")
-    if value is None:
-        try:
-            import streamlit as st
-
-            value = st.secrets.get("LLAMA_VISION_DIAGNOSTIC")
-        except Exception:
-            value = None
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _diagnostic_response_metrics(response: Any) -> dict[str, Any]:
+def _response_metrics(response: Any) -> dict[str, Any]:
     choices = getattr(response, "choices", None)
     usage = getattr(response, "usage", None)
     if isinstance(usage, dict):
@@ -1806,7 +1793,7 @@ def _run_llama_vision_diagnostics(
                 "image_file_size": len(base64.b64decode(image_b64, validate=True)),
                 "response_time_seconds": round(time.perf_counter() - started, 3),
                 "raw_response": _response_to_debug_text(response),
-                **_diagnostic_response_metrics(response),
+                **_response_metrics(response),
             }
             return text, response
         except Exception as exc:
@@ -1817,7 +1804,7 @@ def _run_llama_vision_diagnostics(
                 "response_time_seconds": round(time.perf_counter() - started, 3),
                 "raw_response": _response_to_debug_text(response),
                 "error": str(exc),
-                **_diagnostic_response_metrics(response),
+                **_response_metrics(response),
             }
             raise ModelResponseError(
                 f"Llama vision diagnostic failed during {label}.",
@@ -1909,6 +1896,239 @@ Only use visible information."""
     return grading_text, grading_response, metadata, Path(selected["path"])
 
 
+LLAMA_EXTRACTION_PROMPT = """Read this concept-map tile and extract only information that is visibly present. Do not grade, summarize beyond the visible content, or infer missing information.
+
+Report concise plain text under these headings:
+- patient data
+- diagnoses/DDx
+- basic science concepts
+- clinical science concepts
+- health system science concepts
+- determinants of health
+- relationships/connections
+- pathophysiology flows
+- transfer/prior knowledge
+
+Preserve specific visible labels and describe only connections explicitly shown by arrows or lines. Write "None visible" when a category is absent or unreadable."""
+
+
+def _render_llama_tiles(
+    pdf_path: Path, debug_prefix: Path
+) -> tuple[Path, list[dict[str, Any]]]:
+    """Render a 3x full-page PNG and four exact page quadrants."""
+    try:
+        import fitz
+    except ImportError as exc:
+        raise GradingError(
+            "PyMuPDF is not installed. Install dependencies with `pip install -r requirements.txt`."
+        ) from exc
+
+    try:
+        with fitz.open(pdf_path) as document:
+            if document.page_count < 1:
+                raise InvalidPDFError("The uploaded PDF has no pages.")
+            page = document[0]
+            matrix = fitz.Matrix(3, 3)
+            full_pixmap = page.get_pixmap(
+                matrix=matrix, colorspace=fitz.csRGB, alpha=False
+            )
+            full_bytes = full_pixmap.tobytes("png")
+            full_path = Path(f"{debug_prefix}_full.png")
+            full_path.write_bytes(full_bytes)
+
+            page_rect = page.rect
+            mid_x = (page_rect.x0 + page_rect.x1) / 2
+            mid_y = (page_rect.y0 + page_rect.y1) / 2
+            quadrants = (
+                fitz.Rect(page_rect.x0, page_rect.y0, mid_x, mid_y),
+                fitz.Rect(mid_x, page_rect.y0, page_rect.x1, mid_y),
+                fitz.Rect(page_rect.x0, mid_y, mid_x, page_rect.y1),
+                fitz.Rect(mid_x, mid_y, page_rect.x1, page_rect.y1),
+            )
+            tiles: list[dict[str, Any]] = []
+            for index, clip in enumerate(quadrants, start=1):
+                pixmap = page.get_pixmap(
+                    matrix=matrix,
+                    clip=clip,
+                    colorspace=fitz.csRGB,
+                    alpha=False,
+                )
+                tile_bytes = pixmap.tobytes("png")
+                tile_path = Path(f"{debug_prefix}_tile_{index}.png")
+                tile_path.write_bytes(tile_bytes)
+                tiles.append(
+                    {
+                        "index": index,
+                        "path": tile_path,
+                        "width": pixmap.width,
+                        "height": pixmap.height,
+                        "file_size": len(tile_bytes),
+                        "base64": base64.b64encode(tile_bytes).decode("utf-8"),
+                    }
+                )
+            return full_path, tiles
+    except InvalidPDFError:
+        raise
+    except Exception as exc:
+        raise InvalidPDFError("The uploaded file is not a valid, readable PDF.") from exc
+
+
+def _run_llama_staged_pipeline(
+    *, pdf_path: Path, map_file: str, debug_prefix: Path
+) -> tuple[str, Any, dict[str, Any], Path, str]:
+    """Extract tile evidence with vision, then grade that evidence as text."""
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    client = create_nvidia_client()
+    full_path, tiles = _render_llama_tiles(pdf_path, debug_prefix)
+    stage_metadata: dict[str, Any] = {
+        "pipeline": "llama_tiled_evidence_then_text_grading",
+        "provider": "NVIDIA NIM",
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "model": NEMOTRON_MODEL,
+        "render_matrix": "fitz.Matrix(3, 3)",
+        "full_image_path": str(full_path),
+        "full_image_file_size": full_path.stat().st_size,
+        "tiles": [],
+    }
+    metadata_path = Path(f"{debug_prefix}_pipeline.json")
+    evidence_sections: list[str] = []
+
+    for tile in tiles:
+        started = time.perf_counter()
+        response: Any | None = None
+        try:
+            content, _ = _prepare_request_image(
+                "Llama", LLAMA_EXTRACTION_PROMPT, tile["base64"]
+            )
+            response = client.chat.completions.create(
+                model=NEMOTRON_MODEL,
+                temperature=0,
+                max_tokens=1200,
+                messages=[{"role": "user", "content": content}],
+            )
+            evidence_text = _require_response_content(
+                response, f"tile {tile['index']} evidence extraction"
+            ).strip()
+            evidence_sections.append(
+                f"=== TILE {tile['index']} ===\n{evidence_text}"
+            )
+            Path(f"{debug_prefix}_tile_{tile['index']}_extraction.txt").write_text(
+                evidence_text, encoding="utf-8"
+            )
+            stage_metadata["tiles"].append(
+                {
+                    key: str(value) if isinstance(value, Path) else value
+                    for key, value in tile.items()
+                    if key != "base64"
+                }
+                | {
+                    "response_time_seconds": round(
+                        time.perf_counter() - started, 3
+                    ),
+                    "raw_response": _response_to_debug_text(response),
+                    **_response_metrics(response),
+                }
+            )
+        except Exception as exc:
+            stage_metadata["tiles"].append(
+                {
+                    "index": tile["index"],
+                    "path": str(tile["path"]),
+                    "file_size": tile["file_size"],
+                    "response_time_seconds": round(
+                        time.perf_counter() - started, 3
+                    ),
+                    "raw_response": _response_to_debug_text(response),
+                    "error": str(exc),
+                    **_response_metrics(response),
+                }
+            )
+            metadata_path.write_text(
+                json.dumps(stage_metadata, indent=2), encoding="utf-8"
+            )
+            raise ModelResponseError(
+                f"Llama evidence extraction failed for tile {tile['index']}.",
+                raw_response=response or repr(exc),
+            ) from exc
+        finally:
+            metadata_path.write_text(
+                json.dumps(stage_metadata, indent=2), encoding="utf-8"
+            )
+
+    extracted_evidence = "\n\n".join(evidence_sections)
+    evidence_path = Path(f"{debug_prefix}_extracted_evidence.txt")
+    evidence_path.write_text(extracted_evidence, encoding="utf-8")
+
+    grading_prompt = build_model_prompt("Llama", map_file, NEMOTRON_MODEL) + f"""
+
+Grade using ONLY the evidence Llama extracted from the concept-map tiles below. Do not infer from outside medical knowledge or from what the map should contain. Treat "None visible" as absent evidence. Every score and decision must be assigned independently from this extracted evidence.
+
+EXTRACTED CONCEPT-MAP EVIDENCE:
+{extracted_evidence}
+"""
+    grading_prompt_path = Path(f"{debug_prefix}_grading_prompt.txt")
+    grading_prompt_path.write_text(grading_prompt, encoding="utf-8")
+
+    grading_started = time.perf_counter()
+    grading_response: Any | None = None
+    try:
+        grading_response = client.chat.completions.create(
+            model=NEMOTRON_MODEL,
+            temperature=0,
+            max_tokens=MODEL_CONFIGS["Llama"]["max_tokens"],
+            messages=[{"role": "user", "content": grading_prompt}],
+        )
+        grading_text = _require_response_content(
+            grading_response, "text-only rubric grading"
+        ).strip()
+        Path(f"{debug_prefix}_grading_raw.txt").write_text(
+            grading_text, encoding="utf-8"
+        )
+        stage_metadata["grading"] = {
+            "prompt_path": str(grading_prompt_path),
+            "prompt_character_length": len(grading_prompt),
+            "response_time_seconds": round(
+                time.perf_counter() - grading_started, 3
+            ),
+            "raw_response": _response_to_debug_text(grading_response),
+            **_response_metrics(grading_response),
+        }
+    except Exception as exc:
+        Path(f"{debug_prefix}_grading_raw.txt").write_text(
+            _response_to_debug_text(grading_response) or repr(exc),
+            encoding="utf-8",
+        )
+        stage_metadata["grading"] = {
+            "prompt_path": str(grading_prompt_path),
+            "prompt_character_length": len(grading_prompt),
+            "response_time_seconds": round(
+                time.perf_counter() - grading_started, 3
+            ),
+            "raw_response": _response_to_debug_text(grading_response),
+            "error": str(exc),
+            **_response_metrics(grading_response),
+        }
+        raise ModelResponseError(
+            "Llama text-only rubric grading failed.",
+            raw_response=grading_response or repr(exc),
+        ) from exc
+    finally:
+        metadata_path.write_text(
+            json.dumps(stage_metadata, indent=2), encoding="utf-8"
+        )
+
+    request_metadata = {
+        **stage_metadata,
+        "pipeline_debug_path": str(metadata_path),
+        "evidence_path": str(evidence_path),
+        "grading_prompt_path": str(grading_prompt_path),
+        "image_bytes": full_path.stat().st_size,
+        "image_transport": "four_inline_base64_tiles_for_extraction_only",
+        "effective_prompt": grading_prompt,
+    }
+    return grading_text, grading_response, request_metadata, full_path, grading_prompt
+
+
 def run_evaluation(
     pdf_path: Path,
     model_names: Iterable[str],
@@ -1935,8 +2155,8 @@ def run_evaluation(
 
     for model_name in names:
         model_id = MODEL_CONFIGS[model_name]["model_id"]
-        diagnostic_mode = model_name == "Llama" and llama_vision_diagnostic_enabled()
-        image = "" if diagnostic_mode else render_pdf_image(pdf_path, model_name)
+        llama_staged = model_name == "Llama"
+        image = "" if llama_staged else render_pdf_image(pdf_path, model_name)
         raw_text: str | None = None
         raw_api_response: Any | None = None
         prompt = ""
@@ -1945,20 +2165,11 @@ def run_evaluation(
         parsed_before_validation: dict[str, Any] | None = None
         parsed_after_validation: dict[str, Any] | None = None
         request_metadata: dict[str, Any] | None = None
-        preflight_terms: list[str] = []
-        llama_attempt = 1
         try:
             prompt = build_model_prompt(
                 model_name, Path(original_filename).name, model_id
             )
-            if model_name == "Llama" and not diagnostic_mode:
-                image_debug_path = _save_nemotron_debug_image(
-                    image=image,
-                    timestamp=timestamp,
-                    run_id=run_id,
-                    file_stem=file_stem,
-                )
-            if diagnostic_mode:
+            if llama_staged:
                 debug_prefix = (
                     DEBUG_DIR / f"{timestamp}_{run_id}_{file_stem}_llama"
                 )
@@ -1967,9 +2178,10 @@ def run_evaluation(
                     raw_api_response,
                     request_metadata,
                     image_debug_path,
-                ) = _run_llama_vision_diagnostics(
+                    prompt,
+                ) = _run_llama_staged_pipeline(
                     pdf_path=pdf_path,
-                    grading_prompt=prompt,
+                    map_file=Path(original_filename).name,
                     debug_prefix=debug_prefix,
                 )
                 returned_model_id = model_id
@@ -1983,116 +2195,13 @@ def run_evaluation(
                     model_name,
                     prompt,
                     image,
-                    health_debug_prefix=(
-                        DEBUG_DIR
-                        / f"{timestamp}_{run_id}_{file_stem}_llama"
-                        if model_name == "Llama"
-                        else None
-                    ),
-                    map_file=(
-                        Path(original_filename).name
-                        if model_name == "Llama"
-                        else None
-                    ),
-                )
-            if model_name == "Llama" and not diagnostic_mode:
-                prompt = str(request_metadata.get("effective_prompt", prompt))
-                preflight_terms = list(request_metadata.get("visible_terms", []))
-                _save_llama_raw_debug(
-                    timestamp=timestamp,
-                    run_id=run_id,
-                    file_stem=file_stem,
-                    attempt=1,
-                    raw_text=raw_text,
-                    response=raw_api_response,
-                    prompt=prompt,
-                    max_tokens=MODEL_CONFIGS["Llama"]["max_tokens"],
-                    image_file_size=image_debug_path.stat().st_size,
-                )
-            try:
-                parsed_before_validation = (
-                    _load_json_with_repair(raw_text)
-                    if model_name == "Llama"
-                    else None
-                )
-                data = parse_model_json(raw_text)
-            except MalformedResultError:
-                if model_name != "Llama" or diagnostic_mode:
-                    raise
-                llama_attempt += 1
-                retry_prompt = (
-                    f"{prompt}\n\nYour previous answer was not valid JSON. "
-                    "Return the same evaluation as valid minified JSON only."
-                )
-                (
-                    returned_model_id,
-                    raw_text,
-                    raw_api_response,
-                    request_metadata,
-                ) = _request_model(
-                    model_name,
-                    retry_prompt,
-                    image,
                     health_debug_prefix=None,
-                    map_file=Path(original_filename).name,
-                    perform_health_test=False,
+                    map_file=None,
                 )
-                request_metadata["visible_terms"] = preflight_terms
-                _save_llama_raw_debug(
-                    timestamp=timestamp,
-                    run_id=run_id,
-                    file_stem=file_stem,
-                    attempt=llama_attempt,
-                    raw_text=raw_text,
-                    response=raw_api_response,
-                    prompt=retry_prompt,
-                    max_tokens=MODEL_CONFIGS["Llama"]["max_tokens"],
-                    image_file_size=image_debug_path.stat().st_size,
-                )
-                prompt = retry_prompt
-                parsed_before_validation = _load_json_with_repair(raw_text)
-                data = parse_model_json(raw_text)
-            if (
-                model_name == "Llama"
-                and not diagnostic_mode
-                and len(preflight_terms) >= 5
-                and _is_implausible_all_one_result(data)
-            ):
-                llama_attempt += 1
-                calibration_prompt = (
-                    f"{prompt}\n\nYou detected visible concept-map content. Regrade using "
-                    "that visible evidence. Do not mark criteria as 1 unless truly absent."
-                )
-                (
-                    returned_model_id,
-                    raw_text,
-                    raw_api_response,
-                    request_metadata,
-                ) = _request_model(
-                    model_name,
-                    calibration_prompt,
-                    image,
-                    health_debug_prefix=None,
-                    map_file=Path(original_filename).name,
-                    perform_health_test=False,
-                )
-                request_metadata["visible_terms"] = preflight_terms
-                request_metadata["calibration_retry"] = True
-                request_metadata["effective_prompt"] = calibration_prompt
-                _save_llama_raw_debug(
-                    timestamp=timestamp,
-                    run_id=run_id,
-                    file_stem=file_stem,
-                    attempt=llama_attempt,
-                    raw_text=raw_text,
-                    response=raw_api_response,
-                    prompt=calibration_prompt,
-                    max_tokens=MODEL_CONFIGS["Llama"]["max_tokens"],
-                    image_file_size=image_debug_path.stat().st_size,
-                )
-                prompt = calibration_prompt
-                parsed_before_validation = _load_json_with_repair(raw_text)
-                data = parse_model_json(raw_text)
+            parsed_before_validation = (
+                _load_json_with_repair(raw_text) if model_name == "Llama" else None
+            )
+            data = parse_model_json(raw_text)
             cleaned_json = _cleaned_json_text(raw_text) if model_name == "Llama" else None
             if model_name == "Llama":
                 parsed_after_validation = json.loads(json.dumps(data))
