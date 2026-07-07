@@ -126,6 +126,20 @@ SPRING_2025_CRITERION_TEXT = {
     },
 }
 
+EVIDENCE_EXTRACTION_FIELDS = [
+    "concepts",
+    "patient_data",
+    "basic_science",
+    "clinical_science",
+    "health_system_science",
+    "determinants_of_health",
+    "differential_diagnosis",
+    "relationships",
+    "pathophysiology_flows",
+    "transfer/prior_knowledge",
+    "missing_elements",
+]
+
 FORBIDDEN_DECISION_TEXT = (
     "Partial",
     "Partially Meets",
@@ -324,6 +338,91 @@ def spring_2025_schema_field_map_text() -> str:
             lines.append(
                 f"- {field}: {SPRING_2025_CRITERION_TEXT[group][field]}"
             )
+    return "\n".join(lines)
+
+
+def evidence_extraction_schema() -> dict[str, list[str]]:
+    return {field: [] for field in EVIDENCE_EXTRACTION_FIELDS}
+
+
+def build_evidence_extraction_prompt(model_name: str, tile_index: int | None = None) -> str:
+    tile_instruction = (
+        f"This is tile {tile_index} of the concept map. Prefix each extracted item with [Tile {tile_index}] when possible."
+        if tile_index is not None
+        else "Extract from the complete concept map image."
+    )
+    return f"""Extract visible concept-map evidence only. Do not grade. Do not assign scores. Do not infer missing content. Do not use outside medical knowledge.
+
+Use this exact evidence extraction schema:
+{json.dumps(evidence_extraction_schema(), indent=2)}
+
+Field definitions:
+- concepts: visible concept/node labels
+- patient_data: visible patient findings, history, labs, imaging, symptoms, signs, vitals, risk factors, plan/care data
+- basic_science: visible basic science concepts
+- clinical_science: visible clinical science concepts
+- health_system_science: visible health system science concepts
+- determinants_of_health: visible determinants of health (DoH)
+- differential_diagnosis: visible diagnoses or differential diagnosis items
+- relationships: visible source -> relationship -> target connections, arrows, labeled links, or explicit connected concepts
+- pathophysiology_flows: visible flows explaining pathophysiology
+- transfer/prior_knowledge: visible prior-course basic science or clinical concepts used to deepen understanding
+- missing_elements: visible gaps, unclear text, unreadable areas, or absent required rubric evidence
+
+{spring_2025_schema_field_map_text()}
+
+{tile_instruction}
+Return valid JSON only. Every field must be a list of short strings. If no evidence is visible for a field, return an empty list.
+"""
+
+
+def _parse_extracted_evidence(raw_text: str) -> dict[str, list[str]]:
+    data = _load_json_with_repair(raw_text)
+    evidence: dict[str, list[str]] = {}
+    for field in EVIDENCE_EXTRACTION_FIELDS:
+        value = data.get(field, [])
+        if isinstance(value, str):
+            values = [value]
+        elif isinstance(value, list):
+            values = [str(item) for item in value if str(item).strip()]
+        else:
+            values = []
+        evidence[field] = _dedupe_strings(values)
+    return evidence
+
+
+def _dedupe_strings(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        cleaned = re.sub(r"\s+", " ", str(value)).strip()
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result
+
+
+def _merge_evidence_dicts(evidence_items: Iterable[dict[str, list[str]]]) -> dict[str, list[str]]:
+    merged = evidence_extraction_schema()
+    for evidence in evidence_items:
+        for field in EVIDENCE_EXTRACTION_FIELDS:
+            merged[field].extend(evidence.get(field, []))
+    return {field: _dedupe_strings(values) for field, values in merged.items()}
+
+
+def _evidence_to_text(evidence: dict[str, list[str]]) -> str:
+    lines: list[str] = []
+    for field in EVIDENCE_EXTRACTION_FIELDS:
+        lines.append(field)
+        values = evidence.get(field, [])
+        if values:
+            lines.extend(f"- {value}" for value in values)
+        else:
+            lines.append("- None visible")
     return "\n".join(lines)
 
 
@@ -697,6 +796,15 @@ def _save_nemotron_debug_image(
     image_path = DEBUG_DIR / (
         f"{timestamp}_{run_id}_{file_stem}_llama4_request{extension}"
     )
+    image_path.write_bytes(image_bytes)
+    return image_path
+
+
+def _save_debug_image_from_base64(image: str, debug_prefix: Path) -> Path:
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    image_bytes = base64.b64decode(image, validate=True)
+    _, extension = _image_media_type(image_bytes)
+    image_path = Path(f"{debug_prefix}_request_image{extension}")
     image_path.write_bytes(image_bytes)
     return image_path
 
@@ -2331,6 +2439,395 @@ def _request_llama4_text(
     return _require_response_content(response, step_name).strip(), response
 
 
+def _item_matches_keywords(item: str, keywords: Iterable[str]) -> bool:
+    lowered = item.lower()
+    return any(keyword.lower() in lowered for keyword in keywords)
+
+
+def _select_evidence(
+    evidence: dict[str, list[str]],
+    fields: Iterable[str],
+    keywords: Iterable[str] = (),
+    *,
+    fallback_relationships: bool = False,
+) -> list[str]:
+    values: list[str] = []
+    for field in fields:
+        values.extend(evidence.get(field, []))
+    keyword_list = list(keywords)
+    if keyword_list:
+        related = [
+            item
+            for item in values
+            if _item_matches_keywords(item, keyword_list)
+        ]
+        if related:
+            values = related
+    if fallback_relationships:
+        relationship_values = evidence.get("relationships", []) + evidence.get(
+            "pathophysiology_flows", []
+        )
+        if keyword_list:
+            related_relationships = [
+                item
+                for item in relationship_values
+                if _item_matches_keywords(item, keyword_list)
+                or LLAMA_RELATIONSHIP_PATTERN.search(item)
+            ]
+        else:
+            related_relationships = relationship_values
+        values.extend(related_relationships)
+    return _dedupe_strings(values)
+
+
+def _map_evidence_to_rubric(evidence: dict[str, list[str]]) -> dict[str, Any]:
+    """Map extracted evidence to exact Spring 2025 criteria using Python rules."""
+    relationship_fields = ["relationships", "pathophysiology_flows"]
+    mapping_rules: dict[tuple[str, str], dict[str, Any]] = {
+        ("knowledge_acquisition", "basic_science"): {
+            "support": ["basic_science"],
+            "relationships": relationship_fields,
+            "keywords": ["science", "cell", "molecular", "physiology", "anatomy", "pathophysiology"],
+        },
+        ("knowledge_acquisition", "health_system_science"): {
+            "support": ["health_system_science"],
+            "relationships": ["relationships"],
+            "keywords": ["system", "care", "access", "cost", "quality", "team", "safety"],
+        },
+        ("knowledge_acquisition", "clinical_science"): {
+            "support": ["clinical_science", "differential_diagnosis"],
+            "relationships": ["relationships"],
+            "keywords": ["diagnosis", "treatment", "symptom", "sign", "clinical", "test"],
+        },
+        ("knowledge_acquisition", "patient_case_information"): {
+            "support": ["patient_data"],
+            "relationships": ["relationships", "pathophysiology_flows"],
+            "keywords": [],
+        },
+        ("knowledge_acquisition", "determinants_of_health"): {
+            "support": ["determinants_of_health"],
+            "relationships": ["relationships"],
+            "keywords": ["determinant", "social", "housing", "food", "transport", "income", "culture", "race", "gender", "support"],
+        },
+        ("integration", "prioritized_differential_diagnosis"): {
+            "support": ["differential_diagnosis", "clinical_science", "patient_data"],
+            "relationships": ["relationships"],
+            "keywords": ["ddx", "differential", "diagnosis", "must not miss", "common", "prioritized"],
+        },
+        ("integration", "illness_scripts"): {
+            "support": ["patient_data", "differential_diagnosis", "clinical_science"],
+            "relationships": ["relationships"],
+            "keywords": ["illness", "script", "diagnosis", "patient", "finding"],
+        },
+        ("integration", "basic_to_foundational_science"): {
+            "support": ["basic_science", "concepts"],
+            "relationships": relationship_fields,
+            "keywords": ["basic", "foundational", "anatomy", "histology", "biochemistry", "genetics", "physiology", "pharmacology"],
+        },
+        ("integration", "patient_data_to_clinical_information"): {
+            "support": ["patient_data", "clinical_science"],
+            "relationships": ["relationships"],
+            "keywords": ["patient", "clinical", "symptom", "sign", "diagnostic", "treatment", "risk"],
+        },
+        ("integration", "patient_data_to_basic_science"): {
+            "support": ["patient_data", "basic_science"],
+            "relationships": relationship_fields,
+            "keywords": ["patient", "basic", "molecular", "cellular", "physiology", "pathophysiology"],
+        },
+        ("application", "working_diagnosis_pathophysiology"): {
+            "support": ["pathophysiology_flows", "basic_science", "clinical_science", "differential_diagnosis"],
+            "relationships": relationship_fields,
+            "keywords": ["working", "diagnosis", "pathophysiology", "flow", "causes", "leads"],
+        },
+        ("application", "patient_data_pathophysiology"): {
+            "support": ["pathophysiology_flows", "patient_data", "basic_science"],
+            "relationships": relationship_fields,
+            "keywords": ["patient", "data", "pathophysiology", "finding", "symptom", "sign"],
+        },
+        ("transfer", "prior_basic_science"): {
+            "support": ["transfer/prior_knowledge", "basic_science"],
+            "relationships": relationship_fields,
+            "keywords": ["prior", "previous", "basic", "science"],
+        },
+        ("transfer", "prior_clinical_concepts"): {
+            "support": ["transfer/prior_knowledge", "clinical_science"],
+            "relationships": ["relationships"],
+            "keywords": ["prior", "previous", "clinical"],
+        },
+        ("transfer", "deepens_understanding"): {
+            "support": ["transfer/prior_knowledge", "pathophysiology_flows", "basic_science", "patient_data"],
+            "relationships": relationship_fields,
+            "keywords": ["so what", "deepens", "understanding", "pathophysiology", "patient", "basic"],
+        },
+    }
+
+    mapped: dict[str, Any] = {}
+    for group, fields in CATEGORY_FIELDS.items():
+        mapped[group] = {}
+        for field in fields:
+            rule = mapping_rules[(group, field)]
+            supporting = _select_evidence(
+                evidence,
+                rule["support"],
+                rule.get("keywords", []),
+            )
+            relationships = _select_evidence(
+                evidence,
+                rule["relationships"],
+                rule.get("keywords", []),
+                fallback_relationships=True,
+            )
+            if not supporting and field == "patient_case_information":
+                supporting = _dedupe_strings(evidence.get("patient_data", []))
+            missing = [
+                item
+                for item in evidence.get("missing_elements", [])
+                if _item_matches_keywords(
+                    item,
+                    [field.replace("_", " "), SPRING_2025_DOMAIN_TITLES[group], *rule.get("keywords", [])],
+                )
+            ]
+            if not supporting:
+                missing.append(
+                    f"No visible evidence mapped to: {SPRING_2025_CRITERION_TEXT[group][field]}"
+                )
+            mapped[group][field] = {
+                "criterion": SPRING_2025_CRITERION_TEXT[group][field],
+                "supporting_evidence": _dedupe_strings(supporting),
+                "relationship_evidence": _dedupe_strings(relationships),
+                "missing_evidence": _dedupe_strings(missing),
+                "evidence_count": len(_dedupe_strings(supporting)),
+                "relationship_count": len(_dedupe_strings(relationships)),
+            }
+    return mapped
+
+
+def _is_isolated_label_evidence(items: list[str], relationships: list[str]) -> bool:
+    if relationships:
+        return False
+    if not items:
+        return False
+    return all(len(item.split()) <= 5 and not LLAMA_RELATIONSHIP_PATTERN.search(item) for item in items)
+
+
+def _deterministic_score(group: str, mapped_item: dict[str, Any]) -> tuple[int, str]:
+    supporting = mapped_item.get("supporting_evidence") or []
+    relationships = mapped_item.get("relationship_evidence") or []
+    evidence_count = int(mapped_item.get("evidence_count") or len(supporting))
+    relationship_count = int(mapped_item.get("relationship_count") or len(relationships))
+
+    if not supporting:
+        return 1, "Score 1: no relevant supporting evidence was mapped to this criterion."
+
+    score = 2
+    reason = "Score 2: relevant terms exist but are general, incomplete, or weakly connected."
+
+    if relationship_count >= 1:
+        score = 3
+        reason = "Score 3: relevant evidence exists and at least one meaningful relationship supports synthesis."
+
+    if evidence_count >= 2 and relationship_count >= 2:
+        score = 4
+        reason = "Score 4: multiple evidence items and multiple relationships show detailed, synthesized, comprehensive understanding."
+
+    if _is_isolated_label_evidence(supporting, relationships):
+        score = min(score, 2)
+        reason = "Score capped at 2 because the evidence is isolated labels without meaningful relationships."
+
+    if group in {"integration", "application"} and not relationships:
+        score = min(score, 2)
+        reason = "Score capped at 2 because Integration/Application criteria require visible relationship evidence."
+
+    if score == 4 and not relationships:
+        score = 2
+        reason = "Score capped at 2 because score 4 requires explicit relationship evidence."
+
+    return score, reason
+
+
+def _build_deterministic_result(
+    *,
+    map_file: str,
+    model_id: str,
+    mapped_evidence: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    result = build_spring_schema(map_file, model_id)
+    scoring_debug: dict[str, Any] = {}
+    rubric = load_summative_rubric()
+
+    for group, fields in CATEGORY_FIELDS.items():
+        scoring_debug[group] = {}
+        scores: list[int] = []
+        for field in fields:
+            mapped_item = mapped_evidence[group][field]
+            score, score_reason = _deterministic_score(group, mapped_item)
+            scores.append(score)
+            evidence_values = _dedupe_strings(
+                [
+                    *mapped_item.get("supporting_evidence", []),
+                    *mapped_item.get("relationship_evidence", []),
+                ]
+            )
+            if not evidence_values:
+                evidence_values = ["No clear evidence found in the concept map."]
+            descriptor = rubric[group][field][str(score)]
+            result[group][field] = {
+                "score": score,
+                "explanation": f"{score_reason} Spring 2025 descriptor: {descriptor}",
+                "evidence_from_map": evidence_values[:3],
+            }
+            scoring_debug[group][field] = {
+                **mapped_item,
+                "score": score,
+                "score_reason": score_reason,
+                "spring_2025_descriptor": descriptor,
+            }
+
+        high_count = sum(1 for score in scores if score in {3, 4})
+        has_score_one = any(score == 1 for score in scores)
+        domain_yes = high_count > (len(scores) / 2) and not has_score_one
+        result[group]["overall_decision"] = "Yes" if domain_yes else "No"
+        result[group]["if_no_explanation"] = (
+            ""
+            if domain_yes
+            else f"{SPRING_2025_DOMAIN_TITLES[group]} is marked No because most criteria were not scored 3 or 4 or at least one required criterion scored 1."
+        )
+        scoring_debug[group]["domain_decision_rule"] = {
+            "scores": scores,
+            "criteria_scored_3_or_4": high_count,
+            "has_score_1": has_score_one,
+            "overall_decision": result[group]["overall_decision"],
+        }
+
+    result["overall_meets_expectations"] = (
+        "Yes"
+        if all(result[group]["overall_decision"] == "Yes" for group in CATEGORY_FIELDS)
+        else "No"
+    )
+    strengths: list[str] = []
+    improvements: list[str] = []
+    for group, fields in CATEGORY_FIELDS.items():
+        if result[group]["overall_decision"] == "Yes":
+            strengths.append(f"{SPRING_2025_DOMAIN_TITLES[group]} met expectations based on mapped evidence.")
+        for field in fields:
+            item = result[group][field]
+            if item["score"] <= 2:
+                improvements.append(SPRING_2025_CRITERION_TEXT[group][field])
+    result["strengths"] = strengths[:2] or ["Visible evidence was extracted for deterministic rubric scoring."]
+    result["areas_for_improvement"] = improvements[:3] or ["Continue strengthening visible evidence and relationships."]
+    result["grading_notes"] = (
+        "Numeric scores were assigned by deterministic Python rules from mapped evidence; model output was used for evidence extraction only."
+    )
+    scoring_debug["overall_rule"] = {
+        "domain_decisions": {
+            group: result[group]["overall_decision"] for group in CATEGORY_FIELDS
+        },
+        "overall_meets_expectations": result["overall_meets_expectations"],
+    }
+    return result, scoring_debug
+
+
+def _run_single_image_evidence_pipeline(
+    *,
+    model_name: str,
+    model_id: str,
+    image: str,
+    map_file: str,
+    debug_prefix: Path,
+) -> tuple[str, Any, dict[str, Any], Path, str]:
+    """Extract evidence from one image, then score deterministically in Python."""
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    image_path = _save_debug_image_from_base64(image, debug_prefix)
+    extraction_prompt = build_evidence_extraction_prompt(model_name)
+    prompt_path = Path(f"{debug_prefix}_evidence_extraction_prompt.txt")
+    prompt_path.write_text(extraction_prompt, encoding="utf-8")
+
+    returned_model_id, raw_evidence_text, raw_response, request_metadata = _request_model(
+        model_name,
+        extraction_prompt,
+        image,
+        max_tokens=2000,
+        health_debug_prefix=None,
+        map_file=None,
+        perform_health_test=False,
+    )
+    _ = returned_model_id
+    raw_path = Path(f"{debug_prefix}_evidence_extraction_raw.txt")
+    raw_path.write_text(raw_evidence_text, encoding="utf-8")
+    extracted_evidence = _parse_extracted_evidence(raw_evidence_text)
+    evidence_json_path = Path(f"{debug_prefix}_extracted_evidence.json")
+    evidence_json_path.write_text(json.dumps(extracted_evidence, indent=2), encoding="utf-8")
+    evidence_text = _evidence_to_text(extracted_evidence)
+    evidence_path = Path(f"{debug_prefix}_extracted_evidence.txt")
+    evidence_path.write_text(evidence_text, encoding="utf-8")
+
+    relationships = "\n".join(
+        _dedupe_strings(
+            [
+                *extracted_evidence.get("relationships", []),
+                *extracted_evidence.get("pathophysiology_flows", []),
+            ]
+        )
+    ) or "No explicit visible relationships extracted."
+    relationships_path = Path(f"{debug_prefix}_relationship_extraction.txt")
+    relationships_path.write_text(relationships, encoding="utf-8")
+
+    mapping_prompt = _build_evidence_mapping_prompt(evidence_text, relationships)
+    mapping_prompt_path = Path(f"{debug_prefix}_evidence_mapping_prompt.txt")
+    mapping_prompt_path.write_text(mapping_prompt, encoding="utf-8")
+    mapped_evidence = _map_evidence_to_rubric(extracted_evidence)
+    evidence_mapping_path = Path(f"{debug_prefix}_evidence_mapping.json")
+    evidence_mapping_path.write_text(json.dumps(mapped_evidence, indent=2), encoding="utf-8")
+
+    final_data, scoring_debug = _build_deterministic_result(
+        map_file=map_file,
+        model_id=model_id,
+        mapped_evidence=mapped_evidence,
+    )
+    scoring_debug_path = Path(f"{debug_prefix}_deterministic_score_reasoning.json")
+    scoring_debug_path.write_text(json.dumps(scoring_debug, indent=2), encoding="utf-8")
+
+    grading_prompt = f"""{spring_2025_feedback_tool_text(compact=True)}
+
+Final numeric scores are assigned by deterministic Python rules, not by {model_name}.
+Model role: evidence extraction only.
+"""
+    grading_prompt_path = Path(f"{debug_prefix}_grading_prompt.txt")
+    grading_prompt_path.write_text(grading_prompt, encoding="utf-8")
+    final_output_path = Path(f"{debug_prefix}_final_output.json")
+    final_output_path.write_text(json.dumps(final_data, indent=2), encoding="utf-8")
+    grading_text = json.dumps(final_data, separators=(",", ":"))
+    grading_raw_path = Path(f"{debug_prefix}_grading_raw.txt")
+    grading_raw_path.write_text(grading_text, encoding="utf-8")
+
+    metadata = {
+        "pipeline": "single_image_evidence_then_deterministic_scoring",
+        "provider": MODEL_PROVIDER_INFO[model_name]["provider"],
+        "base_url": MODEL_PROVIDER_INFO[model_name]["base_url"],
+        "model": model_id,
+        "model_role": "evidence_extraction_only",
+        "request_image_path": str(image_path),
+        "evidence_extraction_prompt_path": str(prompt_path),
+        "evidence_extraction_raw_path": str(raw_path),
+        "evidence_path": str(evidence_path),
+        "evidence_json_path": str(evidence_json_path),
+        "relationship_extraction_path": str(relationships_path),
+        "evidence_mapping_prompt_path": str(mapping_prompt_path),
+        "evidence_mapping_path": str(evidence_mapping_path),
+        "deterministic_score_reasoning_path": str(scoring_debug_path),
+        "grading_prompt_path": str(grading_prompt_path),
+        "grading_raw_path": str(grading_raw_path),
+        "final_output_path": str(final_output_path),
+        "request_metadata": request_metadata,
+        "raw_response": _response_to_debug_text(raw_response),
+        "effective_prompt": extraction_prompt,
+    }
+    metadata_path = Path(f"{debug_prefix}_pipeline.json")
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    metadata["pipeline_debug_path"] = str(metadata_path)
+    return grading_text, raw_response, metadata, image_path, grading_prompt
+
+
 def _render_llama_tiles(
     pdf_path: Path, debug_prefix: Path
 ) -> tuple[Path, list[dict[str, Any]]]:
@@ -2411,16 +2908,15 @@ def _run_llama_staged_pipeline(
     }
     metadata_path = Path(f"{debug_prefix}_pipeline.json")
     evidence_sections: list[str] = []
+    tile_evidence_items: list[dict[str, list[str]]] = []
 
     for tile in tiles:
         started = time.perf_counter()
         response: Any | None = None
         request_metadata: dict[str, Any] = {}
         try:
-            tile_prompt = (
-                f"{LLAMA_EXTRACTION_PROMPT}\n\nThis image is TILE {tile['index']} "
-                "of 4. Prefix each evidence item with "
-                f"[Tile {tile['index']}]."
+            tile_prompt = build_evidence_extraction_prompt(
+                "Llama 4", tile_index=tile["index"]
             )
             content, request_metadata = _prepare_request_image(
                 "Llama 4", tile_prompt, tile["base64"]
@@ -2439,11 +2935,16 @@ def _run_llama_staged_pipeline(
             evidence_text = _require_response_content(
                 response, f"tile {tile['index']} evidence extraction"
             ).strip()
+            tile_evidence = _parse_extracted_evidence(evidence_text)
+            tile_evidence_items.append(tile_evidence)
             evidence_sections.append(
-                f"=== TILE {tile['index']} ===\n{evidence_text}"
+                f"=== TILE {tile['index']} ===\n{_evidence_to_text(tile_evidence)}"
             )
-            Path(f"{debug_prefix}_tile_{tile['index']}_extraction.txt").write_text(
+            Path(f"{debug_prefix}_tile_{tile['index']}_extraction_raw.txt").write_text(
                 evidence_text, encoding="utf-8"
+            )
+            Path(f"{debug_prefix}_tile_{tile['index']}_extracted_evidence.json").write_text(
+                json.dumps(tile_evidence, indent=2), encoding="utf-8"
             )
             stage_metadata["tiles"].append(
                 {
@@ -2506,10 +3007,20 @@ def _run_llama_staged_pipeline(
                 json.dumps(stage_metadata, indent=2), encoding="utf-8"
             )
 
-    extracted_evidence = "\n\n".join(evidence_sections)
+    merged_evidence = _merge_evidence_dicts(tile_evidence_items)
+    extracted_evidence = _evidence_to_text(merged_evidence)
     evidence_path = Path(f"{debug_prefix}_extracted_evidence.txt")
     evidence_path.write_text(extracted_evidence, encoding="utf-8")
-    relationships = _extract_relationship_lines(extracted_evidence)
+    evidence_json_path = Path(f"{debug_prefix}_extracted_evidence.json")
+    evidence_json_path.write_text(json.dumps(merged_evidence, indent=2), encoding="utf-8")
+    relationships = "\n".join(
+        _dedupe_strings(
+            [
+                *merged_evidence.get("relationships", []),
+                *merged_evidence.get("pathophysiology_flows", []),
+            ]
+        )
+    ) or "No explicit visible relationships extracted."
     relationships_path = Path(f"{debug_prefix}_relationship_extraction.txt")
     relationships_path.write_text(relationships, encoding="utf-8")
     stage_metadata["evidence_quality"] = _llama_evidence_quality(
@@ -2520,125 +3031,72 @@ def _run_llama_staged_pipeline(
     mapping_prompt = _build_evidence_mapping_prompt(extracted_evidence, relationships)
     mapping_prompt_path = Path(f"{debug_prefix}_evidence_mapping_prompt.txt")
     mapping_prompt_path.write_text(mapping_prompt, encoding="utf-8")
-    mapping_started = time.perf_counter()
-    mapping_response: Any | None = None
-    try:
-        evidence_mapping, mapping_response = _request_llama4_text(
-            client,
-            mapping_prompt,
-            max_tokens=2200,
-            step_name="evidence-to-rubric mapping",
-        )
-        evidence_mapping_path = Path(f"{debug_prefix}_evidence_mapping.json")
-        evidence_mapping_path.write_text(evidence_mapping, encoding="utf-8")
-        stage_metadata["evidence_mapping"] = {
-            "prompt_path": str(mapping_prompt_path),
-            "mapping_path": str(evidence_mapping_path),
-            "prompt_character_length": len(mapping_prompt),
-            "response_time_seconds": round(time.perf_counter() - mapping_started, 3),
-            "raw_response": _response_to_debug_text(mapping_response),
-            **_response_metrics(mapping_response),
-        }
-    except Exception as exc:
-        evidence_mapping_path = Path(f"{debug_prefix}_evidence_mapping_failed.txt")
-        evidence_mapping_path.write_text(
-            _response_to_debug_text(mapping_response) or repr(exc),
-            encoding="utf-8",
-        )
-        stage_metadata["evidence_mapping"] = {
-            "prompt_path": str(mapping_prompt_path),
-            "mapping_path": str(evidence_mapping_path),
-            "prompt_character_length": len(mapping_prompt),
-            "response_time_seconds": round(time.perf_counter() - mapping_started, 3),
-            "raw_response": _response_to_debug_text(mapping_response),
-            "error": _nvidia_error_message(exc),
-            **_response_metrics(mapping_response),
-        }
-        metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
-        raise ModelResponseError(
-            f"Llama 4 evidence mapping failed: {_nvidia_error_message(exc)}",
-            raw_response=mapping_response or repr(exc),
-        ) from exc
+    mapped_evidence = _map_evidence_to_rubric(merged_evidence)
+    evidence_mapping_path = Path(f"{debug_prefix}_evidence_mapping.json")
+    evidence_mapping_path.write_text(json.dumps(mapped_evidence, indent=2), encoding="utf-8")
+    stage_metadata["evidence_mapping"] = {
+        "mapping": "deterministic_python",
+        "prompt_path": str(mapping_prompt_path),
+        "mapping_path": str(evidence_mapping_path),
+        "prompt_character_length": len(mapping_prompt),
+    }
 
-    grading_prompt = build_model_prompt("Llama 4", map_file, LLAMA4_MODEL) + f"""
+    final_data, scoring_debug = _build_deterministic_result(
+        map_file=map_file,
+        model_id=LLAMA4_MODEL,
+        mapped_evidence=mapped_evidence,
+    )
+    scoring_debug_path = Path(f"{debug_prefix}_deterministic_score_reasoning.json")
+    scoring_debug_path.write_text(json.dumps(scoring_debug, indent=2), encoding="utf-8")
 
-Grade using ONLY the mapped evidence below. Do not infer from outside medical knowledge or from what the map should contain. Consolidate evidence across all four tiles before treating a tile-level item as globally missing. Treat "None visible" as absent evidence only when no other tile supplies it.
+    grading_prompt = f"""{spring_2025_feedback_tool_text(compact=True)}
 
-Required grading process:
-1. Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
-2. Use the exact score descriptors from rubric/concept_map_rubric.json included above.
-3. Grade each exact criterion only from mapped_visible_evidence and mapped_visible_relationships.
-4. If evidence is missing, score low according to the exact rubric descriptor.
-5. Isolated labels without mapped visible relationships cannot support high Integration/Application scores.
-6. Every score and Yes/No decision must be assigned independently by Llama 4 from the mapped evidence.
-
-EXTRACTED VISIBLE EVIDENCE:
-{extracted_evidence}
-
-EXTRACTED VISIBLE RELATIONSHIPS:
-{relationships}
-
-MAPPED EVIDENCE TO EXACT RUBRIC CRITERIA:
-{evidence_mapping}
+Final numeric scores are assigned by deterministic Python rules, not by Llama 4.
+Deterministic scoring rules:
+- Score 1: no relevant supporting evidence
+- Score 2: relevant terms exist but are general, incomplete, or weakly connected
+- Score 3: relevant evidence exists and at least one meaningful relationship supports synthesis
+- Score 4: multiple relevant evidence items plus multiple meaningful relationships showing detailed, synthesized, comprehensive understanding
+- If supporting_evidence is empty, max score = 1
+- If relationship_evidence is empty, max score = 2 for Integration/Application criteria
+- If evidence is only isolated labels, max score = 2
+- Score 4 requires explicit relationship evidence, not just concept labels
+- Domain overall = Yes only if most criteria in that domain are 3 or 4 and no required criterion is 1
+- Final overall = Yes only if all domain overall decisions are Yes
 """
     grading_prompt_path = Path(f"{debug_prefix}_grading_prompt.txt")
     grading_prompt_path.write_text(grading_prompt, encoding="utf-8")
 
-    grading_started = time.perf_counter()
-    grading_response: Any | None = None
-    try:
-        grading_response = client.chat.completions.create(
-            model=LLAMA4_MODEL,
-            temperature=0,
-            max_tokens=MODEL_CONFIGS["Llama 4"]["max_tokens"],
-            messages=[{"role": "user", "content": grading_prompt}],
-        )
-        grading_text = _require_response_content(
-            grading_response, "text-only rubric grading"
-        ).strip()
-        Path(f"{debug_prefix}_grading_raw.txt").write_text(
-            grading_text, encoding="utf-8"
-        )
-        stage_metadata["grading"] = {
-            "prompt_path": str(grading_prompt_path),
-            "prompt_character_length": len(grading_prompt),
-            "response_time_seconds": round(
-                time.perf_counter() - grading_started, 3
-            ),
-            "raw_response": _response_to_debug_text(grading_response),
-            **_response_metrics(grading_response),
-        }
-    except Exception as exc:
-        Path(f"{debug_prefix}_grading_raw.txt").write_text(
-            _response_to_debug_text(grading_response) or repr(exc),
-            encoding="utf-8",
-        )
-        stage_metadata["grading"] = {
-            "prompt_path": str(grading_prompt_path),
-            "prompt_character_length": len(grading_prompt),
-            "response_time_seconds": round(
-                time.perf_counter() - grading_started, 3
-            ),
-            "raw_response": _response_to_debug_text(grading_response),
-            "error": str(exc),
-            **_response_metrics(grading_response),
-        }
-        raise ModelResponseError(
-            "Llama 4 text-only rubric grading failed.",
-            raw_response=grading_response or repr(exc),
-        ) from exc
-    finally:
-        metadata_path.write_text(
-            json.dumps(stage_metadata, indent=2), encoding="utf-8"
-        )
+    grading_text = json.dumps(final_data, separators=(",", ":"))
+    grading_response = {
+        "deterministic_scorer": True,
+        "model_role": "evidence_extraction_only",
+    }
+    Path(f"{debug_prefix}_grading_raw.txt").write_text(
+        grading_text, encoding="utf-8"
+    )
+    final_output_path = Path(f"{debug_prefix}_final_output.json")
+    final_output_path.write_text(json.dumps(final_data, indent=2), encoding="utf-8")
+    stage_metadata["grading"] = {
+        "scoring": "deterministic_python",
+        "prompt_path": str(grading_prompt_path),
+        "prompt_character_length": len(grading_prompt),
+        "raw_response": json.dumps(grading_response, indent=2),
+        "deterministic_score_reasoning_path": str(scoring_debug_path),
+        "final_output_path": str(final_output_path),
+    }
+    metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
 
     request_metadata = {
         **stage_metadata,
         "pipeline_debug_path": str(metadata_path),
         "evidence_path": str(evidence_path),
+        "evidence_json_path": str(evidence_json_path),
         "relationship_extraction_path": str(relationships_path),
         "evidence_mapping_path": str(evidence_mapping_path),
         "evidence_mapping_prompt_path": str(mapping_prompt_path),
+        "deterministic_score_reasoning_path": str(scoring_debug_path),
+        "final_output_path": str(final_output_path),
         "grading_prompt_path": str(grading_prompt_path),
         "image_bytes": full_path.stat().st_size,
         "image_transport": "four_inline_base64_tiles_for_extraction_only",
@@ -2819,9 +3277,6 @@ def run_evaluation(
         parsed_after_validation: dict[str, Any] | None = None
         request_metadata: dict[str, Any] | None = None
         try:
-            prompt = build_model_prompt(
-                model_name, Path(original_filename).name, model_id
-            )
             if llama4_staged:
                 debug_prefix = (
                     DEBUG_DIR / f"{timestamp}_{run_id}_{file_stem}_llama4"
@@ -2839,44 +3294,46 @@ def run_evaluation(
                 )
                 returned_model_id = model_id
             else:
+                debug_prefix = (
+                    DEBUG_DIR
+                    / f"{timestamp}_{run_id}_{file_stem}_{_model_slug(model_name)}"
+                )
                 (
-                    returned_model_id,
                     raw_text,
                     raw_api_response,
                     request_metadata,
-                ) = _request_model(
-                    model_name,
+                    image_debug_path,
                     prompt,
-                    image,
-                    health_debug_prefix=None,
-                    map_file=None,
+                ) = _run_single_image_evidence_pipeline(
+                    model_name=model_name,
+                    model_id=model_id,
+                    image=image,
+                    map_file=Path(original_filename).name,
+                    debug_prefix=debug_prefix,
                 )
-            parsed_before_validation = (
-                _load_json_with_repair(raw_text) if model_name == "Llama 4" else None
-            )
+                returned_model_id = model_id
+            parsed_before_validation = _load_json_with_repair(raw_text)
             data = parse_model_json(raw_text)
-            if llama4_staged:
-                _enforce_llama_relationship_caps(data)
+            if llama4_staged and request_metadata is not None:
                 _check_llama_discrimination(
                     result=data,
                     request_metadata=request_metadata,
                     pdf_path=pdf_path,
                     map_file=Path(original_filename).name,
                 )
-            cleaned_json = (
-                _cleaned_json_text(raw_text) if model_name == "Llama 4" else None
+            cleaned_json = _cleaned_json_text(raw_text)
+            parsed_after_validation = json.loads(json.dumps(data))
+            final_parsed_path = (
+                DEBUG_DIR
+                / (
+                    f"{timestamp}_{run_id}_{file_stem}_{_model_slug(model_name)}_"
+                    "final_parsed_grading.json"
+                )
+            )
+            final_parsed_path.write_text(
+                json.dumps(parsed_after_validation, indent=2), encoding="utf-8"
             )
             if model_name == "Llama 4":
-                parsed_after_validation = json.loads(json.dumps(data))
-                Path(
-                    DEBUG_DIR
-                    / (
-                        f"{timestamp}_{run_id}_{file_stem}_llama4_"
-                        "final_parsed_grading.json"
-                    )
-                ).write_text(
-                    json.dumps(parsed_after_validation, indent=2), encoding="utf-8"
-                )
                 _save_nemotron_trace(
                     timestamp=timestamp,
                     run_id=run_id,
