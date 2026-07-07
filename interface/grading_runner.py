@@ -26,6 +26,7 @@ DEBUG_DIR = OUTPUT_DIR / "debug"
 
 GEMMA_MODEL = "google/gemma-4-26b-a4b-it:free"
 PHI4_MODEL = "microsoft/phi-4-multimodal-instruct"
+NVIDIA_INLINE_IMAGE_LIMIT_BYTES = 180_000
 
 GRADER_MODULES = {
     "Gemma": None,
@@ -793,12 +794,178 @@ def _image_media_type(image_bytes: bytes) -> tuple[str, str]:
     raise GradingError("The rendered request image is not a valid JPEG or PNG.")
 
 
+def _nvidia_error_message(error: Any) -> str:
+    """Extract the useful status/body text from NVIDIA/OpenAI SDK errors."""
+    parts: list[str] = []
+    status_code = getattr(error, "status_code", None)
+    if status_code:
+        parts.append(f"status {status_code}")
+    response = getattr(error, "response", None)
+    if response is not None:
+        response_status = getattr(response, "status_code", None)
+        if response_status and not status_code:
+            parts.append(f"status {response_status}")
+        try:
+            body = response.text
+        except Exception:
+            body = None
+        if body:
+            parts.append(str(body))
+    body = getattr(error, "body", None)
+    if body:
+        try:
+            parts.append(json.dumps(body))
+        except TypeError:
+            parts.append(str(body))
+    message = str(error)
+    if message and message not in parts:
+        parts.append(message)
+    return " | ".join(part for part in parts if part) or error.__class__.__name__
+
+
+def _upload_nvidia_asset(
+    image_bytes: bytes, media_type: str, description: str
+) -> tuple[str, dict[str, Any]]:
+    """Upload a large image to NVCF and return its asset ID for Phi-4."""
+    api_key = _get_secret("NVIDIA_API_KEY")
+    if not api_key:
+        raise GradingError("NVIDIA_API_KEY is not configured.")
+
+    from urllib import error as urllib_error
+    from urllib import request as urllib_request
+
+    create_payload = json.dumps(
+        {"contentType": media_type, "description": description}
+    ).encode("utf-8")
+    create_request = urllib_request.Request(
+        "https://api.nvcf.nvidia.com/v2/nvcf/assets",
+        data=create_payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    metadata: dict[str, Any] = {
+        "asset_upload_required": True,
+        "asset_content_type": media_type,
+        "asset_description": description,
+        "asset_create_url": "https://api.nvcf.nvidia.com/v2/nvcf/assets",
+    }
+    try:
+        with urllib_request.urlopen(create_request, timeout=60) as response:
+            create_status = response.status
+            create_body = response.read().decode("utf-8")
+    except urllib_error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise ModelResponseError(
+            f"NVIDIA asset creation failed: status {exc.code} | {body}",
+            raw_response=body,
+        ) from exc
+    except Exception as exc:
+        raise ModelResponseError(
+            f"NVIDIA asset creation failed: {_nvidia_error_message(exc)}",
+            raw_response=repr(exc),
+        ) from exc
+
+    metadata["asset_create_status"] = create_status
+    try:
+        create_data = json.loads(create_body)
+    except json.JSONDecodeError as exc:
+        raise ModelResponseError(
+            "NVIDIA asset creation returned malformed JSON.",
+            raw_response=create_body,
+        ) from exc
+
+    asset_id = (
+        create_data.get("assetId")
+        or create_data.get("asset_id")
+        or create_data.get("id")
+    )
+    upload_url = (
+        create_data.get("uploadUrl")
+        or create_data.get("upload_url")
+        or create_data.get("url")
+    )
+    if not asset_id or not upload_url:
+        raise ModelResponseError(
+            "NVIDIA asset creation response did not include assetId/uploadUrl.",
+            raw_response=create_body,
+        )
+
+    metadata["asset_id"] = asset_id
+    upload_request = urllib_request.Request(
+        upload_url,
+        data=image_bytes,
+        headers={
+            "Content-Type": media_type,
+            "x-amz-meta-nvcf-asset-description": description,
+        },
+        method="PUT",
+    )
+    try:
+        with urllib_request.urlopen(upload_request, timeout=300) as response:
+            metadata["asset_upload_status"] = response.status
+    except urllib_error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise ModelResponseError(
+            f"NVIDIA asset upload failed: status {exc.code} | {body}",
+            raw_response=body,
+        ) from exc
+    except Exception as exc:
+        raise ModelResponseError(
+            f"NVIDIA asset upload failed: {_nvidia_error_message(exc)}",
+            raw_response=repr(exc),
+        ) from exc
+
+    return str(asset_id), metadata
+
+
 def _prepare_request_image(
     model_name: str, prompt: str, image: str
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Build NVIDIA's documented nested image_url message content."""
+) -> tuple[str | list[dict[str, Any]], dict[str, Any]]:
+    """Build provider-specific multimodal message content."""
     image_bytes = base64.b64decode(image, validate=True)
     media_type, _ = _image_media_type(image_bytes)
+
+    if model_name == "Phi-4":
+        description = f"Phi-4 concept map tile {hashlib.sha256(image_bytes).hexdigest()[:12]}"
+        if len(image_bytes) > NVIDIA_INLINE_IMAGE_LIMIT_BYTES:
+            asset_id, asset_metadata = _upload_nvidia_asset(
+                image_bytes, media_type, description
+            )
+            content = (
+                f'<img src="data:{media_type};asset_id,{asset_id}" />\n\n{prompt}'
+            )
+            request_metadata: dict[str, Any] = {
+                "image_bytes": len(image_bytes),
+                "image_transport": "nvcf_asset_id",
+                "inline_limit_bytes": NVIDIA_INLINE_IMAGE_LIMIT_BYTES,
+                "extra_headers": {"NVCF-INPUT-ASSET-REFERENCES": asset_id},
+                "payload_shape": {
+                    "content_type": "string_with_html_img_asset_id",
+                    "content": (
+                        f'<img src="data:{media_type};asset_id,<asset_id>" />'
+                        "\n\n<prompt>"
+                    ),
+                },
+                **asset_metadata,
+            }
+            return content, request_metadata
+
+        content = f'<img src="data:{media_type};base64,{image}" />\n\n{prompt}'
+        request_metadata = {
+            "image_bytes": len(image_bytes),
+            "image_transport": "inline_base64_html_img",
+            "inline_limit_bytes": NVIDIA_INLINE_IMAGE_LIMIT_BYTES,
+            "payload_shape": {
+                "content_type": "string_with_html_img_data_uri",
+                "content": f'<img src="data:{media_type};base64,<base64>" />\n\n<prompt>',
+            },
+        }
+        return content, request_metadata
+
     request_metadata: dict[str, Any] = {
         "image_bytes": len(image_bytes),
         "image_transport": "inline_base64",
@@ -814,10 +981,7 @@ def _prepare_request_image(
         "image_url": {"url": f"data:{media_type};base64,{image}"},
     }
     text_item = {"type": "text", "text": prompt}
-    content = [image_item, text_item] if model_name == "Phi-4" else [
-        text_item,
-        image_item,
-    ]
+    content = [text_item, image_item]
     return content, request_metadata
 
 
@@ -952,17 +1116,21 @@ def _run_nemotron_health_tests(
         "temperature": 0,
         "max_tokens": 100,
     }
+    if image_metadata.get("extra_headers"):
+        image_payload["extra_headers"] = image_metadata["extra_headers"]
     image_payload_shape = {
         **image_payload,
         "messages": [
             {
                 "role": "user",
-                "content": [
-                    image_metadata["payload_shape"],
-                    {"type": "text", "text": preflight_prompt},
-                ],
+                "content": image_metadata["payload_shape"],
             }
         ],
+        "extra_headers": (
+            {"NVCF-INPUT-ASSET-REFERENCES": "<asset_id>"}
+            if image_metadata.get("extra_headers")
+            else None
+        ),
     }
     image_path = Path(f"{debug_prefix}_image_health.json")
     image_response: Any | None = None
@@ -1600,12 +1768,15 @@ def _request_model(
             "temperature": 0,
             "messages": [{"role": "user", "content": content}],
         }
-        payload_shape = [
-            {"type": "text", "text": prompt},
-            request_metadata["payload_shape"],
-        ]
         if model_name == "Phi-4":
-            payload_shape.reverse()
+            payload_shape: Any = request_metadata["payload_shape"]
+            if request_metadata.get("extra_headers"):
+                request_options["extra_headers"] = request_metadata["extra_headers"]
+        else:
+            payload_shape = [
+                {"type": "text", "text": prompt},
+                request_metadata["payload_shape"],
+            ]
         request_metadata["outgoing_payload_shape"] = {
             "model": config["model_id"],
             "max_tokens": request_options["max_tokens"],
@@ -1616,6 +1787,11 @@ def _request_model(
                     "content": payload_shape,
                 }
             ],
+            "extra_headers": (
+                {"NVCF-INPUT-ASSET-REFERENCES": "<asset_id>"}
+                if request_metadata.get("extra_headers")
+                else None
+            ),
         }
         if request_timeout is not None:
             request_options["timeout"] = request_timeout
@@ -1787,15 +1963,22 @@ def _run_llama_vision_diagnostics(
     def call_step(
         label: str, prompt_text: str, image_b64: str, max_tokens: int
     ) -> tuple[str, Any]:
-        content, _ = _prepare_request_image("Phi-4", prompt_text, image_b64)
+        content, request_metadata = _prepare_request_image(
+            "Phi-4", prompt_text, image_b64
+        )
         started = time.perf_counter()
         response: Any | None = None
         try:
+            request_options: dict[str, Any] = {
+                "model": PHI4_MODEL,
+                "temperature": 0,
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": content}],
+            }
+            if request_metadata.get("extra_headers"):
+                request_options["extra_headers"] = request_metadata["extra_headers"]
             response = client.chat.completions.create(
-                model=PHI4_MODEL,
-                temperature=0,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": content}],
+                **request_options
             )
             text = _require_response_content(response, label)
             diagnostics["steps"][label] = {
@@ -2059,20 +2242,26 @@ def _run_llama_staged_pipeline(
     for tile in tiles:
         started = time.perf_counter()
         response: Any | None = None
+        request_metadata: dict[str, Any] = {}
         try:
             tile_prompt = (
                 f"{LLAMA_EXTRACTION_PROMPT}\n\nThis image is TILE {tile['index']} "
                 "of 4. Prefix each evidence item with "
                 f"[Tile {tile['index']}]."
             )
-            content, _ = _prepare_request_image(
+            content, request_metadata = _prepare_request_image(
                 "Phi-4", tile_prompt, tile["base64"]
             )
+            request_options: dict[str, Any] = {
+                "model": PHI4_MODEL,
+                "temperature": 0,
+                "max_tokens": 1200,
+                "messages": [{"role": "user", "content": content}],
+            }
+            if request_metadata.get("extra_headers"):
+                request_options["extra_headers"] = request_metadata["extra_headers"]
             response = client.chat.completions.create(
-                model=PHI4_MODEL,
-                temperature=0,
-                max_tokens=1200,
-                messages=[{"role": "user", "content": content}],
+                **request_options
             )
             evidence_text = _require_response_content(
                 response, f"tile {tile['index']} evidence extraction"
@@ -2093,11 +2282,22 @@ def _run_llama_staged_pipeline(
                     "response_time_seconds": round(
                         time.perf_counter() - started, 3
                     ),
+                    "request_metadata": {
+                        key: value
+                        for key, value in request_metadata.items()
+                        if key != "extra_headers"
+                    },
+                    "extra_headers": (
+                        {"NVCF-INPUT-ASSET-REFERENCES": "<asset_id>"}
+                        if request_metadata.get("extra_headers")
+                        else None
+                    ),
                     "raw_response": _response_to_debug_text(response),
                     **_response_metrics(response),
                 }
             )
         except Exception as exc:
+            error_message = _nvidia_error_message(exc)
             stage_metadata["tiles"].append(
                 {
                     "index": tile["index"],
@@ -2106,8 +2306,18 @@ def _run_llama_staged_pipeline(
                     "response_time_seconds": round(
                         time.perf_counter() - started, 3
                     ),
+                    "request_metadata": {
+                        key: value
+                        for key, value in request_metadata.items()
+                        if key != "extra_headers"
+                    },
+                    "extra_headers": (
+                        {"NVCF-INPUT-ASSET-REFERENCES": "<asset_id>"}
+                        if request_metadata.get("extra_headers")
+                        else None
+                    ),
                     "raw_response": _response_to_debug_text(response),
-                    "error": str(exc),
+                    "error": error_message,
                     **_response_metrics(response),
                 }
             )
@@ -2115,8 +2325,8 @@ def _run_llama_staged_pipeline(
                 json.dumps(stage_metadata, indent=2), encoding="utf-8"
             )
             raise ModelResponseError(
-                f"Phi-4 evidence extraction failed for tile {tile['index']}.",
-                raw_response=response or repr(exc),
+                f"Phi-4 evidence extraction failed for tile {tile['index']}: {error_message}",
+                raw_response=response or error_message,
             ) from exc
         finally:
             metadata_path.write_text(
