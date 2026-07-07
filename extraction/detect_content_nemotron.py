@@ -12,9 +12,9 @@ client = OpenAI(
     base_url="https://integrate.api.nvidia.com/v1"
 )
 
-MODEL = "microsoft/phi-4-multimodal-instruct"
+MODEL = "meta/llama-4-maverick-17b-128e-instruct"
 PDF_PATH = "maps/ConceptMapWeak.pdf"
-OUTPUT_PATH = "outputs/detected_content_weak_phi4.json"
+OUTPUT_PATH = "outputs/detected_content_weak_llama4.json"
 
 def pdf_to_base64(pdf_path):
     doc = fitz.open(pdf_path)
