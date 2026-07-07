@@ -93,6 +93,39 @@ DOMAIN_OVERALL_QUESTIONS = {
     "transfer": "Did the learner use previously learned content to deepen understanding?",
 }
 
+SPRING_2025_DOMAIN_TITLES = {
+    "knowledge_acquisition": "KNOWLEDGE ACQUISITION",
+    "integration": "INTEGRATION",
+    "application": "APPLICATION",
+    "transfer": "TRANSFER",
+}
+
+SPRING_2025_CRITERION_TEXT = {
+    "knowledge_acquisition": {
+        "basic_science": "Identifies key knowledge from basic sciences learned this unit",
+        "health_system_science": "Identifies key knowledge from health system science learned this unit",
+        "clinical_science": "Identifies key knowledge from clinical sciences learned this unit",
+        "patient_case_information": "Extracts key information from the patient case",
+        "determinants_of_health": "Identifies key determinants of health (DoH)",
+    },
+    "integration": {
+        "prioritized_differential_diagnosis": "Includes a prioritized differential diagnosis (DDx) that contains common, must not miss, and other possible diagnoses based on patient’s unique characteristics",
+        "illness_scripts": "Connects patient data to reflect illness script(s)",
+        "basic_to_foundational_science": "Connects basic science knowledge learned in the unit to other relevant foundational science information",
+        "patient_data_to_clinical_information": "Connects patient data to other relevant clinical information",
+        "patient_data_to_basic_science": "Connects patient data to relevant basic science knowledge",
+    },
+    "application": {
+        "working_diagnosis_pathophysiology": "Concept map explains the underlying pathophysiology of the working diagnosis",
+        "patient_data_pathophysiology": "Connections explain the pathophysiology underlying the key patient data",
+    },
+    "transfer": {
+        "prior_basic_science": "Identifies relevant basic science concepts learned in previous courses",
+        "prior_clinical_concepts": "Identifies relevant clinical concepts learned in previous courses",
+        "deepens_understanding": "Uses previously learned knowledge to deepen understanding of the pathophysiology of the condition, the “So what?”",
+    },
+}
+
 FORBIDDEN_DECISION_TEXT = (
     "Partial",
     "Partially Meets",
@@ -242,6 +275,58 @@ def load_summative_rubric() -> dict[str, Any]:
     }
 
 
+def spring_2025_feedback_tool_text(*, compact: bool = False) -> str:
+    """Return the exact Spring 2025 domains/criteria plus rubric descriptors."""
+    rubric = load_summative_rubric()
+    lines = [
+        "Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities",
+        "Use exactly these domains and criteria. Do not paraphrase, simplify, expand, or invent criteria.",
+    ]
+    for group, fields in CATEGORY_FIELDS.items():
+        title = SPRING_2025_DOMAIN_TITLES[group]
+        lines.append("")
+        lines.append(title)
+        for index, field in enumerate(fields, start=1):
+            lines.append(f"{index}. {SPRING_2025_CRITERION_TEXT[group][field]}")
+            descriptors = rubric[group].get(field, {})
+            if isinstance(descriptors, dict):
+                for score in ("1", "2", "3", "4"):
+                    descriptor = descriptors.get(score)
+                    if descriptor is not None:
+                        lines.append(f"   Score {score}: {descriptor}")
+        lines.append(f"Domain overall question: {DOMAIN_OVERALL_QUESTIONS[group]}")
+    lines.extend(
+        [
+            "",
+            "FINAL OVERALL",
+            "This map meets expectations.",
+            "Allowed values: Yes or No only.",
+            "",
+            "Scoring rules:",
+            "- Every criterion score must be exactly 1, 2, 3, or 4.",
+            "- No 0s, no 5s, no decimals.",
+            "- Overall decisions must be exactly Yes or No.",
+            "- No Partial, Borderline, Maybe, or similar values.",
+        ]
+    )
+    text = "\n".join(lines)
+    if compact:
+        return re.sub(r"\n{3,}", "\n\n", text)
+    return text
+
+
+def spring_2025_schema_field_map_text() -> str:
+    """Map exact rubric criteria to stable JSON schema fields."""
+    lines = ["JSON schema field mapping for the exact Spring 2025 criteria:"]
+    for group, fields in CATEGORY_FIELDS.items():
+        lines.append(f"{SPRING_2025_DOMAIN_TITLES[group]} -> {group}")
+        for field in fields:
+            lines.append(
+                f"- {field}: {SPRING_2025_CRITERION_TEXT[group][field]}"
+            )
+    return "\n".join(lines)
+
+
 def build_spring_schema(map_file: str, model_id: str) -> dict[str, Any]:
     """Build the Spring 2025 summative grading JSON shape."""
     schema: dict[str, Any] = {"map_file": map_file, "model": model_id}
@@ -303,13 +388,15 @@ def build_model_prompt(model_name: str, map_file: str, model_id: str) -> str:
     if model_name != "Llama 4":
         return build_web_prompt(map_file, model_id)
 
-    rubric = json.dumps(load_summative_rubric(), separators=(",", ":"))
     schema = json.dumps(
         build_spring_schema(map_file, model_id), separators=(",", ":")
     )
-    return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly. Do not invent criteria.
-Rubric:{rubric}
-Rules: criterion scores are integers 1-4 only; domain overall_decision and overall_meets_expectations are exactly Yes or No; never use Partial, decimals, 0, or 5. Each criterion needs score, one short explanation, and brief evidence_from_map from visible content. Do not hallucinate. Each domain needs overall_decision and if_no_explanation when No. Keep strengths, areas_for_improvement, and grading_notes brief.
+    return f"""{spring_2025_feedback_tool_text(compact=True)}
+
+Use the exact score descriptors above from rubric/concept_map_rubric.json.
+Grade only from mapped visible evidence extracted from the concept map. Do not use outside medical knowledge to fill missing evidence.
+Each criterion needs score, one short explanation, and brief evidence_from_map from mapped visible content.
+Each domain needs overall_decision and if_no_explanation when No.
 Return ONLY raw valid minified JSON matching this exact schema. No markdown or prose. First character {{; last character }}.
 Schema:{schema}
 """
@@ -2090,18 +2177,28 @@ Only use visible information."""
     return grading_text, grading_response, metadata, Path(selected["path"])
 
 
-LLAMA_EXTRACTION_PROMPT = """Read this concept-map tile and extract ONLY evidence that is visibly present. Do not grade, infer missing content, or use outside medical knowledge.
+LLAMA_EXTRACTION_PROMPT = f"""Read this concept-map tile and extract ONLY evidence that is visibly present. Do not grade, infer missing content, or use outside medical knowledge.
+
+The downstream grader uses the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly. Extract evidence relevant to these exact domains and criteria:
+{spring_2025_schema_field_map_text()}
 
 Use these exact headings:
 VISIBLE_EVIDENCE_BY_CATEGORY
-- patient data
-- diagnoses/DDx
-- basic science concepts
-- clinical science concepts
-- health system science concepts
-- determinants of health
-- pathophysiology flows
-- transfer/prior knowledge
+- key knowledge from basic sciences learned this unit
+- key knowledge from health system science learned this unit
+- key knowledge from clinical sciences learned this unit
+- key information from the patient case
+- key determinants of health (DoH)
+- prioritized differential diagnosis (DDx)
+- patient data reflecting illness script(s)
+- basic science knowledge connected to foundational science information
+- patient data connected to clinical information
+- patient data connected to basic science knowledge
+- working diagnosis pathophysiology
+- pathophysiology underlying key patient data
+- relevant basic science concepts learned in previous courses
+- relevant clinical concepts learned in previous courses
+- previously learned knowledge deepening understanding of pathophysiology, the “So what?”
 
 STRONG_CONNECTED_EVIDENCE
 List detailed evidence whose concepts are explicitly connected by visible arrows or lines. State the visible source, target, and relationship label when present.
@@ -2156,6 +2253,82 @@ def _llama_evidence_quality(extracted_evidence: str) -> dict[str, int]:
         "missing_or_unclear_items": section_counts["MISSING_OR_UNCLEAR_BY_DOMAIN"],
         "quality_score": quality_score,
     }
+
+
+def _extract_relationship_lines(extracted_evidence: str) -> str:
+    """Collect explicit relationship lines from the staged extraction output."""
+    lines: list[str] = []
+    capture = False
+    for raw_line in extracted_evidence.splitlines():
+        line = raw_line.strip()
+        normalized = line.rstrip(":").upper()
+        if normalized == "EXPLICIT_RELATIONSHIPS":
+            capture = True
+            continue
+        if normalized in {
+            "VISIBLE_EVIDENCE_BY_CATEGORY",
+            "STRONG_CONNECTED_EVIDENCE",
+            "WEAK_OR_VAGUE_EVIDENCE",
+            "MISSING_OR_UNCLEAR_BY_DOMAIN",
+        } or line.startswith("=== TILE"):
+            capture = False
+        if capture and line and "none visible" not in line.lower():
+            lines.append(line)
+    return "\n".join(lines) if lines else "No explicit visible relationships extracted."
+
+
+def _build_evidence_mapping_prompt(extracted_evidence: str, relationships: str) -> str:
+    mapping_schema = {
+        group: {
+            field: {
+                "criterion": SPRING_2025_CRITERION_TEXT[group][field],
+                "mapped_visible_evidence": [],
+                "mapped_visible_relationships": [],
+                "missing_or_unclear_evidence": [],
+            }
+            for field in fields
+        }
+        for group, fields in CATEGORY_FIELDS.items()
+    }
+    return f"""Map extracted concept-map evidence to the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
+
+Do not grade. Do not infer. Do not paraphrase, simplify, expand, or invent rubric criteria.
+Use only extracted visible evidence and extracted visible relationships.
+
+{spring_2025_feedback_tool_text(compact=True)}
+
+{spring_2025_schema_field_map_text()}
+
+For each exact criterion, list:
+- mapped_visible_evidence: visible map evidence that supports the criterion
+- mapped_visible_relationships: visible source -> relationship -> target connections that support the criterion
+- missing_or_unclear_evidence: what is missing or unclear from the extracted evidence
+
+Return concise JSON only using this structure:
+{json.dumps(mapping_schema, indent=2)}
+
+EXTRACTED VISIBLE EVIDENCE:
+{extracted_evidence}
+
+EXTRACTED VISIBLE RELATIONSHIPS:
+{relationships}
+"""
+
+
+def _request_llama4_text(
+    client: Any,
+    prompt: str,
+    *,
+    max_tokens: int,
+    step_name: str,
+) -> tuple[str, Any]:
+    response = client.chat.completions.create(
+        model=LLAMA4_MODEL,
+        temperature=0,
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return _require_response_content(response, step_name).strip(), response
 
 
 def _render_llama_tiles(
@@ -2336,28 +2509,77 @@ def _run_llama_staged_pipeline(
     extracted_evidence = "\n\n".join(evidence_sections)
     evidence_path = Path(f"{debug_prefix}_extracted_evidence.txt")
     evidence_path.write_text(extracted_evidence, encoding="utf-8")
+    relationships = _extract_relationship_lines(extracted_evidence)
+    relationships_path = Path(f"{debug_prefix}_relationship_extraction.txt")
+    relationships_path.write_text(relationships, encoding="utf-8")
     stage_metadata["evidence_quality"] = _llama_evidence_quality(
         extracted_evidence
     )
+    stage_metadata["relationship_extraction_path"] = str(relationships_path)
+
+    mapping_prompt = _build_evidence_mapping_prompt(extracted_evidence, relationships)
+    mapping_prompt_path = Path(f"{debug_prefix}_evidence_mapping_prompt.txt")
+    mapping_prompt_path.write_text(mapping_prompt, encoding="utf-8")
+    mapping_started = time.perf_counter()
+    mapping_response: Any | None = None
+    try:
+        evidence_mapping, mapping_response = _request_llama4_text(
+            client,
+            mapping_prompt,
+            max_tokens=2200,
+            step_name="evidence-to-rubric mapping",
+        )
+        evidence_mapping_path = Path(f"{debug_prefix}_evidence_mapping.json")
+        evidence_mapping_path.write_text(evidence_mapping, encoding="utf-8")
+        stage_metadata["evidence_mapping"] = {
+            "prompt_path": str(mapping_prompt_path),
+            "mapping_path": str(evidence_mapping_path),
+            "prompt_character_length": len(mapping_prompt),
+            "response_time_seconds": round(time.perf_counter() - mapping_started, 3),
+            "raw_response": _response_to_debug_text(mapping_response),
+            **_response_metrics(mapping_response),
+        }
+    except Exception as exc:
+        evidence_mapping_path = Path(f"{debug_prefix}_evidence_mapping_failed.txt")
+        evidence_mapping_path.write_text(
+            _response_to_debug_text(mapping_response) or repr(exc),
+            encoding="utf-8",
+        )
+        stage_metadata["evidence_mapping"] = {
+            "prompt_path": str(mapping_prompt_path),
+            "mapping_path": str(evidence_mapping_path),
+            "prompt_character_length": len(mapping_prompt),
+            "response_time_seconds": round(time.perf_counter() - mapping_started, 3),
+            "raw_response": _response_to_debug_text(mapping_response),
+            "error": _nvidia_error_message(exc),
+            **_response_metrics(mapping_response),
+        }
+        metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
+        raise ModelResponseError(
+            f"Llama 4 evidence mapping failed: {_nvidia_error_message(exc)}",
+            raw_response=mapping_response or repr(exc),
+        ) from exc
 
     grading_prompt = build_model_prompt("Llama 4", map_file, LLAMA4_MODEL) + f"""
 
-Grade using ONLY the evidence Llama 4 extracted from the concept-map tiles below. Do not infer from outside medical knowledge or from what the map should contain. Consolidate evidence across all four tiles before treating a tile-level item as globally missing. Treat "None visible" as absent evidence only when no other tile supplies it.
+Grade using ONLY the mapped evidence below. Do not infer from outside medical knowledge or from what the map should contain. Consolidate evidence across all four tiles before treating a tile-level item as globally missing. Treat "None visible" as absent evidence only when no other tile supplies it.
 
-Discrimination rules:
-- Isolated concept labels without a visible meaningful relationship cannot justify score 3 or 4.
-- Score 4 only when evidence is detailed, synthesized, comprehensive, and explicitly connected.
-- Score 3 only when evidence is relevant and mostly synthesized with clear relationships.
-- Score 2 when evidence is present but general, incomplete, isolated, or weakly connected.
-- Score 1 when evidence is absent, irrelevant, unreadable, or unclear.
-- Missing evidence must lower the relevant criterion.
-- Do not give a weak map high scores merely because it contains some correct medical terms.
-- Every criterion scored 3 or 4 must cite a specific visible source-to-target relationship in evidence_from_map. Without specific relationship evidence, the maximum score is 2.
+Required grading process:
+1. Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
+2. Use the exact score descriptors from rubric/concept_map_rubric.json included above.
+3. Grade each exact criterion only from mapped_visible_evidence and mapped_visible_relationships.
+4. If evidence is missing, score low according to the exact rubric descriptor.
+5. Isolated labels without mapped visible relationships cannot support high Integration/Application scores.
+6. Every score and Yes/No decision must be assigned independently by Llama 4 from the mapped evidence.
 
-Every score and Yes/No decision must be assigned independently by Llama 4 from this extracted evidence.
-
-EXTRACTED CONCEPT-MAP EVIDENCE:
+EXTRACTED VISIBLE EVIDENCE:
 {extracted_evidence}
+
+EXTRACTED VISIBLE RELATIONSHIPS:
+{relationships}
+
+MAPPED EVIDENCE TO EXACT RUBRIC CRITERIA:
+{evidence_mapping}
 """
     grading_prompt_path = Path(f"{debug_prefix}_grading_prompt.txt")
     grading_prompt_path.write_text(grading_prompt, encoding="utf-8")
@@ -2414,6 +2636,9 @@ EXTRACTED CONCEPT-MAP EVIDENCE:
         **stage_metadata,
         "pipeline_debug_path": str(metadata_path),
         "evidence_path": str(evidence_path),
+        "relationship_extraction_path": str(relationships_path),
+        "evidence_mapping_path": str(evidence_mapping_path),
+        "evidence_mapping_prompt_path": str(mapping_prompt_path),
         "grading_prompt_path": str(grading_prompt_path),
         "image_bytes": full_path.stat().st_size,
         "image_transport": "four_inline_base64_tiles_for_extraction_only",
