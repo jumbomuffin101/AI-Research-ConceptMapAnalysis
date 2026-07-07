@@ -26,7 +26,7 @@ def create_client():
     return create_nvidia_client()
 
 
-MODEL = "meta/llama-3.2-90b-vision-instruct"
+MODEL = "microsoft/phi-4-multimodal-instruct"
 
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
@@ -59,13 +59,13 @@ MAPS = [
         "label": "Map 1",
         "map_file": "ConceptMap1.pdf",
         "path": "maps/ConceptMap1.pdf",
-        "output": "outputs/gradingV5/grounded_map1_llama.json",
+        "output": "outputs/gradingV5/grounded_map1_phi4.json",
     },
     {
         "label": "Map 2",
         "map_file": "ConceptMap2.pdf",
         "path": "maps/ConceptMap2.pdf",
-        "output": "outputs/gradingV5/grounded_map2_llama.json",
+        "output": "outputs/gradingV5/grounded_map2_phi4.json",
     },
 ]
 
@@ -435,12 +435,12 @@ def extract_evidence(client, image, debug_prefix):
     )
     content, reason = _response_content(response)
     if reason:
-        raise RuntimeError(f"Llama evidence extraction failed: {reason}")
+        raise RuntimeError(f"Phi-4 evidence extraction failed: {reason}")
     evidence = json.loads(clean_json_output(content))
     missing = [field for field in EVIDENCE_FIELDS if field not in evidence]
     if missing:
         raise RuntimeError(
-            "Llama evidence extraction is missing fields: " + ", ".join(missing)
+            "Phi-4 evidence extraction is missing fields: " + ", ".join(missing)
         )
     for field in EVIDENCE_FIELDS:
         if not isinstance(evidence[field], list) or not all(
@@ -548,7 +548,7 @@ def expand_compact(data, map_file):
         decision = data[overall_key]
         domain["overall_decision"] = decision
         domain["if_no_explanation"] = (
-            f"{label} is marked No because Llama identified insufficient visible evidence for this domain."
+            f"{label} is marked No because Phi-4 identified insufficient visible evidence for this domain."
             if decision == "No"
             else ""
         )
@@ -640,7 +640,7 @@ def plain_decision(section, field, notes):
     match = re.search(rf"(?im)^\s*{re.escape(field)}\s*:\s*(Yes|No)\s*$", section)
     if match:
         return match.group(1)
-    notes.append(f"Llama omitted {field}; it defaulted to No.")
+    notes.append(f"Phi-4 omitted {field}; it defaulted to No.")
     return "No"
 
 
@@ -702,7 +702,7 @@ def parse_plain_grading(text, map_file):
             decision = global_decisions[index]
         else:
             decision = "No"
-            notes.append(f"Llama omitted {group}.overall_decision; it defaulted to No.")
+            notes.append(f"Phi-4 omitted {group}.overall_decision; it defaulted to No.")
         result[group]["overall_decision"] = decision
         result[group]["if_no_explanation"] = (
             reason if decision == "No" and specific_reason(reason, group)
@@ -805,7 +805,7 @@ def run_all():
                 result, encoding="utf-8"
             )
             save_llama_raw_debug(
-                f"{debug_prefix}_llama_attempt1_raw.json",
+                f"{debug_prefix}_phi4_attempt1_raw.json",
                 response,
                 result,
                 prompt,
@@ -823,9 +823,9 @@ def run_all():
                 response = request_grade(client, retry_prompt, image)
                 result, reason = _response_content(response)
                 if reason:
-                    raise RuntimeError(f"Llama grading retry failed: {reason}")
+                    raise RuntimeError(f"Phi-4 grading retry failed: {reason}")
                 save_llama_raw_debug(
-                    f"{debug_prefix}_llama_attempt2_raw.json",
+                    f"{debug_prefix}_phi4_attempt2_raw.json",
                     response,
                     result,
                     retry_prompt,
@@ -845,7 +845,7 @@ def run_all():
                         f"NVIDIA grading request failed during calibration: {reason}"
                     )
                 save_llama_raw_debug(
-                    f"{debug_prefix}_llama_calibration_raw.json",
+                    f"{debug_prefix}_phi4_calibration_raw.json",
                     response,
                     result,
                     calibration_prompt,

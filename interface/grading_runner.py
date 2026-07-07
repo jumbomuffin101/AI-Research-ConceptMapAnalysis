@@ -25,11 +25,11 @@ OUTPUT_DIR = PROJECT_ROOT / "outputs" / "web_demo"
 DEBUG_DIR = OUTPUT_DIR / "debug"
 
 GEMMA_MODEL = "google/gemma-4-26b-a4b-it:free"
-NEMOTRON_MODEL = "meta/llama-3.2-90b-vision-instruct"
+PHI4_MODEL = "microsoft/phi-4-multimodal-instruct"
 
 GRADER_MODULES = {
     "Gemma": None,
-    "Llama": None,
+    "Phi-4": None,
 }
 
 MODEL_CONFIGS = {
@@ -37,8 +37,8 @@ MODEL_CONFIGS = {
         "model_id": GEMMA_MODEL,
         "max_tokens": 2000,
     },
-    "Llama": {
-        "model_id": NEMOTRON_MODEL,
+    "Phi-4": {
+        "model_id": PHI4_MODEL,
         "max_tokens": 2500,
     },
 }
@@ -49,10 +49,10 @@ MODEL_PROVIDER_INFO = {
         "base_url": "https://openrouter.ai/api/v1",
         "model": GEMMA_MODEL,
     },
-    "Llama": {
+    "Phi-4": {
         "provider": "NVIDIA NIM",
         "base_url": "https://integrate.api.nvidia.com/v1",
-        "model": NEMOTRON_MODEL,
+        "model": PHI4_MODEL,
     },
 }
 
@@ -150,8 +150,8 @@ def selected_model_names(selection: str) -> list[str]:
     normalized = selection.strip()
     routes = {
         "Gemma": ["Gemma"],
-        "Llama": ["Llama"],
-        "Both": ["Gemma", "Llama"],
+        "Phi-4": ["Phi-4"],
+        "Both": ["Gemma", "Phi-4"],
     }
     try:
         return routes[normalized]
@@ -165,8 +165,8 @@ def model_debug_lines(model_names: Iterable[str] | None = None) -> list[str]:
         return [
             "Gemma provider: OpenRouter",
             f"Gemma model: {GEMMA_MODEL}",
-            "Llama provider: NVIDIA NIM",
-            f"Llama model: {NEMOTRON_MODEL}",
+            "Phi-4 provider: NVIDIA NIM",
+            f"Phi-4 model: {PHI4_MODEL}",
         ]
 
     lines = []
@@ -196,7 +196,7 @@ def render_pdf_image(pdf_path: Path, model_name: str) -> str:
             if document.page_count < 1:
                 raise InvalidPDFError("The uploaded PDF has no pages.")
             page = document[0]
-            scale = 2.0 if model_name == "Llama" else 1.0
+            scale = 2.0 if model_name == "Phi-4" else 1.0
             pixmap = page.get_pixmap(
                 matrix=fitz.Matrix(scale, scale),
                 colorspace=fitz.csRGB,
@@ -204,7 +204,7 @@ def render_pdf_image(pdf_path: Path, model_name: str) -> str:
             )
             image_bytes = (
                 pixmap.tobytes("jpeg", jpg_quality=80)
-                if model_name == "Llama"
+                if model_name == "Phi-4"
                 else pixmap.tobytes("png")
             )
             return base64.b64encode(image_bytes).decode("utf-8")
@@ -294,7 +294,7 @@ Use this exact JSON structure:
 
 def build_model_prompt(model_name: str, map_file: str, model_id: str) -> str:
     """Build full-schema prompts while keeping Gemma's prompt unchanged."""
-    if model_name != "Llama":
+    if model_name != "Phi-4":
         return build_web_prompt(map_file, model_id)
 
     rubric = json.dumps(load_summative_rubric(), separators=(",", ":"))
@@ -581,7 +581,7 @@ def _save_failed_response(
     """Persist failed model content for later debugging."""
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     debug_path = DEBUG_DIR / (
-        f"{timestamp}_{run_id}_{file_stem}_{model_name.lower()}_failure.json"
+        f"{timestamp}_{run_id}_{file_stem}_{_model_slug(model_name)}_failure.json"
     )
     payload = {
         "timestamp": timestamp,
@@ -602,7 +602,7 @@ def _save_nemotron_debug_image(
     image_bytes = base64.b64decode(image, validate=True)
     _, extension = _image_media_type(image_bytes)
     image_path = DEBUG_DIR / (
-        f"{timestamp}_{run_id}_{file_stem}_llama_request{extension}"
+        f"{timestamp}_{run_id}_{file_stem}_phi4_request{extension}"
     )
     image_path.write_bytes(image_bytes)
     return image_path
@@ -627,13 +627,13 @@ def _save_nemotron_trace(
     """Persist a complete, per-run NVIDIA request/response trace."""
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     debug_path = DEBUG_DIR / (
-        f"{timestamp}_{run_id}_{file_stem}_llama_trace.json"
+        f"{timestamp}_{run_id}_{file_stem}_phi4_trace.json"
     )
     payload = {
         "timestamp": timestamp,
         "provider": "NVIDIA NIM",
         "base_url": "https://integrate.api.nvidia.com/v1",
-        "model_id": NEMOTRON_MODEL,
+        "model_id": PHI4_MODEL,
         "map_filename": map_filename,
         "source_pdf_sha256": hashlib.sha256(pdf_path.read_bytes()).hexdigest(),
         "prompt_text": prompt,
@@ -664,21 +664,21 @@ def _save_llama_raw_debug(
     max_tokens: int,
     image_file_size: int,
 ) -> Path:
-    """Save Llama content and generation metadata before JSON parsing."""
+    """Save Phi-4 content and generation metadata before JSON parsing."""
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     choices = getattr(response, "choices", None)
     finish_reason = (
         getattr(choices[0], "finish_reason", None) if choices else None
     )
     debug_path = DEBUG_DIR / (
-        f"{timestamp}_{run_id}_{file_stem}_llama_attempt{attempt}_raw.json"
+        f"{timestamp}_{run_id}_{file_stem}_phi4_attempt{attempt}_raw.json"
     )
     debug_path.write_text(
         json.dumps(
             {
                 "provider": "NVIDIA NIM",
                 "base_url": "https://integrate.api.nvidia.com/v1",
-                "model": NEMOTRON_MODEL,
+                "model": PHI4_MODEL,
                 "raw_text": raw_text,
                 "cleaned_text": _strip_json_fences(raw_text),
                 "prompt_length": len(prompt),
@@ -761,7 +761,7 @@ def create_nvidia_client(*, disable_sdk_retries: bool = False) -> Any:
 def _create_client(
     model_name: str, *, disable_sdk_retries: bool = False
 ) -> Any:
-    if model_name == "Llama":
+    if model_name == "Phi-4":
         return create_nvidia_client(disable_sdk_retries=disable_sdk_retries)
     return create_openrouter_client(disable_sdk_retries=disable_sdk_retries)
 
@@ -809,7 +809,7 @@ def _prepare_request_image(
         "image_url": {"url": f"data:{media_type};base64,{image}"},
     }
     text_item = {"type": "text", "text": prompt}
-    content = [image_item, text_item] if model_name == "Llama" else [
+    content = [image_item, text_item] if model_name == "Phi-4" else [
         text_item,
         image_item,
     ]
@@ -832,7 +832,7 @@ def _write_health_debug(
             {
                 "provider": "NVIDIA NIM",
                 "base_url": "https://integrate.api.nvidia.com/v1",
-                "model_id": NEMOTRON_MODEL,
+                "model_id": PHI4_MODEL,
                 "prompt_length": prompt_length,
                 "image_file_size": image_file_size,
                 "payload_shape": payload_shape,
@@ -849,11 +849,11 @@ def _write_health_debug(
 def _require_response_content(response: Any, test_name: str) -> str:
     choices = getattr(response, "choices", None)
     if not choices:
-        raise ModelResponseError(f"Llama {test_name} returned no response choices.")
+        raise ModelResponseError(f"Phi-4 {test_name} returned no response choices.")
     message = getattr(choices[0], "message", None)
     content = getattr(message, "content", None)
     if not isinstance(content, str) or not content.strip():
-        raise ModelResponseError(f"Llama {test_name} returned empty content.")
+        raise ModelResponseError(f"Phi-4 {test_name} returned empty content.")
     return content
 
 
@@ -905,7 +905,7 @@ def _run_nemotron_health_tests(
     """Gate full grading on text and image calls using NVIDIA's sample format."""
     text_prompt = "Reply with OK."
     text_payload = {
-        "model": NEMOTRON_MODEL,
+        "model": PHI4_MODEL,
         "messages": [{"role": "user", "content": text_prompt}],
         "temperature": 0,
         "max_tokens": 16,
@@ -939,10 +939,10 @@ def _run_nemotron_health_tests(
         "separated by semicolons."
     )
     image_content, image_metadata = _prepare_request_image(
-        "Llama", preflight_prompt, image
+        "Phi-4", preflight_prompt, image
     )
     image_payload = {
-        "model": NEMOTRON_MODEL,
+        "model": PHI4_MODEL,
         "messages": [{"role": "user", "content": image_content}],
         "temperature": 0,
         "max_tokens": 100,
@@ -1134,7 +1134,7 @@ def _compact_evidence(data: dict[str, Any], key: str) -> list[str]:
 def _expand_nemotron_compact(
     data: dict[str, Any], map_file: str
 ) -> dict[str, Any]:
-    result = build_spring_schema(map_file, NEMOTRON_MODEL)
+    result = build_spring_schema(map_file, PHI4_MODEL)
     strengths: list[str] = []
     for group, (score_key, overall_key, evidence_key, label) in NEMOTRON_DOMAIN_MAP.items():
         domain = result[group]
@@ -1173,7 +1173,7 @@ def _run_nemotron_compact_grading(
         "Nemotron", evidence_prompt, image
     )
     evidence_options: dict[str, Any] = {
-        "model": NEMOTRON_MODEL,
+        "model": PHI4_MODEL,
         "temperature": 0,
         "max_tokens": 1200,
         "messages": [{"role": "user", "content": evidence_content}],
@@ -1193,7 +1193,7 @@ def _run_nemotron_compact_grading(
     compact_prompt_path = Path(f"{debug_prefix}_compact_grading_prompt.txt")
     compact_prompt_path.write_text(compact_prompt, encoding="utf-8")
     compact_options: dict[str, Any] = {
-        "model": NEMOTRON_MODEL,
+        "model": PHI4_MODEL,
         "temperature": 0,
         "max_tokens": 2000,
         "messages": [{"role": "user", "content": compact_prompt}],
@@ -1224,7 +1224,7 @@ def _run_nemotron_compact_grading(
         retry_prompt_path = Path(f"{debug_prefix}_compact_retry_prompt.txt")
         retry_prompt_path.write_text(retry_prompt, encoding="utf-8")
         retry_options: dict[str, Any] = {
-            "model": NEMOTRON_MODEL,
+            "model": PHI4_MODEL,
             "temperature": 0,
             "max_tokens": 2000,
             "messages": [{"role": "user", "content": retry_prompt}],
@@ -1248,7 +1248,7 @@ def _run_nemotron_compact_grading(
         "image_bytes": image_metadata["image_bytes"],
         "image_transport": image_metadata["image_transport"],
         "evidence_payload_shape": {
-            "model": NEMOTRON_MODEL,
+            "model": PHI4_MODEL,
             "messages": [
                 {
                     "role": "user",
@@ -1402,7 +1402,7 @@ def _parse_nemotron_plain_text(text: str, map_file: str) -> dict[str, Any]:
     if not isinstance(text, str) or not text.strip():
         raise ModelResponseError("Nemotron returned empty plain-text grading output.")
     rubric = load_summative_rubric()
-    result = build_spring_schema(map_file, NEMOTRON_MODEL)
+    result = build_spring_schema(map_file, PHI4_MODEL)
     notes: list[str] = []
     global_decisions = re.findall(
         r"(?im)^\s*overall_decision\s*:\s*(Yes|No)\s*$", text
@@ -1484,7 +1484,7 @@ def _run_nemotron_plain_text_grading(
         "Nemotron", plain_prompt, image
     )
     options: dict[str, Any] = {
-        "model": NEMOTRON_MODEL,
+        "model": PHI4_MODEL,
         "temperature": 0,
         "max_tokens": 2000,
         "messages": [{"role": "user", "content": plain_content}],
@@ -1555,13 +1555,13 @@ def _request_model(
         client = _create_client(
             model_name, disable_sdk_retries=request_timeout is not None
         )
-        if model_name == "Llama" and perform_health_test:
+        if model_name == "Phi-4" and perform_health_test:
             for line in model_debug_lines([model_name]):
                 print(line)
             if health_debug_prefix is None:
-                raise GradingError("Llama health-test debug path is missing.")
+                raise GradingError("Phi-4 health-test debug path is missing.")
             if map_file is None:
-                raise GradingError("Llama map filename is missing.")
+                raise GradingError("Phi-4 map filename is missing.")
             preflight_description, visible_terms = _run_nemotron_health_tests(
                 client, image, health_debug_prefix
             )
@@ -1582,7 +1582,7 @@ def _request_model(
         content, request_metadata = _prepare_request_image(
             model_name, prompt, image
         )
-        if model_name == "Llama" and perform_health_test:
+        if model_name == "Phi-4" and perform_health_test:
             request_metadata["preflight_description"] = preflight_description
             request_metadata["visible_terms"] = visible_terms
             request_metadata["preflight_debug_path"] = str(
@@ -1599,7 +1599,7 @@ def _request_model(
             {"type": "text", "text": prompt},
             request_metadata["payload_shape"],
         ]
-        if model_name == "Llama":
+        if model_name == "Phi-4":
             payload_shape.reverse()
         request_metadata["outgoing_payload_shape"] = {
             "model": config["model_id"],
@@ -1635,7 +1635,7 @@ def _request_model(
                 "Input is too large for the current model limit. "
                 "Try a smaller PDF/image or use the local CLI pipeline."
             )
-        if model_name == "Llama":
+        if model_name == "Phi-4":
             raise ModelResponseError(
                 f"NVIDIA grading request failed: {message}",
                 raw_response=getattr(exc, "raw_response", repr(exc)),
@@ -1648,7 +1648,7 @@ def _request_model(
 
     choices = getattr(response, "choices", None)
     if not choices:
-        if model_name == "Llama":
+        if model_name == "Phi-4":
             raise ModelResponseError(
                 "NVIDIA grading request failed: no response choices.",
                 raw_response=response,
@@ -1660,7 +1660,7 @@ def _request_model(
     try:
         text = choices[0].message.content
     except (AttributeError, IndexError, TypeError) as exc:
-        if model_name == "Llama":
+        if model_name == "Phi-4":
             raise ModelResponseError(
                 "NVIDIA grading request failed: malformed API response.",
                 raw_response=response,
@@ -1671,7 +1671,7 @@ def _request_model(
         ) from exc
 
     if not isinstance(text, str) or not text.strip():
-        if model_name == "Llama":
+        if model_name == "Phi-4":
             raise ModelResponseError(
                 "NVIDIA grading request failed: empty content.", raw_response=response
             )
@@ -1686,6 +1686,12 @@ def _safe_stem(filename: str) -> str:
     stem = Path(filename).stem
     cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_")
     return cleaned[:60] or "concept_map"
+
+
+def _model_slug(model_name: str) -> str:
+    if model_name == "Phi-4":
+        return "phi4"
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", model_name.lower()).strip("_") or "model"
 
 
 def _response_metrics(response: Any) -> dict[str, Any]:
@@ -1707,7 +1713,7 @@ def _response_metrics(response: Any) -> dict[str, Any]:
 def _render_llama_diagnostic_images(
     pdf_path: Path, debug_prefix: Path
 ) -> dict[int, dict[str, Any]]:
-    """Render exact 2x and 4x PNG inputs for the Llama vision comparison."""
+    """Render exact 2x and 4x PNG inputs for the Phi-4 vision comparison."""
     try:
         import fitz
     except ImportError as exc:
@@ -1765,7 +1771,7 @@ def _run_llama_vision_diagnostics(
     diagnostics: dict[str, Any] = {
         "provider": "NVIDIA NIM",
         "base_url": "https://integrate.api.nvidia.com/v1",
-        "model": NEMOTRON_MODEL,
+        "model": PHI4_MODEL,
         "renders": {
             str(scale): {key: value for key, value in render.items() if key != "base64"}
             for scale, render in renders.items()
@@ -1776,12 +1782,12 @@ def _run_llama_vision_diagnostics(
     def call_step(
         label: str, prompt_text: str, image_b64: str, max_tokens: int
     ) -> tuple[str, Any]:
-        content, _ = _prepare_request_image("Llama", prompt_text, image_b64)
+        content, _ = _prepare_request_image("Phi-4", prompt_text, image_b64)
         started = time.perf_counter()
         response: Any | None = None
         try:
             response = client.chat.completions.create(
-                model=NEMOTRON_MODEL,
+                model=PHI4_MODEL,
                 temperature=0,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": content}],
@@ -1807,7 +1813,7 @@ def _run_llama_vision_diagnostics(
                 **_response_metrics(response),
             }
             raise ModelResponseError(
-                f"Llama vision diagnostic failed during {label}.",
+                f"Phi-4 vision diagnostic failed during {label}.",
                 raw_response=response or repr(exc),
             ) from exc
         finally:
@@ -1877,7 +1883,7 @@ Only use visible information."""
         "grading",
         grading_prompt,
         selected["base64"],
-        MODEL_CONFIGS["Llama"]["max_tokens"],
+        MODEL_CONFIGS["Phi-4"]["max_tokens"],
     )
     grading_raw_path = Path(f"{debug_prefix}_grading_raw.txt")
     grading_raw_path.write_text(grading_text, encoding="utf-8")
@@ -2033,10 +2039,10 @@ def _run_llama_staged_pipeline(
     client = create_nvidia_client()
     full_path, tiles = _render_llama_tiles(pdf_path, debug_prefix)
     stage_metadata: dict[str, Any] = {
-        "pipeline": "llama_tiled_evidence_then_text_grading",
+        "pipeline": "phi4_tiled_evidence_then_text_grading",
         "provider": "NVIDIA NIM",
         "base_url": "https://integrate.api.nvidia.com/v1",
-        "model": NEMOTRON_MODEL,
+        "model": PHI4_MODEL,
         "render_matrix": "fitz.Matrix(3, 3)",
         "full_image_path": str(full_path),
         "full_image_file_size": full_path.stat().st_size,
@@ -2055,10 +2061,10 @@ def _run_llama_staged_pipeline(
                 f"[Tile {tile['index']}]."
             )
             content, _ = _prepare_request_image(
-                "Llama", tile_prompt, tile["base64"]
+                "Phi-4", tile_prompt, tile["base64"]
             )
             response = client.chat.completions.create(
-                model=NEMOTRON_MODEL,
+                model=PHI4_MODEL,
                 temperature=0,
                 max_tokens=1200,
                 messages=[{"role": "user", "content": content}],
@@ -2104,7 +2110,7 @@ def _run_llama_staged_pipeline(
                 json.dumps(stage_metadata, indent=2), encoding="utf-8"
             )
             raise ModelResponseError(
-                f"Llama evidence extraction failed for tile {tile['index']}.",
+                f"Phi-4 evidence extraction failed for tile {tile['index']}.",
                 raw_response=response or repr(exc),
             ) from exc
         finally:
@@ -2119,9 +2125,9 @@ def _run_llama_staged_pipeline(
         extracted_evidence
     )
 
-    grading_prompt = build_model_prompt("Llama", map_file, NEMOTRON_MODEL) + f"""
+    grading_prompt = build_model_prompt("Phi-4", map_file, PHI4_MODEL) + f"""
 
-Grade using ONLY the evidence Llama extracted from the concept-map tiles below. Do not infer from outside medical knowledge or from what the map should contain. Consolidate evidence across all four tiles before treating a tile-level item as globally missing. Treat "None visible" as absent evidence only when no other tile supplies it.
+Grade using ONLY the evidence Phi-4 extracted from the concept-map tiles below. Do not infer from outside medical knowledge or from what the map should contain. Consolidate evidence across all four tiles before treating a tile-level item as globally missing. Treat "None visible" as absent evidence only when no other tile supplies it.
 
 Discrimination rules:
 - Isolated concept labels without a visible meaningful relationship cannot justify score 3 or 4.
@@ -2133,7 +2139,7 @@ Discrimination rules:
 - Do not give a weak map high scores merely because it contains some correct medical terms.
 - Every criterion scored 3 or 4 must cite a specific visible source-to-target relationship in evidence_from_map. Without specific relationship evidence, the maximum score is 2.
 
-Every score and Yes/No decision must be assigned independently by Llama from this extracted evidence.
+Every score and Yes/No decision must be assigned independently by Phi-4 from this extracted evidence.
 
 EXTRACTED CONCEPT-MAP EVIDENCE:
 {extracted_evidence}
@@ -2145,9 +2151,9 @@ EXTRACTED CONCEPT-MAP EVIDENCE:
     grading_response: Any | None = None
     try:
         grading_response = client.chat.completions.create(
-            model=NEMOTRON_MODEL,
+            model=PHI4_MODEL,
             temperature=0,
-            max_tokens=MODEL_CONFIGS["Llama"]["max_tokens"],
+            max_tokens=MODEL_CONFIGS["Phi-4"]["max_tokens"],
             messages=[{"role": "user", "content": grading_prompt}],
         )
         grading_text = _require_response_content(
@@ -2181,7 +2187,7 @@ EXTRACTED CONCEPT-MAP EVIDENCE:
             **_response_metrics(grading_response),
         }
         raise ModelResponseError(
-            "Llama text-only rubric grading failed.",
+            "Phi-4 text-only rubric grading failed.",
             raw_response=grading_response or repr(exc),
         ) from exc
     finally:
@@ -2216,7 +2222,7 @@ def _append_grading_note(result: dict[str, Any], note: str) -> None:
 
 
 def _enforce_llama_relationship_caps(result: dict[str, Any]) -> int:
-    """Cap unsupported high Llama scores without inventing replacement evidence."""
+    """Cap unsupported high Phi-4 scores without inventing replacement evidence."""
     corrected = 0
     for group, fields in CATEGORY_FIELDS.items():
         section = result.get(group)
@@ -2256,7 +2262,7 @@ def _enforce_llama_relationship_caps(result: dict[str, Any]) -> int:
     if corrected:
         _append_grading_note(
             result,
-            f"Llama calibration capped {corrected} criterion score(s) at 2 because "
+            f"Phi-4 calibration capped {corrected} criterion score(s) at 2 because "
             "their evidence_from_map did not identify a specific visible relationship.",
         )
     return corrected
@@ -2284,7 +2290,7 @@ def _check_llama_discrimination(
 
     profile = _llama_score_profile(result)
     source_hash = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
-    history_path = DEBUG_DIR / "llama_score_profile_history.json"
+    history_path = DEBUG_DIR / "phi4_score_profile_history.json"
     try:
         history = json.loads(history_path.read_text(encoding="utf-8"))
         if not isinstance(history, list):
@@ -2313,7 +2319,7 @@ def _check_llama_discrimination(
                 result,
                 "Low-discrimination warning: this map and a previously graded map "
                 "with materially different extracted-evidence quality received nearly "
-                "identical Llama score profiles.",
+                "identical Phi-4 score profiles.",
             )
             request_metadata["low_discrimination_comparison"] = {
                 "prior_map_file": prior.get("map_file"),
@@ -2362,7 +2368,7 @@ def run_evaluation(
 
     for model_name in names:
         model_id = MODEL_CONFIGS[model_name]["model_id"]
-        llama_staged = model_name == "Llama"
+        llama_staged = model_name == "Phi-4"
         image = "" if llama_staged else render_pdf_image(pdf_path, model_name)
         raw_text: str | None = None
         raw_api_response: Any | None = None
@@ -2378,7 +2384,7 @@ def run_evaluation(
             )
             if llama_staged:
                 debug_prefix = (
-                    DEBUG_DIR / f"{timestamp}_{run_id}_{file_stem}_llama"
+                    DEBUG_DIR / f"{timestamp}_{run_id}_{file_stem}_phi4"
                 )
                 (
                     raw_text,
@@ -2406,7 +2412,7 @@ def run_evaluation(
                     map_file=None,
                 )
             parsed_before_validation = (
-                _load_json_with_repair(raw_text) if model_name == "Llama" else None
+                _load_json_with_repair(raw_text) if model_name == "Phi-4" else None
             )
             data = parse_model_json(raw_text)
             if llama_staged:
@@ -2417,13 +2423,15 @@ def run_evaluation(
                     pdf_path=pdf_path,
                     map_file=Path(original_filename).name,
                 )
-            cleaned_json = _cleaned_json_text(raw_text) if model_name == "Llama" else None
-            if model_name == "Llama":
+            cleaned_json = (
+                _cleaned_json_text(raw_text) if model_name == "Phi-4" else None
+            )
+            if model_name == "Phi-4":
                 parsed_after_validation = json.loads(json.dumps(data))
                 Path(
                     DEBUG_DIR
                     / (
-                        f"{timestamp}_{run_id}_{file_stem}_llama_"
+                        f"{timestamp}_{run_id}_{file_stem}_phi4_"
                         "final_parsed_grading.json"
                     )
                 ).write_text(
@@ -2445,14 +2453,14 @@ def run_evaluation(
                     error_message=None,
                 )
             output_path = OUTPUT_DIR / (
-                f"{timestamp}_{run_id}_{file_stem}_{model_name.lower()}.json"
+                f"{timestamp}_{run_id}_{file_stem}_{_model_slug(model_name)}.json"
             )
             output_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
             results.append(
                 EvaluationResult(model_name, returned_model_id, data, output_path)
             )
         except (ModelResponseError, MalformedResultError) as exc:
-            if model_name == "Llama" and image_debug_path is not None:
+            if model_name == "Phi-4" and image_debug_path is not None:
                 debug_path = _save_nemotron_trace(
                     timestamp=timestamp,
                     run_id=run_id,

@@ -32,7 +32,7 @@ uploaded_file_fingerprint = (
 )
 model_selection = st.radio(
     "Model",
-    options=["Gemma", "Llama", "Both"],
+    options=["Gemma", "Phi-4", "Both"],
     horizontal=True,
 )
 

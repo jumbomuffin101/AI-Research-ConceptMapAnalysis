@@ -31,7 +31,7 @@ PDF-to-Image Conversion
     |
     v
 Vision Language Model
-    (Gemma 4 26B A4B via OpenRouter OR Llama 3.2 90B Vision via NVIDIA NIM)
+    (Gemma 4 26B A4B via OpenRouter OR Phi-4 Multimodal via NVIDIA NIM)
     |
     v
 Concept Extraction
@@ -53,7 +53,7 @@ Interactive Web Dashboard
 
 - PDF concept map upload
 - PDF-to-image conversion
-- Dual-model evaluation (Gemma + Llama)
+- Dual-model evaluation (Gemma + Phi-4)
 - Automated concept extraction
 - Relationship detection
 - Rubric-based scoring
@@ -73,19 +73,19 @@ Interactive Web Dashboard
 ### Primary Models
 
 - `google/gemma-4-26b-a4b-it:free`
-- `meta/llama-3.2-90b-vision-instruct`
+- `microsoft/phi-4-multimodal-instruct`
 
-Gemma uses OpenRouter. Llama uses NVIDIA's official NIM API. Both models generate full Spring 2025 rubric-aligned JSON grading.
+Gemma uses OpenRouter. Phi-4 uses NVIDIA's official NIM API. Both models generate full Spring 2025 rubric-aligned JSON grading.
 
 Required environment variables:
 
 - `OPENROUTER_API_KEY` for Gemma
-- `NVIDIA_API_KEY` for Llama
+- `NVIDIA_API_KEY` for Phi-4
 
 Users may run:
 
 - Gemma only
-- Llama only
+- Phi-4 only
 - Both models simultaneously
 
 ## Repository Structure
@@ -126,7 +126,7 @@ runtime.txt
 
 ## Web Demo
 
-The Streamlit demo accepts any concept map PDF, runs Gemma, Llama, or both, and displays rubric scores, reasoning, evidence, strengths, and areas for improvement. Valid results are saved under `outputs/web_demo/`.
+The Streamlit demo accepts any concept map PDF, runs Gemma, Phi-4, or both, and displays rubric scores, reasoning, evidence, strengths, and areas for improvement. Valid results are saved under `outputs/web_demo/`.
 
 If one selected model fails, the app keeps any successful model result visible and shows a warning for the failed model. Raw failed responses are saved under `outputs/web_demo/debug/` for troubleshooting.
 
