@@ -147,7 +147,12 @@ EvaluationOutcome = EvaluationResult | EvaluationFailure
 
 def selected_model_names(selection: str) -> list[str]:
     """Translate the UI selection into model registry keys."""
-    normalized = selection.strip()
+    normalized = (
+        selection.strip()
+        .replace("‑", "-")
+        .replace("–", "-")
+        .replace("—", "-")
+    )
     routes = {
         "Gemma": ["Gemma"],
         "Phi-4": ["Phi-4"],
@@ -2368,8 +2373,8 @@ def run_evaluation(
 
     for model_name in names:
         model_id = MODEL_CONFIGS[model_name]["model_id"]
-        llama_staged = model_name == "Phi-4"
-        image = "" if llama_staged else render_pdf_image(pdf_path, model_name)
+        phi4_staged = model_name == "Phi-4"
+        image = "" if phi4_staged else render_pdf_image(pdf_path, model_name)
         raw_text: str | None = None
         raw_api_response: Any | None = None
         prompt = ""
@@ -2382,7 +2387,7 @@ def run_evaluation(
             prompt = build_model_prompt(
                 model_name, Path(original_filename).name, model_id
             )
-            if llama_staged:
+            if phi4_staged:
                 debug_prefix = (
                     DEBUG_DIR / f"{timestamp}_{run_id}_{file_stem}_phi4"
                 )
@@ -2415,7 +2420,7 @@ def run_evaluation(
                 _load_json_with_repair(raw_text) if model_name == "Phi-4" else None
             )
             data = parse_model_json(raw_text)
-            if llama_staged:
+            if phi4_staged:
                 _enforce_llama_relationship_caps(data)
                 _check_llama_discrimination(
                     result=data,
