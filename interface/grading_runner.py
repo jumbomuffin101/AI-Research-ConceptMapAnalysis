@@ -127,18 +127,27 @@ SPRING_2025_CRITERION_TEXT = {
 }
 
 EVIDENCE_EXTRACTION_FIELDS = [
-    "concepts",
+    "visible_concepts",
     "patient_data",
-    "basic_science",
-    "clinical_science",
-    "health_system_science",
+    "basic_science_concepts",
+    "clinical_science_concepts",
+    "health_system_science_concepts",
     "determinants_of_health",
     "differential_diagnosis",
     "relationships",
     "pathophysiology_flows",
-    "transfer/prior_knowledge",
-    "missing_elements",
+    "prior_or_transfer_knowledge",
+    "missing_or_unclear_elements",
 ]
+
+EVIDENCE_FIELD_ALIASES = {
+    "visible_concepts": ["concepts", "detected_concepts"],
+    "basic_science_concepts": ["basic_science"],
+    "clinical_science_concepts": ["clinical_science"],
+    "health_system_science_concepts": ["health_system_science"],
+    "prior_or_transfer_knowledge": ["transfer/prior_knowledge", "transfer_prior_knowledge"],
+    "missing_or_unclear_elements": ["missing_elements"],
+}
 
 FORBIDDEN_DECISION_TEXT = (
     "Partial",
@@ -357,17 +366,17 @@ Use this exact evidence extraction schema:
 {json.dumps(evidence_extraction_schema(), indent=2)}
 
 Field definitions:
-- concepts: visible concept/node labels
+- visible_concepts: visible concept/node labels
 - patient_data: visible patient findings, history, labs, imaging, symptoms, signs, vitals, risk factors, plan/care data
-- basic_science: visible basic science concepts
-- clinical_science: visible clinical science concepts
-- health_system_science: visible health system science concepts
+- basic_science_concepts: visible basic science concepts
+- clinical_science_concepts: visible clinical science concepts
+- health_system_science_concepts: visible health system science concepts
 - determinants_of_health: visible determinants of health (DoH)
 - differential_diagnosis: visible diagnoses or differential diagnosis items
 - relationships: visible source -> relationship -> target connections, arrows, labeled links, or explicit connected concepts
 - pathophysiology_flows: visible flows explaining pathophysiology
-- transfer/prior_knowledge: visible prior-course basic science or clinical concepts used to deepen understanding
-- missing_elements: visible gaps, unclear text, unreadable areas, or absent required rubric evidence
+- prior_or_transfer_knowledge: visible prior-course basic science or clinical concepts used to deepen understanding
+- missing_or_unclear_elements: visible gaps, unclear text, unreadable areas, or absent required rubric evidence
 
 {spring_2025_schema_field_map_text()}
 
@@ -380,14 +389,14 @@ def _parse_extracted_evidence(raw_text: str) -> dict[str, list[str]]:
     data = _load_json_with_repair(raw_text)
     evidence: dict[str, list[str]] = {}
     for field in EVIDENCE_EXTRACTION_FIELDS:
-        value = data.get(field, [])
-        if isinstance(value, str):
-            values = [value]
-        elif isinstance(value, list):
-            values = [str(item) for item in value if str(item).strip()]
-        else:
-            values = []
-        evidence[field] = _dedupe_strings(values)
+        raw_values: list[Any] = []
+        for key in [field, *EVIDENCE_FIELD_ALIASES.get(field, [])]:
+            value = data.get(key, [])
+            if isinstance(value, str):
+                raw_values.append(value)
+            elif isinstance(value, list):
+                raw_values.extend(value)
+        evidence[field] = _dedupe_strings(str(item) for item in raw_values)
     return evidence
 
 
@@ -2485,17 +2494,17 @@ def _map_evidence_to_rubric(evidence: dict[str, list[str]]) -> dict[str, Any]:
     relationship_fields = ["relationships", "pathophysiology_flows"]
     mapping_rules: dict[tuple[str, str], dict[str, Any]] = {
         ("knowledge_acquisition", "basic_science"): {
-            "support": ["basic_science"],
+            "support": ["basic_science_concepts"],
             "relationships": relationship_fields,
             "keywords": ["science", "cell", "molecular", "physiology", "anatomy", "pathophysiology"],
         },
         ("knowledge_acquisition", "health_system_science"): {
-            "support": ["health_system_science"],
+            "support": ["health_system_science_concepts"],
             "relationships": ["relationships"],
             "keywords": ["system", "care", "access", "cost", "quality", "team", "safety"],
         },
         ("knowledge_acquisition", "clinical_science"): {
-            "support": ["clinical_science", "differential_diagnosis"],
+            "support": ["clinical_science_concepts", "differential_diagnosis"],
             "relationships": ["relationships"],
             "keywords": ["diagnosis", "treatment", "symptom", "sign", "clinical", "test"],
         },
@@ -2510,52 +2519,52 @@ def _map_evidence_to_rubric(evidence: dict[str, list[str]]) -> dict[str, Any]:
             "keywords": ["determinant", "social", "housing", "food", "transport", "income", "culture", "race", "gender", "support"],
         },
         ("integration", "prioritized_differential_diagnosis"): {
-            "support": ["differential_diagnosis", "clinical_science", "patient_data"],
+            "support": ["differential_diagnosis", "clinical_science_concepts", "patient_data"],
             "relationships": ["relationships"],
             "keywords": ["ddx", "differential", "diagnosis", "must not miss", "common", "prioritized"],
         },
         ("integration", "illness_scripts"): {
-            "support": ["patient_data", "differential_diagnosis", "clinical_science"],
+            "support": ["patient_data", "differential_diagnosis", "clinical_science_concepts"],
             "relationships": ["relationships"],
             "keywords": ["illness", "script", "diagnosis", "patient", "finding"],
         },
         ("integration", "basic_to_foundational_science"): {
-            "support": ["basic_science", "concepts"],
+            "support": ["basic_science_concepts", "visible_concepts"],
             "relationships": relationship_fields,
             "keywords": ["basic", "foundational", "anatomy", "histology", "biochemistry", "genetics", "physiology", "pharmacology"],
         },
         ("integration", "patient_data_to_clinical_information"): {
-            "support": ["patient_data", "clinical_science"],
+            "support": ["patient_data", "clinical_science_concepts"],
             "relationships": ["relationships"],
             "keywords": ["patient", "clinical", "symptom", "sign", "diagnostic", "treatment", "risk"],
         },
         ("integration", "patient_data_to_basic_science"): {
-            "support": ["patient_data", "basic_science"],
+            "support": ["patient_data", "basic_science_concepts"],
             "relationships": relationship_fields,
             "keywords": ["patient", "basic", "molecular", "cellular", "physiology", "pathophysiology"],
         },
         ("application", "working_diagnosis_pathophysiology"): {
-            "support": ["pathophysiology_flows", "basic_science", "clinical_science", "differential_diagnosis"],
+            "support": ["pathophysiology_flows", "basic_science_concepts", "clinical_science_concepts", "differential_diagnosis"],
             "relationships": relationship_fields,
             "keywords": ["working", "diagnosis", "pathophysiology", "flow", "causes", "leads"],
         },
         ("application", "patient_data_pathophysiology"): {
-            "support": ["pathophysiology_flows", "patient_data", "basic_science"],
+            "support": ["pathophysiology_flows", "patient_data", "basic_science_concepts"],
             "relationships": relationship_fields,
             "keywords": ["patient", "data", "pathophysiology", "finding", "symptom", "sign"],
         },
         ("transfer", "prior_basic_science"): {
-            "support": ["transfer/prior_knowledge", "basic_science"],
+            "support": ["prior_or_transfer_knowledge", "basic_science_concepts"],
             "relationships": relationship_fields,
             "keywords": ["prior", "previous", "basic", "science"],
         },
         ("transfer", "prior_clinical_concepts"): {
-            "support": ["transfer/prior_knowledge", "clinical_science"],
+            "support": ["prior_or_transfer_knowledge", "clinical_science_concepts"],
             "relationships": ["relationships"],
             "keywords": ["prior", "previous", "clinical"],
         },
         ("transfer", "deepens_understanding"): {
-            "support": ["transfer/prior_knowledge", "pathophysiology_flows", "basic_science", "patient_data"],
+            "support": ["prior_or_transfer_knowledge", "pathophysiology_flows", "basic_science_concepts", "patient_data"],
             "relationships": relationship_fields,
             "keywords": ["so what", "deepens", "understanding", "pathophysiology", "patient", "basic"],
         },
@@ -2581,7 +2590,7 @@ def _map_evidence_to_rubric(evidence: dict[str, list[str]]) -> dict[str, Any]:
                 supporting = _dedupe_strings(evidence.get("patient_data", []))
             missing = [
                 item
-                for item in evidence.get("missing_elements", [])
+                for item in evidence.get("missing_or_unclear_elements", [])
                 if _item_matches_keywords(
                     item,
                     [field.replace("_", " "), SPRING_2025_DOMAIN_TITLES[group], *rule.get("keywords", [])],
@@ -2591,13 +2600,16 @@ def _map_evidence_to_rubric(evidence: dict[str, list[str]]) -> dict[str, Any]:
                 missing.append(
                     f"No visible evidence mapped to: {SPRING_2025_CRITERION_TEXT[group][field]}"
                 )
+            supporting = _dedupe_strings(supporting)
+            relationships = _dedupe_strings(relationships)
             mapped[group][field] = {
                 "criterion": SPRING_2025_CRITERION_TEXT[group][field],
-                "supporting_evidence": _dedupe_strings(supporting),
-                "relationship_evidence": _dedupe_strings(relationships),
+                "supporting_evidence": supporting,
+                "relationship_evidence": relationships,
                 "missing_evidence": _dedupe_strings(missing),
-                "evidence_count": len(_dedupe_strings(supporting)),
-                "relationship_count": len(_dedupe_strings(relationships)),
+                "evidence_count": len(supporting),
+                "relationship_count": len(relationships),
+                "confidence": _mapping_confidence(len(supporting), len(relationships)),
             }
     return mapped
 
@@ -2610,25 +2622,41 @@ def _is_isolated_label_evidence(items: list[str], relationships: list[str]) -> b
     return all(len(item.split()) <= 5 and not LLAMA_RELATIONSHIP_PATTERN.search(item) for item in items)
 
 
-def _deterministic_score(group: str, mapped_item: dict[str, Any]) -> tuple[int, str]:
+def _mapping_confidence(evidence_count: int, relationship_count: int) -> str:
+    if evidence_count >= 2 and relationship_count >= 1:
+        return "high"
+    if evidence_count >= 1:
+        return "medium"
+    return "low"
+
+
+def _criterion_requires_connections(group: str, field: str) -> bool:
+    return group in {"integration", "application"} or field == "deepens_understanding"
+
+
+def _deterministic_score(group: str, field: str, mapped_item: dict[str, Any]) -> tuple[int, str]:
     supporting = mapped_item.get("supporting_evidence") or []
     relationships = mapped_item.get("relationship_evidence") or []
     evidence_count = int(mapped_item.get("evidence_count") or len(supporting))
     relationship_count = int(mapped_item.get("relationship_count") or len(relationships))
 
     if not supporting:
-        return 1, "Score 1: no relevant supporting evidence was mapped to this criterion."
+        return 1, "Score 1: no relevant supporting evidence, irrelevant evidence, or unreadable/unclear evidence was mapped to this criterion."
 
     score = 2
-    reason = "Score 2: relevant terms exist but are general, incomplete, or weakly connected."
+    reason = "Score 2: relevant terms are present but general, incomplete, weakly connected, or not patient-specific when required."
 
-    if relationship_count >= 1:
+    if _criterion_requires_connections(group, field):
+        if relationship_count >= 1:
+            score = 3
+            reason = "Score 3: relevant evidence is present and mostly synthesized, with at least one meaningful relationship."
+    elif evidence_count >= 2 or relationship_count >= 1:
         score = 3
-        reason = "Score 3: relevant evidence exists and at least one meaningful relationship supports synthesis."
+        reason = "Score 3: relevant evidence is present and mostly synthesized."
 
     if evidence_count >= 2 and relationship_count >= 2:
         score = 4
-        reason = "Score 4: multiple evidence items and multiple relationships show detailed, synthesized, comprehensive understanding."
+        reason = "Score 4: evidence is detailed, synthesized, comprehensive, and includes multiple meaningful relationships or clear patient-specific integration."
 
     if _is_isolated_label_evidence(supporting, relationships):
         score = min(score, 2)
@@ -2641,6 +2669,19 @@ def _deterministic_score(group: str, mapped_item: dict[str, Any]) -> tuple[int, 
     if score == 4 and not relationships:
         score = 2
         reason = "Score capped at 2 because score 4 requires explicit relationship evidence."
+
+    if field == "determinants_of_health" and score == 4:
+        has_impact = any(
+            _item_matches_keywords(item, ["impact", "condition", "plan", "care", "prognosis", "risk", "outcome"])
+            for item in [*supporting, *relationships]
+        )
+        if evidence_count < 2 or relationship_count < 1 or not has_impact:
+            score = 3 if relationship_count >= 1 else 2
+            reason = "Score capped below 4 because DoH score 4 requires comprehensive DoH across different areas with clear impact on condition, plan of care, and/or prognosis."
+
+    if field == "patient_case_information" and score == 4 and evidence_count < 4:
+        score = 3 if evidence_count >= 2 else 2
+        reason = "Score capped below 4 because Patient Case Information score 4 requires comprehensive patient data, not just a few isolated findings."
 
     return score, reason
 
@@ -2660,7 +2701,7 @@ def _build_deterministic_result(
         scores: list[int] = []
         for field in fields:
             mapped_item = mapped_evidence[group][field]
-            score, score_reason = _deterministic_score(group, mapped_item)
+            score, score_reason = _deterministic_score(group, field, mapped_item)
             scores.append(score)
             evidence_values = _dedupe_strings(
                 [
