@@ -60,7 +60,12 @@ if st.button("Run Evaluation", type="primary"):
     else:
         st.session_state.pop("evaluation_results", None)
         try:
-            with st.spinner("Rendering the PDF and running the selected model(s)..."):
+            status_placeholder = st.empty()
+
+            def show_progress(message: str) -> None:
+                status_placeholder.info(message)
+
+            with st.spinner("Running evaluation..."):
                 with tempfile.TemporaryDirectory(prefix="concept-map-") as temp_dir:
                     pdf_path = Path(temp_dir) / "uploaded_concept_map.pdf"
                     pdf_path.write_bytes(uploaded_file.getvalue())
@@ -68,7 +73,9 @@ if st.button("Run Evaluation", type="primary"):
                         pdf_path=pdf_path,
                         model_names=selected_model_names(model_selection),
                         original_filename=uploaded_file.name,
+                        progress_callback=show_progress,
                     )
+                show_progress("Rendering results")
                 st.session_state["evaluation_results"] = results
         except GradingError as exc:
             st.error(str(exc))

@@ -27,6 +27,9 @@ DEBUG_DIR = OUTPUT_DIR / "debug"
 GEMMA_MODEL = "google/gemma-4-26b-a4b-it:free"
 LLAMA4_MODEL = "meta/llama-4-maverick-17b-128e-instruct"
 NVIDIA_INLINE_IMAGE_LIMIT_BYTES = 180_000
+MODEL_CALL_TIMEOUT_SECONDS = 90
+TOTAL_EVALUATION_TIMEOUT_SECONDS = 240
+MAX_EVIDENCE_EXTRACTION_ATTEMPTS = 2
 
 GRADER_MODULES = {
     "Gemma": None,
@@ -769,6 +772,30 @@ def _response_to_debug_text(response: Any) -> str:
     return str(response)
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _progress(progress_callback: Any | None, message: str) -> None:
+    if progress_callback is not None:
+        try:
+            progress_callback(message)
+        except Exception:
+            pass
+
+
+def _check_total_timeout(deadline: float | None, step: str) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise ModelResponseError(
+            f"Evaluation timed out during step: {step}. Total limit is 4 minutes."
+        )
+
+
+def _write_step_trace(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def _save_failed_response(
     *,
     timestamp: str,
@@ -1282,6 +1309,7 @@ def _run_nemotron_health_tests(
         "messages": [{"role": "user", "content": text_prompt}],
         "temperature": 0,
         "max_tokens": 16,
+        "timeout": MODEL_CALL_TIMEOUT_SECONDS,
     }
     text_path = Path(f"{debug_prefix}_text_health.json")
     text_response: Any | None = None
@@ -1319,6 +1347,7 @@ def _run_nemotron_health_tests(
         "messages": [{"role": "user", "content": image_content}],
         "temperature": 0,
         "max_tokens": 100,
+        "timeout": MODEL_CALL_TIMEOUT_SECONDS,
     }
     if image_metadata.get("extra_headers"):
         image_payload["extra_headers"] = image_metadata["extra_headers"]
@@ -1555,8 +1584,7 @@ def _run_nemotron_compact_grading(
         "max_tokens": 1200,
         "messages": [{"role": "user", "content": evidence_content}],
     }
-    if request_timeout is not None:
-        evidence_options["timeout"] = request_timeout
+    evidence_options["timeout"] = request_timeout or MODEL_CALL_TIMEOUT_SECONDS
     evidence_response = client.chat.completions.create(**evidence_options)
     evidence_text = _require_response_content(evidence_response, "evidence extraction")
     Path(f"{debug_prefix}_evidence_raw_response.json").write_text(
@@ -1575,8 +1603,7 @@ def _run_nemotron_compact_grading(
         "max_tokens": 2000,
         "messages": [{"role": "user", "content": compact_prompt}],
     }
-    if request_timeout is not None:
-        compact_options["timeout"] = request_timeout
+    compact_options["timeout"] = request_timeout or MODEL_CALL_TIMEOUT_SECONDS
     compact_response = client.chat.completions.create(**compact_options)
     compact_text = _require_response_content(compact_response, "compact grading")
     compact_raw_path = Path(f"{debug_prefix}_compact_grading_raw_response.json")
@@ -1606,8 +1633,7 @@ def _run_nemotron_compact_grading(
             "max_tokens": 2000,
             "messages": [{"role": "user", "content": retry_prompt}],
         }
-        if request_timeout is not None:
-            retry_options["timeout"] = request_timeout
+        retry_options["timeout"] = request_timeout or MODEL_CALL_TIMEOUT_SECONDS
         compact_response = client.chat.completions.create(**retry_options)
         compact_text = _require_response_content(compact_response, "compact grading retry")
         retry_raw_path = Path(f"{debug_prefix}_compact_retry_raw_response.json")
@@ -1866,8 +1892,7 @@ def _run_nemotron_plain_text_grading(
         "max_tokens": 2000,
         "messages": [{"role": "user", "content": plain_content}],
     }
-    if request_timeout is not None:
-        options["timeout"] = request_timeout
+    options["timeout"] = request_timeout or MODEL_CALL_TIMEOUT_SECONDS
     response = client.chat.completions.create(**options)
     plain_text = _require_response_content(response, "plain-text rubric grading")
     raw_path = Path(f"{debug_prefix}_plain_grading_raw_response.txt")
@@ -1883,6 +1908,7 @@ def _run_nemotron_plain_text_grading(
         retry_content, _ = _prepare_request_image("Nemotron", retry_prompt, image)
         retry_options = dict(options)
         retry_options["messages"] = [{"role": "user", "content": retry_content}]
+        retry_options["timeout"] = request_timeout or MODEL_CALL_TIMEOUT_SECONDS
         retry_response = client.chat.completions.create(**retry_options)
         retry_text = _require_response_content(
             retry_response, "plain-text rubric grading retry"
@@ -1997,8 +2023,7 @@ def _request_model(
                 else None
             ),
         }
-        if request_timeout is not None:
-            request_options["timeout"] = request_timeout
+        request_options["timeout"] = request_timeout or MODEL_CALL_TIMEOUT_SECONDS
         response = client.chat.completions.create(
             **request_options
         )
@@ -2178,6 +2203,7 @@ def _run_llama_vision_diagnostics(
                 "temperature": 0,
                 "max_tokens": max_tokens,
                 "messages": [{"role": "user", "content": content}],
+                "timeout": MODEL_CALL_TIMEOUT_SECONDS,
             }
             if request_metadata.get("extra_headers"):
                 request_options["extra_headers"] = request_metadata["extra_headers"]
@@ -2444,6 +2470,7 @@ def _request_llama4_text(
         temperature=0,
         max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
+        timeout=MODEL_CALL_TIMEOUT_SECONDS,
     )
     return _require_response_content(response, step_name).strip(), response
 
@@ -2775,27 +2802,99 @@ def _run_single_image_evidence_pipeline(
     image: str,
     map_file: str,
     debug_prefix: Path,
+    deadline: float | None = None,
+    progress_callback: Any | None = None,
 ) -> tuple[str, Any, dict[str, Any], Path, str]:
     """Extract evidence from one image, then score deterministically in Python."""
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    metadata_path = Path(f"{debug_prefix}_pipeline.json")
+    metadata: dict[str, Any] = {
+        "pipeline": "single_image_evidence_then_deterministic_scoring",
+        "provider": MODEL_PROVIDER_INFO[model_name]["provider"],
+        "base_url": MODEL_PROVIDER_INFO[model_name]["base_url"],
+        "model": model_id,
+        "model_role": "evidence_extraction_only",
+        "started_at": _utc_now_iso(),
+        "steps": [],
+    }
+    _write_step_trace(metadata_path, metadata)
+
+    _check_total_timeout(deadline, f"Rendering PDF for {model_name}")
+    _progress(progress_callback, "Rendering PDF")
     image_path = _save_debug_image_from_base64(image, debug_prefix)
+    metadata["request_image_path"] = str(image_path)
+    metadata["steps"].append({"step": "Rendering PDF", "completed_at": _utc_now_iso()})
+    _write_step_trace(metadata_path, metadata)
+
+    _check_total_timeout(deadline, f"Extracting {model_name} evidence")
+    _progress(progress_callback, f"Extracting {model_name} evidence")
     extraction_prompt = build_evidence_extraction_prompt(model_name)
     prompt_path = Path(f"{debug_prefix}_evidence_extraction_prompt.txt")
     prompt_path.write_text(extraction_prompt, encoding="utf-8")
+    metadata["evidence_extraction_prompt_path"] = str(prompt_path)
+    _write_step_trace(metadata_path, metadata)
 
-    returned_model_id, raw_evidence_text, raw_response, request_metadata = _request_model(
-        model_name,
-        extraction_prompt,
-        image,
-        max_tokens=2000,
-        health_debug_prefix=None,
-        map_file=None,
-        perform_health_test=False,
-    )
-    _ = returned_model_id
+    raw_response: Any | None = None
+    request_metadata: dict[str, Any] | None = None
+    raw_evidence_text = ""
+    extracted_evidence: dict[str, list[str]] | None = None
+    last_error: Exception | None = None
+    for attempt in range(1, MAX_EVIDENCE_EXTRACTION_ATTEMPTS + 1):
+        _check_total_timeout(deadline, f"Extracting {model_name} evidence attempt {attempt}")
+        attempt_started = time.monotonic()
+        try:
+            _, raw_evidence_text, raw_response, request_metadata = _request_model(
+                model_name,
+                extraction_prompt,
+                image,
+                max_tokens=2000,
+                request_timeout=MODEL_CALL_TIMEOUT_SECONDS,
+                health_debug_prefix=None,
+                map_file=None,
+                perform_health_test=False,
+            )
+            extracted_evidence = _parse_extracted_evidence(raw_evidence_text)
+            metadata["steps"].append(
+                {
+                    "step": f"Extracting {model_name} evidence",
+                    "attempt": attempt,
+                    "duration_seconds": round(time.monotonic() - attempt_started, 3),
+                    "completed_at": _utc_now_iso(),
+                    "raw_response": _response_to_debug_text(raw_response),
+                }
+            )
+            _write_step_trace(metadata_path, metadata)
+            break
+        except Exception as exc:
+            last_error = exc
+            raw_failure_path = Path(f"{debug_prefix}_evidence_extraction_attempt_{attempt}_failure.txt")
+            raw_failure_path.write_text(
+                _response_to_debug_text(raw_response) or repr(exc),
+                encoding="utf-8",
+            )
+            metadata["steps"].append(
+                {
+                    "step": f"Extracting {model_name} evidence",
+                    "attempt": attempt,
+                    "duration_seconds": round(time.monotonic() - attempt_started, 3),
+                    "failed_at": _utc_now_iso(),
+                    "error": _nvidia_error_message(exc),
+                    "debug_path": str(raw_failure_path),
+                }
+            )
+            _write_step_trace(metadata_path, metadata)
+            if attempt >= MAX_EVIDENCE_EXTRACTION_ATTEMPTS:
+                raise ModelResponseError(
+                    f"{model_name} evidence extraction failed after {attempt} attempt(s): {_nvidia_error_message(exc)}",
+                    raw_response=raw_response or repr(exc),
+                ) from exc
+    if extracted_evidence is None:
+        raise ModelResponseError(
+            f"{model_name} evidence extraction failed: {last_error}",
+            raw_response=raw_response,
+        )
     raw_path = Path(f"{debug_prefix}_evidence_extraction_raw.txt")
     raw_path.write_text(raw_evidence_text, encoding="utf-8")
-    extracted_evidence = _parse_extracted_evidence(raw_evidence_text)
     evidence_json_path = Path(f"{debug_prefix}_extracted_evidence.json")
     evidence_json_path.write_text(json.dumps(extracted_evidence, indent=2), encoding="utf-8")
     evidence_text = _evidence_to_text(extracted_evidence)
@@ -2813,6 +2912,8 @@ def _run_single_image_evidence_pipeline(
     relationships_path = Path(f"{debug_prefix}_relationship_extraction.txt")
     relationships_path.write_text(relationships, encoding="utf-8")
 
+    _check_total_timeout(deadline, "Mapping evidence to rubric")
+    _progress(progress_callback, "Mapping evidence to rubric")
     mapping_prompt = _build_evidence_mapping_prompt(evidence_text, relationships)
     mapping_prompt_path = Path(f"{debug_prefix}_evidence_mapping_prompt.txt")
     mapping_prompt_path.write_text(mapping_prompt, encoding="utf-8")
@@ -2820,6 +2921,11 @@ def _run_single_image_evidence_pipeline(
     evidence_mapping_path = Path(f"{debug_prefix}_evidence_mapping.json")
     evidence_mapping_path.write_text(json.dumps(mapped_evidence, indent=2), encoding="utf-8")
 
+    metadata["steps"].append({"step": "Mapping evidence to rubric", "completed_at": _utc_now_iso()})
+    _write_step_trace(metadata_path, metadata)
+
+    _check_total_timeout(deadline, "Applying deterministic scores")
+    _progress(progress_callback, "Applying deterministic scores")
     final_data, scoring_debug = _build_deterministic_result(
         map_file=map_file,
         model_id=model_id,
@@ -2841,30 +2947,25 @@ Model role: evidence extraction only.
     grading_raw_path = Path(f"{debug_prefix}_grading_raw.txt")
     grading_raw_path.write_text(grading_text, encoding="utf-8")
 
-    metadata = {
-        "pipeline": "single_image_evidence_then_deterministic_scoring",
-        "provider": MODEL_PROVIDER_INFO[model_name]["provider"],
-        "base_url": MODEL_PROVIDER_INFO[model_name]["base_url"],
-        "model": model_id,
-        "model_role": "evidence_extraction_only",
-        "request_image_path": str(image_path),
-        "evidence_extraction_prompt_path": str(prompt_path),
-        "evidence_extraction_raw_path": str(raw_path),
-        "evidence_path": str(evidence_path),
-        "evidence_json_path": str(evidence_json_path),
-        "relationship_extraction_path": str(relationships_path),
-        "evidence_mapping_prompt_path": str(mapping_prompt_path),
-        "evidence_mapping_path": str(evidence_mapping_path),
-        "deterministic_score_reasoning_path": str(scoring_debug_path),
-        "grading_prompt_path": str(grading_prompt_path),
-        "grading_raw_path": str(grading_raw_path),
-        "final_output_path": str(final_output_path),
-        "request_metadata": request_metadata,
-        "raw_response": _response_to_debug_text(raw_response),
-        "effective_prompt": extraction_prompt,
-    }
-    metadata_path = Path(f"{debug_prefix}_pipeline.json")
-    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    metadata.update(
+        {
+            "evidence_extraction_raw_path": str(raw_path),
+            "evidence_path": str(evidence_path),
+            "evidence_json_path": str(evidence_json_path),
+            "relationship_extraction_path": str(relationships_path),
+            "evidence_mapping_prompt_path": str(mapping_prompt_path),
+            "evidence_mapping_path": str(evidence_mapping_path),
+            "deterministic_score_reasoning_path": str(scoring_debug_path),
+            "grading_prompt_path": str(grading_prompt_path),
+            "grading_raw_path": str(grading_raw_path),
+            "final_output_path": str(final_output_path),
+            "request_metadata": request_metadata,
+            "raw_response": _response_to_debug_text(raw_response),
+            "effective_prompt": extraction_prompt,
+        }
+    )
+    metadata["steps"].append({"step": "Applying deterministic scores", "completed_at": _utc_now_iso()})
+    _write_step_trace(metadata_path, metadata)
     metadata["pipeline_debug_path"] = str(metadata_path)
     return grading_text, raw_response, metadata, image_path, grading_prompt
 
@@ -2931,11 +3032,18 @@ def _render_llama_tiles(
 
 
 def _run_llama_staged_pipeline(
-    *, pdf_path: Path, map_file: str, debug_prefix: Path
+    *,
+    pdf_path: Path,
+    map_file: str,
+    debug_prefix: Path,
+    deadline: float | None = None,
+    progress_callback: Any | None = None,
 ) -> tuple[str, Any, dict[str, Any], Path, str]:
     """Extract tile evidence with vision, then grade that evidence as text."""
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     client = create_nvidia_client()
+    _check_total_timeout(deadline, "Rendering PDF for Llama 4")
+    _progress(progress_callback, "Rendering PDF")
     full_path, tiles = _render_llama_tiles(pdf_path, debug_prefix)
     stage_metadata: dict[str, Any] = {
         "pipeline": "llama4_tiled_evidence_then_text_grading",
@@ -2946,107 +3054,135 @@ def _run_llama_staged_pipeline(
         "full_image_path": str(full_path),
         "full_image_file_size": full_path.stat().st_size,
         "tiles": [],
+        "steps": [
+            {"step": "Rendering PDF", "completed_at": _utc_now_iso()},
+        ],
     }
     metadata_path = Path(f"{debug_prefix}_pipeline.json")
+    metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
     evidence_sections: list[str] = []
     tile_evidence_items: list[dict[str, list[str]]] = []
 
     for tile in tiles:
-        started = time.perf_counter()
+        _check_total_timeout(deadline, f"Extracting Llama 4 evidence tile {tile['index']}")
+        _progress(progress_callback, "Extracting Llama 4 evidence")
         response: Any | None = None
         request_metadata: dict[str, Any] = {}
-        try:
-            tile_prompt = build_evidence_extraction_prompt(
-                "Llama 4", tile_index=tile["index"]
+        tile_prompt = build_evidence_extraction_prompt(
+            "Llama 4", tile_index=tile["index"]
+        )
+        tile_evidence: dict[str, list[str]] | None = None
+        evidence_text = ""
+        for attempt in range(1, MAX_EVIDENCE_EXTRACTION_ATTEMPTS + 1):
+            _check_total_timeout(
+                deadline,
+                f"Extracting Llama 4 evidence tile {tile['index']} attempt {attempt}",
             )
-            content, request_metadata = _prepare_request_image(
-                "Llama 4", tile_prompt, tile["base64"]
-            )
-            request_options: dict[str, Any] = {
-                "model": LLAMA4_MODEL,
-                "temperature": 0,
-                "max_tokens": 1200,
-                "messages": [{"role": "user", "content": content}],
-            }
-            if request_metadata.get("extra_headers"):
-                request_options["extra_headers"] = request_metadata["extra_headers"]
-            response = client.chat.completions.create(
-                **request_options
-            )
-            evidence_text = _require_response_content(
-                response, f"tile {tile['index']} evidence extraction"
-            ).strip()
-            tile_evidence = _parse_extracted_evidence(evidence_text)
-            tile_evidence_items.append(tile_evidence)
-            evidence_sections.append(
-                f"=== TILE {tile['index']} ===\n{_evidence_to_text(tile_evidence)}"
-            )
-            Path(f"{debug_prefix}_tile_{tile['index']}_extraction_raw.txt").write_text(
-                evidence_text, encoding="utf-8"
-            )
-            Path(f"{debug_prefix}_tile_{tile['index']}_extracted_evidence.json").write_text(
-                json.dumps(tile_evidence, indent=2), encoding="utf-8"
-            )
-            stage_metadata["tiles"].append(
-                {
-                    key: str(value) if isinstance(value, Path) else value
-                    for key, value in tile.items()
-                    if key != "base64"
+            started = time.perf_counter()
+            try:
+                content, request_metadata = _prepare_request_image(
+                    "Llama 4", tile_prompt, tile["base64"]
+                )
+                request_options: dict[str, Any] = {
+                    "model": LLAMA4_MODEL,
+                    "temperature": 0,
+                    "max_tokens": 1200,
+                    "messages": [{"role": "user", "content": content}],
+                    "timeout": MODEL_CALL_TIMEOUT_SECONDS,
                 }
-                | {
-                    "response_time_seconds": round(
-                        time.perf_counter() - started, 3
-                    ),
-                    "request_metadata": {
-                        key: value
-                        for key, value in request_metadata.items()
-                        if key != "extra_headers"
-                    },
-                    "extra_headers": (
-                        {"NVCF-INPUT-ASSET-REFERENCES": "<asset_id>"}
-                        if request_metadata.get("extra_headers")
-                        else None
-                    ),
-                    "raw_response": _response_to_debug_text(response),
-                    **_response_metrics(response),
-                }
-            )
-        except Exception as exc:
-            error_message = _nvidia_error_message(exc)
-            stage_metadata["tiles"].append(
-                {
-                    "index": tile["index"],
-                    "path": str(tile["path"]),
-                    "file_size": tile["file_size"],
-                    "response_time_seconds": round(
-                        time.perf_counter() - started, 3
-                    ),
-                    "request_metadata": {
-                        key: value
-                        for key, value in request_metadata.items()
-                        if key != "extra_headers"
-                    },
-                    "extra_headers": (
-                        {"NVCF-INPUT-ASSET-REFERENCES": "<asset_id>"}
-                        if request_metadata.get("extra_headers")
-                        else None
-                    ),
-                    "raw_response": _response_to_debug_text(response),
-                    "error": error_message,
-                    **_response_metrics(response),
-                }
-            )
-            metadata_path.write_text(
-                json.dumps(stage_metadata, indent=2), encoding="utf-8"
-            )
+                if request_metadata.get("extra_headers"):
+                    request_options["extra_headers"] = request_metadata["extra_headers"]
+                response = client.chat.completions.create(**request_options)
+                evidence_text = _require_response_content(
+                    response, f"tile {tile['index']} evidence extraction"
+                ).strip()
+                tile_evidence = _parse_extracted_evidence(evidence_text)
+                stage_metadata["tiles"].append(
+                    {
+                        key: str(value) if isinstance(value, Path) else value
+                        for key, value in tile.items()
+                        if key != "base64"
+                    }
+                    | {
+                        "attempt": attempt,
+                        "response_time_seconds": round(time.perf_counter() - started, 3),
+                        "request_metadata": {
+                            key: value
+                            for key, value in request_metadata.items()
+                            if key != "extra_headers"
+                        },
+                        "extra_headers": (
+                            {"NVCF-INPUT-ASSET-REFERENCES": "<asset_id>"}
+                            if request_metadata.get("extra_headers")
+                            else None
+                        ),
+                        "raw_response": _response_to_debug_text(response),
+                        **_response_metrics(response),
+                    }
+                )
+                metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
+                break
+            except Exception as exc:
+                error_message = _nvidia_error_message(exc)
+                raw_failure_path = Path(
+                    f"{debug_prefix}_tile_{tile['index']}_attempt_{attempt}_failure.txt"
+                )
+                raw_failure_path.write_text(
+                    _response_to_debug_text(response) or repr(exc),
+                    encoding="utf-8",
+                )
+                stage_metadata["tiles"].append(
+                    {
+                        "index": tile["index"],
+                        "path": str(tile["path"]),
+                        "file_size": tile["file_size"],
+                        "attempt": attempt,
+                        "response_time_seconds": round(time.perf_counter() - started, 3),
+                        "request_metadata": {
+                            key: value
+                            for key, value in request_metadata.items()
+                            if key != "extra_headers"
+                        },
+                        "extra_headers": (
+                            {"NVCF-INPUT-ASSET-REFERENCES": "<asset_id>"}
+                            if request_metadata.get("extra_headers")
+                            else None
+                        ),
+                        "raw_response": _response_to_debug_text(response),
+                        "error": error_message,
+                        "debug_path": str(raw_failure_path),
+                        **_response_metrics(response),
+                    }
+                )
+                metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
+                if attempt >= MAX_EVIDENCE_EXTRACTION_ATTEMPTS:
+                    raise ModelResponseError(
+                        f"Llama 4 evidence extraction failed for tile {tile['index']} after {attempt} attempt(s): {error_message}",
+                        raw_response=response or error_message,
+                    ) from exc
+        if tile_evidence is None:
             raise ModelResponseError(
-                f"Llama 4 evidence extraction failed for tile {tile['index']}: {error_message}",
-                raw_response=response or error_message,
-            ) from exc
-        finally:
-            metadata_path.write_text(
-                json.dumps(stage_metadata, indent=2), encoding="utf-8"
+                f"Llama 4 evidence extraction failed for tile {tile['index']}.",
+                raw_response=response,
             )
+        tile_evidence_items.append(tile_evidence)
+        evidence_sections.append(
+            f"=== TILE {tile['index']} ===\n{_evidence_to_text(tile_evidence)}"
+        )
+        Path(f"{debug_prefix}_tile_{tile['index']}_extraction_raw.txt").write_text(
+            evidence_text, encoding="utf-8"
+        )
+        Path(f"{debug_prefix}_tile_{tile['index']}_extracted_evidence.json").write_text(
+            json.dumps(tile_evidence, indent=2), encoding="utf-8"
+        )
+        stage_metadata["steps"].append(
+            {
+                "step": "Extracting Llama 4 evidence",
+                "tile": tile["index"],
+                "completed_at": _utc_now_iso(),
+            }
+        )
+        metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
 
     merged_evidence = _merge_evidence_dicts(tile_evidence_items)
     extracted_evidence = _evidence_to_text(merged_evidence)
@@ -3068,7 +3204,13 @@ def _run_llama_staged_pipeline(
         extracted_evidence
     )
     stage_metadata["relationship_extraction_path"] = str(relationships_path)
+    stage_metadata["steps"].append(
+        {"step": "Relationship extraction", "completed_at": _utc_now_iso()}
+    )
+    metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
 
+    _check_total_timeout(deadline, "Mapping evidence to rubric")
+    _progress(progress_callback, "Mapping evidence to rubric")
     mapping_prompt = _build_evidence_mapping_prompt(extracted_evidence, relationships)
     mapping_prompt_path = Path(f"{debug_prefix}_evidence_mapping_prompt.txt")
     mapping_prompt_path.write_text(mapping_prompt, encoding="utf-8")
@@ -3081,7 +3223,13 @@ def _run_llama_staged_pipeline(
         "mapping_path": str(evidence_mapping_path),
         "prompt_character_length": len(mapping_prompt),
     }
+    stage_metadata["steps"].append(
+        {"step": "Mapping evidence to rubric", "completed_at": _utc_now_iso()}
+    )
+    metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
 
+    _check_total_timeout(deadline, "Applying deterministic scores")
+    _progress(progress_callback, "Applying deterministic scores")
     final_data, scoring_debug = _build_deterministic_result(
         map_file=map_file,
         model_id=LLAMA4_MODEL,
@@ -3126,6 +3274,9 @@ Deterministic scoring rules:
         "deterministic_score_reasoning_path": str(scoring_debug_path),
         "final_output_path": str(final_output_path),
     }
+    stage_metadata["steps"].append(
+        {"step": "Applying deterministic scores", "completed_at": _utc_now_iso()}
+    )
     metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
 
     request_metadata = {
@@ -3285,6 +3436,7 @@ def run_evaluation(
     pdf_path: Path,
     model_names: Iterable[str],
     original_filename: str,
+    progress_callback: Any | None = None,
 ) -> list[EvaluationOutcome]:
     """Grade an uploaded PDF with each selected model and persist outcomes.
 
@@ -3304,10 +3456,26 @@ def run_evaluation(
     run_id = uuid4().hex[:8]
     file_stem = _safe_stem(original_filename)
     results: list[EvaluationOutcome] = []
+    deadline = time.monotonic() + TOTAL_EVALUATION_TIMEOUT_SECONDS
 
     for model_name in names:
         model_id = MODEL_CONFIGS[model_name]["model_id"]
         llama4_staged = model_name == "Llama 4"
+        try:
+            _check_total_timeout(deadline, f"Starting {model_name}")
+        except ModelResponseError as exc:
+            debug_path = _save_failed_response(
+                timestamp=timestamp,
+                run_id=run_id,
+                file_stem=file_stem,
+                model_name=model_name,
+                model_id=model_id,
+                error_message=str(exc),
+                raw_response=str(exc),
+            )
+            results.append(EvaluationFailure(model_name, model_id, str(exc), debug_path))
+            break
+        _progress(progress_callback, "Rendering PDF")
         image = "" if llama4_staged else render_pdf_image(pdf_path, model_name)
         raw_text: str | None = None
         raw_api_response: Any | None = None
@@ -3332,6 +3500,8 @@ def run_evaluation(
                     pdf_path=pdf_path,
                     map_file=Path(original_filename).name,
                     debug_prefix=debug_prefix,
+                    deadline=deadline,
+                    progress_callback=progress_callback,
                 )
                 returned_model_id = model_id
             else:
@@ -3351,6 +3521,8 @@ def run_evaluation(
                     image=image,
                     map_file=Path(original_filename).name,
                     debug_prefix=debug_prefix,
+                    deadline=deadline,
+                    progress_callback=progress_callback,
                 )
                 returned_model_id = model_id
             parsed_before_validation = _load_json_with_repair(raw_text)
