@@ -16,8 +16,8 @@ MODEL = "meta/llama-4-maverick-17b-128e-instruct"
 PROVIDER = "NVIDIA NIM"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 API_KEY_ENV = "NVIDIA_API_KEY"
-MAX_TOKENS = 1800
-TIMEOUT_SECONDS = 90
+MAX_TOKENS = 1600
+TIMEOUT_SECONDS = 180
 
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
@@ -43,6 +43,32 @@ CATEGORY_FIELDS = {
         "prior_clinical_concepts",
         "deepens_understanding",
     ],
+}
+
+CRITERION_TEXT = {
+    "knowledge_acquisition": {
+        "basic_science": "Identifies key knowledge from basic sciences learned this unit",
+        "health_system_science": "Identifies key knowledge from health system science learned this unit",
+        "clinical_science": "Identifies key knowledge from clinical sciences learned this unit",
+        "patient_case_information": "Extracts key information from the patient case",
+        "determinants_of_health": "Identifies key determinants of health (DoH)",
+    },
+    "integration": {
+        "prioritized_differential_diagnosis": "Includes a prioritized differential diagnosis (DDx) that contains common, must not miss, and other possible diagnoses based on patient’s unique characteristics",
+        "illness_scripts": "Connects patient data to reflect illness script(s)",
+        "basic_to_foundational_science": "Connects basic science knowledge learned in the unit to other relevant foundational science information",
+        "patient_data_to_clinical_information": "Connects patient data to other relevant clinical information",
+        "patient_data_to_basic_science": "Connects patient data to relevant basic science knowledge",
+    },
+    "application": {
+        "working_diagnosis_pathophysiology": "Concept map explains the underlying pathophysiology of the working diagnosis",
+        "patient_data_pathophysiology": "Connections explain the pathophysiology underlying the key patient data",
+    },
+    "transfer": {
+        "prior_basic_science": "Identifies relevant basic science concepts learned in previous courses",
+        "prior_clinical_concepts": "Identifies relevant clinical concepts learned in previous courses",
+        "deepens_understanding": "Uses previously learned knowledge to deepen understanding of the pathophysiology of the condition, the “So what?”",
+    },
 }
 
 
@@ -84,25 +110,34 @@ def create_client() -> Any:
     )
 
 
-def render_pdf_first_page(pdf_path: Path, output_path: Path) -> str:
-    """Render first PDF page to a compressed JPEG and return base64."""
+def render_pdf_first_page(pdf_path: Path, output_path: Path) -> dict[str, Any]:
+    """Render first PDF page to a small compressed JPEG."""
     import fitz
 
     with fitz.open(pdf_path) as document:
         if document.page_count < 1:
             raise RuntimeError("The uploaded PDF has no pages.")
         page = document[0]
-        max_width_px = 1200
-        scale = min(2.0, max_width_px / max(page.rect.width, 1))
+        max_width_px = 1000
+        scale = min(1.5, max_width_px / max(page.rect.width, 1))
         pixmap = page.get_pixmap(
             matrix=fitz.Matrix(scale, scale),
             colorspace=fitz.csRGB,
             alpha=False,
         )
-        image_bytes = pixmap.tobytes("jpeg", jpg_quality=60)
+        image_bytes = pixmap.tobytes("jpeg", jpg_quality=55)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(image_bytes)
-    return base64.b64encode(image_bytes).decode("utf-8")
+    return {
+        "base64": base64.b64encode(image_bytes).decode("utf-8"),
+        "path": output_path,
+        "width": pixmap.width,
+        "height": pixmap.height,
+        "bytes": len(image_bytes),
+        "render_matrix": f"fitz.Matrix({scale:.4f}, {scale:.4f})",
+        "max_width_px": max_width_px,
+        "jpeg_quality": 55,
+    }
 
 
 def _rubric() -> dict[str, Any]:
@@ -131,22 +166,16 @@ def schema(map_file: str) -> dict[str, Any]:
 
 
 def build_prompt(map_file: str) -> str:
-    return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
-Grade only the visible concept map image.
-
-Rubric JSON:
-{json.dumps(_rubric(), separators=(",", ":"))}
-
-Rules:
-- Scores must be integers 1, 2, 3, or 4 only.
-- Overall decisions must be exactly Yes or No only.
-- No Partial, Borderline, Maybe, 0, 5, or decimals.
-- Use brief explanations only.
-- Include evidence_from_map when visible.
-- If evidence is missing, write "No clear evidence found in the concept map."
-- Do not hallucinate evidence.
-- Return JSON only using this exact schema:
-{json.dumps(schema(map_file), separators=(",", ":"))}
+    rubric_payload = {
+        "criteria": CRITERION_TEXT,
+        "score_descriptors": _rubric(),
+    }
+    return f"""Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities. Grade visible map only.
+Rubric:{json.dumps(rubric_payload, separators=(",", ":"))}
+Rules: scores integers 1-4 only; decisions Yes/No only; no Partial/Borderline/Maybe/0/5/decimals; JSON only; no hallucinated evidence.
+Keep explanation one short sentence. evidence_from_map max 1 short item per criterion; use "No clear evidence found in the concept map." when missing.
+strengths max 2 short strings; areas_for_improvement max 2 short strings; grading_notes max 1 sentence.
+Schema:{json.dumps(schema(map_file), separators=(",", ":"))}
 """
 
 
@@ -188,10 +217,28 @@ def clean_json_output(text: str) -> str:
 
 def grade_pdf(pdf_path: Path, map_file: str, debug_prefix: Path) -> dict[str, Any]:
     image_path = Path(f"{debug_prefix}_request.jpg")
-    image_base64 = render_pdf_first_page(pdf_path, image_path)
+    image_info = render_pdf_first_page(pdf_path, image_path)
+    image_base64 = str(image_info["base64"])
     prompt = build_prompt(map_file)
     prompt_path = Path(f"{debug_prefix}_prompt.txt")
     prompt_path.write_text(prompt, encoding="utf-8")
+    debug_path = Path(f"{debug_prefix}_debug.json")
+    debug_payload = {
+        "provider": PROVIDER,
+        "base_url": BASE_URL,
+        "model": MODEL,
+        "image_path": str(image_info["path"]),
+        "image_width": image_info["width"],
+        "image_height": image_info["height"],
+        "image_bytes": image_info["bytes"],
+        "render_matrix": image_info["render_matrix"],
+        "max_width_px": image_info["max_width_px"],
+        "jpeg_quality": image_info["jpeg_quality"],
+        "prompt_characters": len(prompt),
+        "max_tokens": MAX_TOKENS,
+        "timeout_seconds": TIMEOUT_SECONDS,
+    }
+    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
     client = create_client()
     response = request_grade(client, prompt, image_base64)
@@ -210,12 +257,8 @@ def grade_pdf(pdf_path: Path, map_file: str, debug_prefix: Path) -> dict[str, An
         "image_path": image_path,
         "raw_path": raw_path,
         "debug": {
-            "provider": PROVIDER,
-            "base_url": BASE_URL,
-            "model": MODEL,
-            "image_path": str(image_path),
-            "image_bytes": image_path.stat().st_size,
-            "max_tokens": MAX_TOKENS,
-            "timeout_seconds": TIMEOUT_SECONDS,
+            **debug_payload,
+            "debug_path": str(debug_path),
+            "raw_path": str(raw_path),
         },
     }
