@@ -1,4 +1,4 @@
-"""Direct Phi-4 grader for Spring 2025 concept map evaluation."""
+"""Direct Nemotron grader for Spring 2025 concept map evaluation."""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUBRIC_PATH = PROJECT_ROOT / "rubric" / "concept_map_rubric.json"
 
-MODEL = "microsoft/phi-4-multimodal-instruct"
-PROVIDER = "NVIDIA NIM"
-BASE_URL = "https://integrate.api.nvidia.com/v1"
-API_KEY_ENV = "NVIDIA_API_KEY"
+MODEL = "nvidia/nemotron-nano-12b-v2-vl:free"
+PROVIDER = "OpenRouter"
+BASE_URL = "https://openrouter.ai/api/v1"
+API_KEY_ENV = "OPENROUTER_API_KEY"
 MAX_TOKENS = 1600
 TIMEOUT_SECONDS = 180
 
@@ -188,10 +188,15 @@ def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
         messages=[
             {
                 "role": "user",
-                "content": (
-                    f'<img src="data:image/jpeg;base64,{image_base64}" />\n\n'
-                    f"{prompt}"
-                ),
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_base64}"
+                        },
+                    },
+                ],
             }
         ],
     )
@@ -200,10 +205,10 @@ def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
 def response_text(response: Any) -> str:
     choices = getattr(response, "choices", None)
     if not choices:
-        raise RuntimeError("Phi-4 returned no response choices.")
+        raise RuntimeError("Nemotron returned no response choices.")
     text = getattr(choices[0].message, "content", None)
     if not isinstance(text, str) or not text.strip():
-        raise RuntimeError("Phi-4 returned empty content.")
+        raise RuntimeError("Nemotron returned empty content.")
     return text
 
 

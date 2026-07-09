@@ -192,14 +192,8 @@ def display_failure(result: Any) -> None:
         st.warning("NVIDIA image input failed")
     elif error_message.startswith("NVIDIA grading request failed"):
         st.warning(error_message)
-    elif error_message == "Phi-4 returned empty content.":
+    elif error_message == "Nemotron returned empty content.":
         st.warning(f"{model_name} returned empty content.")
-    elif "NVIDIA NIM rejected the image payload format" in error_message:
-        st.warning(
-            "NVIDIA NIM rejected the image payload format. The request likely "
-            "needs NVIDIA's asset upload/image format instead of the current "
-            "base64 image_url."
-        )
     elif "implausible all-4 evaluation" in error_message:
         st.warning(
             f"{model_name} returned an implausible all-4 evaluation. "
