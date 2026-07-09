@@ -118,14 +118,14 @@ def render_pdf_first_page(pdf_path: Path, output_path: Path) -> dict[str, Any]:
         if document.page_count < 1:
             raise RuntimeError("The uploaded PDF has no pages.")
         page = document[0]
-        max_width_px = 1000
-        scale = min(1.5, max_width_px / max(page.rect.width, 1))
+        max_width_px = 1800
+        scale = max_width_px / max(page.rect.width, 1)
         pixmap = page.get_pixmap(
             matrix=fitz.Matrix(scale, scale),
             colorspace=fitz.csRGB,
             alpha=False,
         )
-        image_bytes = pixmap.tobytes("jpeg", jpg_quality=55)
+        image_bytes = pixmap.tobytes("jpeg", jpg_quality=85)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(image_bytes)
     return {
@@ -136,7 +136,7 @@ def render_pdf_first_page(pdf_path: Path, output_path: Path) -> dict[str, Any]:
         "bytes": len(image_bytes),
         "render_matrix": f"fitz.Matrix({scale:.4f}, {scale:.4f})",
         "max_width_px": max_width_px,
-        "jpeg_quality": 55,
+        "jpeg_quality": 85,
     }
 
 
