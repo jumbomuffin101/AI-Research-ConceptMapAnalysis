@@ -1161,7 +1161,7 @@ def _prepare_request_image(
     media_type, _ = _image_media_type(image_bytes)
 
     if model_name == "Llama 4":
-        description = f"Llama 4 concept map tile {hashlib.sha256(image_bytes).hexdigest()[:12]}"
+        description = f"Llama 4 concept map image {hashlib.sha256(image_bytes).hexdigest()[:12]}"
         if len(image_bytes) > NVIDIA_INLINE_IMAGE_LIMIT_BYTES:
             asset_id, asset_metadata = _upload_nvidia_asset(
                 image_bytes, media_type, description
@@ -2320,7 +2320,7 @@ Only use visible information."""
     return grading_text, grading_response, metadata, Path(selected["path"])
 
 
-LLAMA_EXTRACTION_PROMPT = f"""Read this concept-map tile and extract ONLY evidence that is visibly present. Do not grade, infer missing content, or use outside medical knowledge.
+LLAMA_EXTRACTION_PROMPT = f"""Read this concept-map image and extract ONLY evidence that is visibly present. Do not grade, infer missing content, or use outside medical knowledge.
 
 The downstream grader uses the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly. Extract evidence relevant to these exact domains and criteria:
 {spring_2025_schema_field_map_text()}
@@ -2353,9 +2353,9 @@ EXPLICIT_RELATIONSHIPS
 List visible source -> relationship -> target connections. Do not infer a connection merely because two concepts are medically related.
 
 MISSING_OR_UNCLEAR_BY_DOMAIN
-List evidence missing or unclear in this tile for Knowledge Acquisition, Integration, Application, and Transfer. This is tile-level only; do not claim an item is absent from the entire map.
+List evidence missing or unclear in this image for Knowledge Acquisition, Integration, Application, and Transfer.
 
-Prefix every extracted item with the tile number supplied below. Write "None visible" under a heading when appropriate."""
+Write "None visible" under a heading when appropriate."""
 
 
 def _llama_evidence_quality(extracted_evidence: str) -> dict[str, int]:
@@ -2970,10 +2970,10 @@ Model role: evidence extraction only.
     return grading_text, raw_response, metadata, image_path, grading_prompt
 
 
-def _render_llama_tiles(
+def _render_llama_full_image(
     pdf_path: Path, debug_prefix: Path
-) -> tuple[Path, list[dict[str, Any]]]:
-    """Render a 3x full-page PNG and four exact page quadrants."""
+) -> dict[str, Any]:
+    """Render one lightweight full-page JPEG for Llama 4 evidence extraction."""
     try:
         import fitz
     except ImportError as exc:
@@ -2986,45 +2986,25 @@ def _render_llama_tiles(
             if document.page_count < 1:
                 raise InvalidPDFError("The uploaded PDF has no pages.")
             page = document[0]
-            matrix = fitz.Matrix(3, 3)
-            full_pixmap = page.get_pixmap(
-                matrix=matrix, colorspace=fitz.csRGB, alpha=False
+            matrix = fitz.Matrix(2, 2)
+            pixmap = page.get_pixmap(
+                matrix=matrix,
+                colorspace=fitz.csRGB,
+                alpha=False,
             )
-            full_bytes = full_pixmap.tobytes("png")
-            full_path = Path(f"{debug_prefix}_full.png")
-            full_path.write_bytes(full_bytes)
-
-            page_rect = page.rect
-            mid_x = (page_rect.x0 + page_rect.x1) / 2
-            mid_y = (page_rect.y0 + page_rect.y1) / 2
-            quadrants = (
-                fitz.Rect(page_rect.x0, page_rect.y0, mid_x, mid_y),
-                fitz.Rect(mid_x, page_rect.y0, page_rect.x1, mid_y),
-                fitz.Rect(page_rect.x0, mid_y, mid_x, page_rect.y1),
-                fitz.Rect(mid_x, mid_y, page_rect.x1, page_rect.y1),
-            )
-            tiles: list[dict[str, Any]] = []
-            for index, clip in enumerate(quadrants, start=1):
-                pixmap = page.get_pixmap(
-                    matrix=matrix,
-                    clip=clip,
-                    colorspace=fitz.csRGB,
-                    alpha=False,
-                )
-                tile_bytes = pixmap.tobytes("png")
-                tile_path = Path(f"{debug_prefix}_tile_{index}.png")
-                tile_path.write_bytes(tile_bytes)
-                tiles.append(
-                    {
-                        "index": index,
-                        "path": tile_path,
-                        "width": pixmap.width,
-                        "height": pixmap.height,
-                        "file_size": len(tile_bytes),
-                        "base64": base64.b64encode(tile_bytes).decode("utf-8"),
-                    }
-                )
-            return full_path, tiles
+            image_bytes = pixmap.tobytes("jpeg", jpg_quality=75)
+            image_path = Path(f"{debug_prefix}_full_matrix2_q75.jpg")
+            image_path.write_bytes(image_bytes)
+            return {
+                "path": image_path,
+                "width": pixmap.width,
+                "height": pixmap.height,
+                "file_size": len(image_bytes),
+                "base64": base64.b64encode(image_bytes).decode("utf-8"),
+                "render_matrix": "fitz.Matrix(2, 2)",
+                "format": "jpeg",
+                "quality": 75,
+            }
     except InvalidPDFError:
         raise
     except Exception as exc:
@@ -3039,152 +3019,118 @@ def _run_llama_staged_pipeline(
     deadline: float | None = None,
     progress_callback: Any | None = None,
 ) -> tuple[str, Any, dict[str, Any], Path, str]:
-    """Extract tile evidence with vision, then grade that evidence as text."""
+    """Extract evidence from one lightweight full-page image, then score deterministically."""
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     client = create_nvidia_client()
     _check_total_timeout(deadline, "Rendering PDF for Llama 4")
     _progress(progress_callback, "Rendering PDF")
-    full_path, tiles = _render_llama_tiles(pdf_path, debug_prefix)
+    full_image = _render_llama_full_image(pdf_path, debug_prefix)
+    full_path = full_image["path"]
     stage_metadata: dict[str, Any] = {
-        "pipeline": "llama4_tiled_evidence_then_text_grading",
+        "pipeline": "llama4_full_page_evidence_then_deterministic_scoring",
         "provider": "NVIDIA NIM",
         "base_url": "https://integrate.api.nvidia.com/v1",
         "model": LLAMA4_MODEL,
-        "render_matrix": "fitz.Matrix(3, 3)",
+        "render_matrix": full_image["render_matrix"],
         "full_image_path": str(full_path),
-        "full_image_file_size": full_path.stat().st_size,
-        "tiles": [],
+        "full_image_width": full_image["width"],
+        "full_image_height": full_image["height"],
+        "full_image_file_size": full_image["file_size"],
+        "image_format": full_image["format"],
+        "image_quality": full_image["quality"],
+        "evidence_extraction": [],
         "steps": [
             {"step": "Rendering PDF", "completed_at": _utc_now_iso()},
         ],
     }
     metadata_path = Path(f"{debug_prefix}_pipeline.json")
     metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
-    evidence_sections: list[str] = []
-    tile_evidence_items: list[dict[str, list[str]]] = []
-
-    for tile in tiles:
-        _check_total_timeout(deadline, f"Extracting Llama 4 evidence tile {tile['index']}")
-        _progress(progress_callback, "Extracting Llama 4 evidence")
-        response: Any | None = None
-        request_metadata: dict[str, Any] = {}
-        tile_prompt = build_evidence_extraction_prompt(
-            "Llama 4", tile_index=tile["index"]
+    _check_total_timeout(deadline, "Extracting Llama 4 evidence")
+    _progress(progress_callback, "Extracting Llama 4 evidence")
+    response: Any | None = None
+    request_metadata: dict[str, Any] = {}
+    evidence_prompt = build_evidence_extraction_prompt("Llama 4")
+    evidence_prompt_path = Path(f"{debug_prefix}_evidence_extraction_prompt.txt")
+    evidence_prompt_path.write_text(evidence_prompt, encoding="utf-8")
+    evidence_text = ""
+    started = time.perf_counter()
+    try:
+        content, request_metadata = _prepare_request_image(
+            "Llama 4", evidence_prompt, full_image["base64"]
         )
-        tile_evidence: dict[str, list[str]] | None = None
-        evidence_text = ""
-        for attempt in range(1, MAX_EVIDENCE_EXTRACTION_ATTEMPTS + 1):
-            _check_total_timeout(
-                deadline,
-                f"Extracting Llama 4 evidence tile {tile['index']} attempt {attempt}",
-            )
-            started = time.perf_counter()
-            try:
-                content, request_metadata = _prepare_request_image(
-                    "Llama 4", tile_prompt, tile["base64"]
-                )
-                request_options: dict[str, Any] = {
-                    "model": LLAMA4_MODEL,
-                    "temperature": 0,
-                    "max_tokens": 1200,
-                    "messages": [{"role": "user", "content": content}],
-                    "timeout": MODEL_CALL_TIMEOUT_SECONDS,
-                }
-                if request_metadata.get("extra_headers"):
-                    request_options["extra_headers"] = request_metadata["extra_headers"]
-                response = client.chat.completions.create(**request_options)
-                evidence_text = _require_response_content(
-                    response, f"tile {tile['index']} evidence extraction"
-                ).strip()
-                tile_evidence = _parse_extracted_evidence(evidence_text)
-                stage_metadata["tiles"].append(
-                    {
-                        key: str(value) if isinstance(value, Path) else value
-                        for key, value in tile.items()
-                        if key != "base64"
-                    }
-                    | {
-                        "attempt": attempt,
-                        "response_time_seconds": round(time.perf_counter() - started, 3),
-                        "request_metadata": {
-                            key: value
-                            for key, value in request_metadata.items()
-                            if key != "extra_headers"
-                        },
-                        "extra_headers": (
-                            {"NVCF-INPUT-ASSET-REFERENCES": "<asset_id>"}
-                            if request_metadata.get("extra_headers")
-                            else None
-                        ),
-                        "raw_response": _response_to_debug_text(response),
-                        **_response_metrics(response),
-                    }
-                )
-                metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
-                break
-            except Exception as exc:
-                error_message = _nvidia_error_message(exc)
-                raw_failure_path = Path(
-                    f"{debug_prefix}_tile_{tile['index']}_attempt_{attempt}_failure.txt"
-                )
-                raw_failure_path.write_text(
-                    _response_to_debug_text(response) or repr(exc),
-                    encoding="utf-8",
-                )
-                stage_metadata["tiles"].append(
-                    {
-                        "index": tile["index"],
-                        "path": str(tile["path"]),
-                        "file_size": tile["file_size"],
-                        "attempt": attempt,
-                        "response_time_seconds": round(time.perf_counter() - started, 3),
-                        "request_metadata": {
-                            key: value
-                            for key, value in request_metadata.items()
-                            if key != "extra_headers"
-                        },
-                        "extra_headers": (
-                            {"NVCF-INPUT-ASSET-REFERENCES": "<asset_id>"}
-                            if request_metadata.get("extra_headers")
-                            else None
-                        ),
-                        "raw_response": _response_to_debug_text(response),
-                        "error": error_message,
-                        "debug_path": str(raw_failure_path),
-                        **_response_metrics(response),
-                    }
-                )
-                metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
-                if attempt >= MAX_EVIDENCE_EXTRACTION_ATTEMPTS:
-                    raise ModelResponseError(
-                        f"Llama 4 evidence extraction failed for tile {tile['index']} after {attempt} attempt(s): {error_message}",
-                        raw_response=response or error_message,
-                    ) from exc
-        if tile_evidence is None:
-            raise ModelResponseError(
-                f"Llama 4 evidence extraction failed for tile {tile['index']}.",
-                raw_response=response,
-            )
-        tile_evidence_items.append(tile_evidence)
-        evidence_sections.append(
-            f"=== TILE {tile['index']} ===\n{_evidence_to_text(tile_evidence)}"
-        )
-        Path(f"{debug_prefix}_tile_{tile['index']}_extraction_raw.txt").write_text(
-            evidence_text, encoding="utf-8"
-        )
-        Path(f"{debug_prefix}_tile_{tile['index']}_extracted_evidence.json").write_text(
-            json.dumps(tile_evidence, indent=2), encoding="utf-8"
-        )
-        stage_metadata["steps"].append(
+        request_options: dict[str, Any] = {
+            "model": LLAMA4_MODEL,
+            "temperature": 0,
+            "max_tokens": 1200,
+            "messages": [{"role": "user", "content": content}],
+            "timeout": MODEL_CALL_TIMEOUT_SECONDS,
+        }
+        if request_metadata.get("extra_headers"):
+            request_options["extra_headers"] = request_metadata["extra_headers"]
+        response = client.chat.completions.create(**request_options)
+        evidence_text = _require_response_content(
+            response, "Llama 4 evidence extraction"
+        ).strip()
+        merged_evidence = _parse_extracted_evidence(evidence_text)
+        stage_metadata["evidence_extraction"].append(
             {
-                "step": "Extracting Llama 4 evidence",
-                "tile": tile["index"],
-                "completed_at": _utc_now_iso(),
+                "attempt": 1,
+                "response_time_seconds": round(time.perf_counter() - started, 3),
+                "prompt_path": str(evidence_prompt_path),
+                "prompt_character_length": len(evidence_prompt),
+                "request_metadata": {
+                    key: value
+                    for key, value in request_metadata.items()
+                    if key != "extra_headers"
+                },
+                "extra_headers": (
+                    {"NVCF-INPUT-ASSET-REFERENCES": "<asset_id>"}
+                    if request_metadata.get("extra_headers")
+                    else None
+                ),
+                "raw_response": _response_to_debug_text(response),
+                **_response_metrics(response),
             }
         )
         metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
+    except Exception as exc:
+        error_message = _nvidia_error_message(exc)
+        raw_failure_path = Path(f"{debug_prefix}_evidence_extraction_failure.txt")
+        raw_failure_path.write_text(
+            _response_to_debug_text(response) or repr(exc),
+            encoding="utf-8",
+        )
+        stage_metadata["evidence_extraction"].append(
+            {
+                "attempt": 1,
+                "response_time_seconds": round(time.perf_counter() - started, 3),
+                "prompt_path": str(evidence_prompt_path),
+                "prompt_character_length": len(evidence_prompt),
+                "request_metadata": {
+                    key: value
+                    for key, value in request_metadata.items()
+                    if key != "extra_headers"
+                },
+                "extra_headers": (
+                    {"NVCF-INPUT-ASSET-REFERENCES": "<asset_id>"}
+                    if request_metadata.get("extra_headers")
+                    else None
+                ),
+                "raw_response": _response_to_debug_text(response),
+                "error": error_message,
+                "debug_path": str(raw_failure_path),
+                **_response_metrics(response),
+            }
+        )
+        metadata_path.write_text(json.dumps(stage_metadata, indent=2), encoding="utf-8")
+        raise ModelResponseError(
+            f"Llama 4 evidence extraction failed: {error_message}",
+            raw_response=response or error_message,
+        ) from exc
 
-    merged_evidence = _merge_evidence_dicts(tile_evidence_items)
+    Path(f"{debug_prefix}_evidence_extraction_raw.txt").write_text(
+        evidence_text, encoding="utf-8"
+    )
     extracted_evidence = _evidence_to_text(merged_evidence)
     evidence_path = Path(f"{debug_prefix}_extracted_evidence.txt")
     evidence_path.write_text(extracted_evidence, encoding="utf-8")
@@ -3204,6 +3150,9 @@ def _run_llama_staged_pipeline(
         extracted_evidence
     )
     stage_metadata["relationship_extraction_path"] = str(relationships_path)
+    stage_metadata["steps"].append(
+        {"step": "Extracting Llama 4 evidence", "completed_at": _utc_now_iso()}
+    )
     stage_metadata["steps"].append(
         {"step": "Relationship extraction", "completed_at": _utc_now_iso()}
     )
@@ -3291,7 +3240,7 @@ Deterministic scoring rules:
         "final_output_path": str(final_output_path),
         "grading_prompt_path": str(grading_prompt_path),
         "image_bytes": full_path.stat().st_size,
-        "image_transport": "four_inline_base64_tiles_for_extraction_only",
+        "image_transport": "single_full_page_jpeg_for_extraction_only",
         "effective_prompt": grading_prompt,
     }
     return grading_text, grading_response, request_metadata, full_path, grading_prompt
