@@ -192,7 +192,7 @@ def display_failure(result: Any) -> None:
         st.warning("NVIDIA image input failed")
     elif error_message.startswith("NVIDIA grading request failed"):
         st.warning(error_message)
-    elif error_message == "Llama returned empty content.":
+    elif error_message == "Phi-4 returned empty content.":
         st.warning(f"{model_name} returned empty content.")
     elif "NVIDIA NIM rejected the image payload format" in error_message:
         st.warning(

@@ -23,12 +23,12 @@ DEBUG_DIR = OUTPUT_DIR / "debug"
 
 MODEL_MODULES = {
     "Gemma": grade_gemma,
-    "Llama": grade_llama,
+    "Phi-4": grade_llama,
 }
 
 MODEL_IDS = {
     "Gemma": grade_gemma.MODEL,
-    "Llama": grade_llama.MODEL,
+    "Phi-4": grade_llama.MODEL,
 }
 
 CATEGORY_FIELDS = grade_gemma.CATEGORY_FIELDS
@@ -92,8 +92,8 @@ def selected_model_names(selection: str) -> list[str]:
     )
     routes = {
         "Gemma": ["Gemma"],
-        "Llama": ["Llama"],
-        "Both": ["Gemma", "Llama"],
+        "Phi-4": ["Phi-4"],
+        "Both": ["Gemma", "Phi-4"],
     }
     try:
         return routes[normalized]
@@ -103,7 +103,7 @@ def selected_model_names(selection: str) -> list[str]:
 
 def model_debug_lines(model_names: Iterable[str] | None = None) -> list[str]:
     """Return internal provider/model debug lines; app.py does not render these."""
-    names = list(model_names) if model_names is not None else ["Gemma", "Llama"]
+    names = list(model_names) if model_names is not None else ["Gemma", "Phi-4"]
     lines: list[str] = []
     for name in names:
         module = MODEL_MODULES.get(name)
@@ -340,4 +340,3 @@ def run_evaluation(
             )
 
     return results
-

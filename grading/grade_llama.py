@@ -1,4 +1,4 @@
-"""Direct Llama grader for Spring 2025 concept map evaluation."""
+"""Direct Phi-4 grader for Spring 2025 concept map evaluation."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUBRIC_PATH = PROJECT_ROOT / "rubric" / "concept_map_rubric.json"
 
-MODEL = "meta/llama-4-maverick-17b-128e-instruct"
+MODEL = "microsoft/phi-4-multimodal-instruct"
 PROVIDER = "NVIDIA NIM"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 API_KEY_ENV = "NVIDIA_API_KEY"
@@ -200,10 +200,10 @@ def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
 def response_text(response: Any) -> str:
     choices = getattr(response, "choices", None)
     if not choices:
-        raise RuntimeError("Llama returned no response choices.")
+        raise RuntimeError("Phi-4 returned no response choices.")
     text = getattr(choices[0].message, "content", None)
     if not isinstance(text, str) or not text.strip():
-        raise RuntimeError("Llama returned empty content.")
+        raise RuntimeError("Phi-4 returned empty content.")
     return text
 
 
