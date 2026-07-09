@@ -39,11 +39,11 @@ GRADER_MODULES = {
 MODEL_CONFIGS = {
     "Gemma": {
         "model_id": GEMMA_MODEL,
-        "max_tokens": 2000,
+        "max_tokens": 1800,
     },
     "Llama 4": {
         "model_id": LLAMA4_MODEL,
-        "max_tokens": 2500,
+        "max_tokens": 1800,
     },
 }
 
@@ -247,7 +247,7 @@ def model_debug_lines(model_names: Iterable[str] | None = None) -> list[str]:
 
 
 def render_pdf_image(pdf_path: Path, model_name: str) -> str:
-    """Render the uploaded PDF as a deployment-safe base64 image."""
+    """Render the uploaded PDF as a compressed deployment-safe JPEG."""
     _ = model_name
     try:
         import fitz
@@ -261,17 +261,15 @@ def render_pdf_image(pdf_path: Path, model_name: str) -> str:
             if document.page_count < 1:
                 raise InvalidPDFError("The uploaded PDF has no pages.")
             page = document[0]
-            scale = 2.0 if model_name == "Llama 4" else 1.0
+            max_width_px = 1200
+            base_scale = 2.0
+            scale = min(base_scale, max_width_px / max(page.rect.width, 1))
             pixmap = page.get_pixmap(
                 matrix=fitz.Matrix(scale, scale),
                 colorspace=fitz.csRGB,
                 alpha=False,
             )
-            image_bytes = (
-                pixmap.tobytes("jpeg", jpg_quality=80)
-                if model_name == "Llama 4"
-                else pixmap.tobytes("png")
-            )
+            image_bytes = pixmap.tobytes("jpeg", jpg_quality=60)
             return base64.b64encode(image_bytes).decode("utf-8")
     except InvalidPDFError:
         raise
@@ -495,21 +493,15 @@ def build_model_prompt(model_name: str, map_file: str, model_id: str) -> str:
     schema_json = json.dumps(schema, separators=(",", ":"))
     return f"""{spring_2025_feedback_tool_text(compact=True)}
 
-Grade this concept map image strictly against the Spring 2025 rubric above.
-Use the exact score meanings from rubric/concept_map_rubric.json.
-
-Rules:
+Grade the concept map image strictly against the rubric above.
 - Scores must be integers 1, 2, 3, or 4 only.
-- Domain overall_decision values must be exactly "Yes" or "No".
-- overall_meets_expectations must be exactly "Yes" or "No".
-- Do not use Partial, Borderline, Maybe, decimals, 0, or 5.
-- Use brief explanations.
-- Include evidence_from_map when visible.
-- If evidence is missing, write "No clear evidence found in the concept map."
+- All overall decisions must be exactly "Yes" or "No".
+- No Partial, Borderline, Maybe, 0, 5, or decimals.
+- Return JSON only.
+- Use brief explanations only.
+- Include visible evidence_from_map. If missing, write "No clear evidence found in the concept map."
 - Do not hallucinate evidence not visible in the concept map.
-- Return only valid JSON matching the schema below. No markdown or prose.
-
-JSON schema:
+Schema:
 {schema_json}
 """
 
@@ -1024,6 +1016,32 @@ def _image_media_type(image_bytes: bytes) -> tuple[str, str]:
     if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png", ".png"
     raise GradingError("The rendered request image is not a valid JPEG or PNG.")
+
+
+def _jpeg_dimensions(image_bytes: bytes) -> tuple[int | None, int | None]:
+    """Read JPEG dimensions without adding image-processing dependencies."""
+    if not image_bytes.startswith(b"\xff\xd8"):
+        return None, None
+    index = 2
+    while index + 9 < len(image_bytes):
+        if image_bytes[index] != 0xFF:
+            index += 1
+            continue
+        marker = image_bytes[index + 1]
+        index += 2
+        if marker in {0xD8, 0xD9}:
+            continue
+        if index + 2 > len(image_bytes):
+            break
+        segment_length = int.from_bytes(image_bytes[index : index + 2], "big")
+        if segment_length < 2 or index + segment_length > len(image_bytes):
+            break
+        if 0xC0 <= marker <= 0xC3:
+            height = int.from_bytes(image_bytes[index + 3 : index + 5], "big")
+            width = int.from_bytes(image_bytes[index + 5 : index + 7], "big")
+            return width, height
+        index += segment_length
+    return None, None
 
 
 def _nvidia_error_message(error: Any) -> str:
@@ -3430,14 +3448,14 @@ def _run_direct_grading_pipeline(
             "selected_model": model_name,
             "provider": MODEL_PROVIDER_INFO[model_name]["provider"],
             "model": model_id,
-            "image_mode": "full_image_direct",
+            "image_mode": "full_image_jpeg_max1200_q60",
             "retry_count": 0,
             "timeout_seconds": MODEL_CALL_TIMEOUT_SECONDS,
         },
         "runtime_debug_line": (
             f"selected_model={model_name} | "
             f"provider={MODEL_PROVIDER_INFO[model_name]['provider']} | "
-            f"model={model_id} | image_mode=full_image_direct | retry_count=0"
+            f"model={model_id} | image_mode=full_image_jpeg_max1200_q60 | retry_count=0"
         ),
         "started_at": _utc_now_iso(),
         "steps": [],
@@ -3448,8 +3466,28 @@ def _run_direct_grading_pipeline(
     _progress(progress_callback, "Rendering PDF")
     image = render_pdf_image(pdf_path, model_name)
     image_path = _save_debug_image_from_base64(image, debug_prefix)
+    image_bytes = base64.b64decode(image, validate=True)
+    image_width, image_height = _jpeg_dimensions(image_bytes)
     metadata["request_image_path"] = str(image_path)
-    metadata["steps"].append({"step": "Rendering PDF", "completed_at": _utc_now_iso()})
+    metadata["request_image"] = {
+        "path": str(image_path),
+        "bytes": len(image_bytes),
+        "width": image_width,
+        "height": image_height,
+        "format": "jpeg",
+        "max_width_px": 1200,
+        "jpeg_quality": 60,
+    }
+    metadata["steps"].append(
+        {
+            "step": "Rendering PDF",
+            "completed_at": _utc_now_iso(),
+            "debug_image_path": str(image_path),
+            "debug_image_bytes": len(image_bytes),
+            "debug_image_width": image_width,
+            "debug_image_height": image_height,
+        }
+    )
     _write_step_trace(metadata_path, metadata)
 
     _check_total_timeout(deadline, f"Running {model_name} direct grading")
