@@ -192,8 +192,8 @@ def display_failure(result: Any) -> None:
         st.warning("NVIDIA image input failed")
     elif error_message.startswith("NVIDIA grading request failed"):
         st.warning(error_message)
-    elif error_message == "Llama 4 returned empty content.":
-        st.warning("Llama 4 returned empty content.")
+    elif error_message == "Llama returned empty content.":
+        st.warning(f"{model_name} returned empty content.")
     elif "NVIDIA NIM rejected the image payload format" in error_message:
         st.warning(
             "NVIDIA NIM rejected the image payload format. The request likely "
@@ -202,7 +202,7 @@ def display_failure(result: Any) -> None:
         )
     elif "implausible all-4 evaluation" in error_message:
         st.warning(
-            "Llama 4 returned an implausible all-4 evaluation. "
+            f"{model_name} returned an implausible all-4 evaluation. "
             "Raw output saved for debugging."
         )
     elif "Input is too large for the current model limit" in error_message:
