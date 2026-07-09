@@ -490,21 +490,27 @@ Use this exact JSON structure:
 
 
 def build_model_prompt(model_name: str, map_file: str, model_id: str) -> str:
-    """Build full-schema prompts while keeping Gemma's prompt unchanged."""
-    if model_name != "Llama 4":
-        return build_web_prompt(map_file, model_id)
-
-    schema = json.dumps(
-        build_spring_schema(map_file, model_id), separators=(",", ":")
-    )
+    """Build the direct one-call grading prompt used by the Streamlit demo."""
+    schema = build_spring_schema(map_file, model_id)
+    schema_json = json.dumps(schema, separators=(",", ":"))
     return f"""{spring_2025_feedback_tool_text(compact=True)}
 
-Use the exact score descriptors above from rubric/concept_map_rubric.json.
-Grade only from mapped visible evidence extracted from the concept map. Do not use outside medical knowledge to fill missing evidence.
-Each criterion needs score, one short explanation, and brief evidence_from_map from mapped visible content.
-Each domain needs overall_decision and if_no_explanation when No.
-Return ONLY raw valid minified JSON matching this exact schema. No markdown or prose. First character {{; last character }}.
-Schema:{schema}
+Grade this concept map image strictly against the Spring 2025 rubric above.
+Use the exact score meanings from rubric/concept_map_rubric.json.
+
+Rules:
+- Scores must be integers 1, 2, 3, or 4 only.
+- Domain overall_decision values must be exactly "Yes" or "No".
+- overall_meets_expectations must be exactly "Yes" or "No".
+- Do not use Partial, Borderline, Maybe, decimals, 0, or 5.
+- Use brief explanations.
+- Include evidence_from_map when visible.
+- If evidence is missing, write "No clear evidence found in the concept map."
+- Do not hallucinate evidence not visible in the concept map.
+- Return only valid JSON matching the schema below. No markdown or prose.
+
+JSON schema:
+{schema_json}
 """
 
 
@@ -3402,6 +3408,90 @@ def _check_llama_discrimination(
     request_metadata["score_profile_history_path"] = str(history_path)
 
 
+def _run_direct_grading_pipeline(
+    *,
+    model_name: str,
+    model_id: str,
+    pdf_path: Path,
+    map_file: str,
+    debug_prefix: Path,
+    deadline: float | None = None,
+    progress_callback: Any | None = None,
+) -> tuple[str, Any, dict[str, Any], Path, str]:
+    """Run one direct image-to-rubric-JSON grading call."""
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    metadata_path = Path(f"{debug_prefix}_pipeline.json")
+    metadata: dict[str, Any] = {
+        "pipeline": "direct_image_to_strict_rubric_json",
+        "provider": MODEL_PROVIDER_INFO[model_name]["provider"],
+        "base_url": MODEL_PROVIDER_INFO[model_name]["base_url"],
+        "model": model_id,
+        "runtime_debug": {
+            "selected_model": model_name,
+            "provider": MODEL_PROVIDER_INFO[model_name]["provider"],
+            "model": model_id,
+            "image_mode": "full_image_direct",
+            "retry_count": 0,
+            "timeout_seconds": MODEL_CALL_TIMEOUT_SECONDS,
+        },
+        "runtime_debug_line": (
+            f"selected_model={model_name} | "
+            f"provider={MODEL_PROVIDER_INFO[model_name]['provider']} | "
+            f"model={model_id} | image_mode=full_image_direct | retry_count=0"
+        ),
+        "started_at": _utc_now_iso(),
+        "steps": [],
+    }
+    _write_step_trace(metadata_path, metadata)
+
+    _check_total_timeout(deadline, f"Rendering PDF for {model_name}")
+    _progress(progress_callback, "Rendering PDF")
+    image = render_pdf_image(pdf_path, model_name)
+    image_path = _save_debug_image_from_base64(image, debug_prefix)
+    metadata["request_image_path"] = str(image_path)
+    metadata["steps"].append({"step": "Rendering PDF", "completed_at": _utc_now_iso()})
+    _write_step_trace(metadata_path, metadata)
+
+    _check_total_timeout(deadline, f"Running {model_name} direct grading")
+    _progress(progress_callback, f"Running {model_name} grading")
+    prompt = build_model_prompt(model_name, map_file, model_id)
+    prompt_path = Path(f"{debug_prefix}_grading_prompt.txt")
+    prompt_path.write_text(prompt, encoding="utf-8")
+    metadata["grading_prompt_path"] = str(prompt_path)
+    metadata["grading_prompt_character_length"] = len(prompt)
+    _write_step_trace(metadata_path, metadata)
+
+    started = time.monotonic()
+    returned_model_id, raw_text, raw_response, request_metadata = _request_model(
+        model_name,
+        prompt,
+        image,
+        max_tokens=MODEL_CONFIGS[model_name]["max_tokens"],
+        request_timeout=MODEL_CALL_TIMEOUT_SECONDS,
+        health_debug_prefix=None,
+        map_file=None,
+        perform_health_test=False,
+    )
+    raw_path = Path(f"{debug_prefix}_grading_raw.txt")
+    raw_path.write_text(raw_text, encoding="utf-8")
+    metadata["request_metadata"] = request_metadata
+    metadata["raw_response"] = _response_to_debug_text(raw_response)
+    metadata["raw_grading_path"] = str(raw_path)
+    metadata["steps"].append(
+        {
+            "step": f"Running {model_name} grading",
+            "duration_seconds": round(time.monotonic() - started, 3),
+            "completed_at": _utc_now_iso(),
+            **_response_metrics(raw_response),
+        }
+    )
+    metadata["pipeline_debug_path"] = str(metadata_path)
+    metadata["effective_prompt"] = prompt
+    metadata["returned_model_id"] = returned_model_id
+    _write_step_trace(metadata_path, metadata)
+    return raw_text, raw_response, metadata, image_path, prompt
+
+
 def run_evaluation(
     pdf_path: Path,
     model_names: Iterable[str],
@@ -3430,7 +3520,6 @@ def run_evaluation(
 
     for model_name in names:
         model_id = MODEL_CONFIGS[model_name]["model_id"]
-        llama4_staged = model_name == "Llama 4"
         try:
             _check_total_timeout(deadline, f"Starting {model_name}")
         except ModelResponseError as exc:
@@ -3445,8 +3534,6 @@ def run_evaluation(
             )
             results.append(EvaluationFailure(model_name, model_id, str(exc), debug_path))
             break
-        _progress(progress_callback, "Rendering PDF")
-        image = "" if llama4_staged else render_pdf_image(pdf_path, model_name)
         raw_text: str | None = None
         raw_api_response: Any | None = None
         prompt = ""
@@ -3456,54 +3543,28 @@ def run_evaluation(
         parsed_after_validation: dict[str, Any] | None = None
         request_metadata: dict[str, Any] | None = None
         try:
-            if llama4_staged:
-                debug_prefix = (
-                    DEBUG_DIR / f"{timestamp}_{run_id}_{file_stem}_llama4"
-                )
-                (
-                    raw_text,
-                    raw_api_response,
-                    request_metadata,
-                    image_debug_path,
-                    prompt,
-                ) = _run_llama_staged_pipeline(
-                    pdf_path=pdf_path,
-                    map_file=Path(original_filename).name,
-                    debug_prefix=debug_prefix,
-                    deadline=deadline,
-                    progress_callback=progress_callback,
-                )
-                returned_model_id = model_id
-            else:
-                debug_prefix = (
-                    DEBUG_DIR
-                    / f"{timestamp}_{run_id}_{file_stem}_{_model_slug(model_name)}"
-                )
-                (
-                    raw_text,
-                    raw_api_response,
-                    request_metadata,
-                    image_debug_path,
-                    prompt,
-                ) = _run_single_image_evidence_pipeline(
-                    model_name=model_name,
-                    model_id=model_id,
-                    image=image,
-                    map_file=Path(original_filename).name,
-                    debug_prefix=debug_prefix,
-                    deadline=deadline,
-                    progress_callback=progress_callback,
-                )
-                returned_model_id = model_id
+            debug_prefix = (
+                DEBUG_DIR
+                / f"{timestamp}_{run_id}_{file_stem}_{_model_slug(model_name)}"
+            )
+            (
+                raw_text,
+                raw_api_response,
+                request_metadata,
+                image_debug_path,
+                prompt,
+            ) = _run_direct_grading_pipeline(
+                model_name=model_name,
+                model_id=model_id,
+                pdf_path=pdf_path,
+                map_file=Path(original_filename).name,
+                debug_prefix=debug_prefix,
+                deadline=deadline,
+                progress_callback=progress_callback,
+            )
+            returned_model_id = model_id
             parsed_before_validation = _load_json_with_repair(raw_text)
             data = parse_model_json(raw_text)
-            if llama4_staged and request_metadata is not None:
-                _check_llama_discrimination(
-                    result=data,
-                    request_metadata=request_metadata,
-                    pdf_path=pdf_path,
-                    map_file=Path(original_filename).name,
-                )
             cleaned_json = _cleaned_json_text(raw_text)
             parsed_after_validation = json.loads(json.dumps(data))
             final_parsed_path = (
