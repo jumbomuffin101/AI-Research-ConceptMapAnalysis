@@ -29,7 +29,7 @@ LLAMA4_MODEL = "meta/llama-4-maverick-17b-128e-instruct"
 NVIDIA_INLINE_IMAGE_LIMIT_BYTES = 180_000
 MODEL_CALL_TIMEOUT_SECONDS = 90
 TOTAL_EVALUATION_TIMEOUT_SECONDS = 240
-MAX_EVIDENCE_EXTRACTION_ATTEMPTS = 2
+MAX_GEMMA_EVIDENCE_EXTRACTION_ATTEMPTS = 2
 
 GRADER_MODULES = {
     "Gemma": None,
@@ -357,12 +357,7 @@ def evidence_extraction_schema() -> dict[str, list[str]]:
     return {field: [] for field in EVIDENCE_EXTRACTION_FIELDS}
 
 
-def build_evidence_extraction_prompt(model_name: str, tile_index: int | None = None) -> str:
-    tile_instruction = (
-        f"This is tile {tile_index} of the concept map. Prefix each extracted item with [Tile {tile_index}] when possible."
-        if tile_index is not None
-        else "Extract from the complete concept map image."
-    )
+def build_evidence_extraction_prompt(model_name: str) -> str:
     return f"""Extract visible concept-map evidence only. Do not grade. Do not assign scores. Do not infer missing content. Do not use outside medical knowledge.
 
 Use this exact evidence extraction schema:
@@ -383,7 +378,7 @@ Field definitions:
 
 {spring_2025_schema_field_map_text()}
 
-{tile_instruction}
+Extract from the complete concept map image.
 Return valid JSON only. Every field must be a list of short strings. If no evidence is visible for a field, return an empty list.
 """
 
@@ -2813,6 +2808,20 @@ def _run_single_image_evidence_pipeline(
         "provider": MODEL_PROVIDER_INFO[model_name]["provider"],
         "base_url": MODEL_PROVIDER_INFO[model_name]["base_url"],
         "model": model_id,
+        "runtime_debug": {
+            "selected_model": model_name,
+            "provider": MODEL_PROVIDER_INFO[model_name]["provider"],
+            "model": model_id,
+            "image_mode": "full_image_base64",
+            "retry_count": MAX_GEMMA_EVIDENCE_EXTRACTION_ATTEMPTS - 1,
+            "timeout_seconds": MODEL_CALL_TIMEOUT_SECONDS,
+        },
+        "runtime_debug_line": (
+            f"selected_model={model_name} | "
+            f"provider={MODEL_PROVIDER_INFO[model_name]['provider']} | "
+            f"model={model_id} | image_mode=full_image_base64 | "
+            f"retry_count={MAX_GEMMA_EVIDENCE_EXTRACTION_ATTEMPTS - 1}"
+        ),
         "model_role": "evidence_extraction_only",
         "started_at": _utc_now_iso(),
         "steps": [],
@@ -2839,7 +2848,7 @@ def _run_single_image_evidence_pipeline(
     raw_evidence_text = ""
     extracted_evidence: dict[str, list[str]] | None = None
     last_error: Exception | None = None
-    for attempt in range(1, MAX_EVIDENCE_EXTRACTION_ATTEMPTS + 1):
+    for attempt in range(1, MAX_GEMMA_EVIDENCE_EXTRACTION_ATTEMPTS + 1):
         _check_total_timeout(deadline, f"Extracting {model_name} evidence attempt {attempt}")
         attempt_started = time.monotonic()
         try:
@@ -2883,7 +2892,7 @@ def _run_single_image_evidence_pipeline(
                 }
             )
             _write_step_trace(metadata_path, metadata)
-            if attempt >= MAX_EVIDENCE_EXTRACTION_ATTEMPTS:
+            if attempt >= MAX_GEMMA_EVIDENCE_EXTRACTION_ATTEMPTS:
                 raise ModelResponseError(
                     f"{model_name} evidence extraction failed after {attempt} attempt(s): {_nvidia_error_message(exc)}",
                     raw_response=raw_response or repr(exc),
@@ -3031,6 +3040,18 @@ def _run_llama_staged_pipeline(
         "provider": "NVIDIA NIM",
         "base_url": "https://integrate.api.nvidia.com/v1",
         "model": LLAMA4_MODEL,
+        "runtime_debug": {
+            "selected_model": "Llama 4",
+            "provider": "NVIDIA NIM",
+            "model": LLAMA4_MODEL,
+            "image_mode": "full_image_jpeg",
+            "retry_count": 0,
+            "timeout_seconds": MODEL_CALL_TIMEOUT_SECONDS,
+        },
+        "runtime_debug_line": (
+            "selected_model=Llama 4 | provider=NVIDIA NIM | "
+            f"model={LLAMA4_MODEL} | image_mode=full_image_jpeg | retry_count=0"
+        ),
         "render_matrix": full_image["render_matrix"],
         "full_image_path": str(full_path),
         "full_image_width": full_image["width"],
