@@ -23,12 +23,12 @@ DEBUG_DIR = OUTPUT_DIR / "debug"
 
 MODEL_MODULES = {
     "Gemma": grade_gemma,
-    "Nemotron": grade_llama,
+    "Llama 4 Scout": grade_llama,
 }
 
 MODEL_IDS = {
     "Gemma": grade_gemma.MODEL,
-    "Nemotron": grade_llama.MODEL,
+    "Llama 4 Scout": grade_llama.MODEL,
 }
 
 CATEGORY_FIELDS = grade_gemma.CATEGORY_FIELDS
@@ -92,8 +92,8 @@ def selected_model_names(selection: str) -> list[str]:
     )
     routes = {
         "Gemma": ["Gemma"],
-        "Nemotron": ["Nemotron"],
-        "Both": ["Gemma", "Nemotron"],
+        "Llama 4 Scout": ["Llama 4 Scout"],
+        "Both": ["Gemma", "Llama 4 Scout"],
     }
     try:
         return routes[normalized]
@@ -103,7 +103,7 @@ def selected_model_names(selection: str) -> list[str]:
 
 def model_debug_lines(model_names: Iterable[str] | None = None) -> list[str]:
     """Return internal provider/model debug lines; app.py does not render these."""
-    names = list(model_names) if model_names is not None else ["Gemma", "Nemotron"]
+    names = list(model_names) if model_names is not None else ["Gemma", "Llama 4 Scout"]
     lines: list[str] = []
     for name in names:
         module = MODEL_MODULES.get(name)
@@ -122,6 +122,12 @@ def _safe_stem(filename: str) -> str:
 
 def _model_slug(model_name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "_", model_name.lower()).strip("_") or "model"
+
+
+def _failure_suffix(model_name: str) -> str:
+    if model_name == "Llama 4 Scout":
+        return "llama4_scout_failure"
+    return f"{_model_slug(model_name)}_failure"
 
 
 def _strip_json_fences(raw_text: str) -> str:
@@ -249,7 +255,7 @@ def _save_failed_response(
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     debug_path = (
         DEBUG_DIR
-        / f"{timestamp}_{run_id}_{file_stem}_{_model_slug(model_name)}_failure.json"
+        / f"{timestamp}_{run_id}_{file_stem}_{_failure_suffix(model_name)}.json"
     )
     debug_path.write_text(
         json.dumps(

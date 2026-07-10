@@ -1,4 +1,4 @@
-"""Direct Nemotron grader for Spring 2025 concept map evaluation."""
+"""Direct Groq Llama 4 Scout grader for Spring 2025 concept map evaluation."""
 
 from __future__ import annotations
 
@@ -6,18 +6,17 @@ import base64
 import json
 import os
 import re
-import time
 from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUBRIC_PATH = PROJECT_ROOT / "rubric" / "concept_map_rubric.json"
 
-MODEL = "nvidia/nemotron-nano-12b-v2-vl:free"
-PROVIDER = "OpenRouter"
-BASE_URL = "https://openrouter.ai/api/v1"
-API_KEY_ENV = "OPENROUTER_API_KEY"
-MAX_TOKENS = 1600
+MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+PROVIDER = "Groq"
+BASE_URL = "https://api.groq.com/openai/v1"
+API_KEY_ENV = "GROQ_API_KEY"
+MAX_TOKENS = 3000
 TIMEOUT_SECONDS = 180
 
 CATEGORY_FIELDS = {
@@ -93,6 +92,10 @@ def _secret(name: str) -> str | None:
 
 
 def create_client() -> Any:
+    return create_groq_client()
+
+
+def create_groq_client() -> Any:
     try:
         from openai import OpenAI
     except ImportError as exc:
@@ -102,7 +105,7 @@ def create_client() -> Any:
 
     api_key = _secret(API_KEY_ENV)
     if not api_key:
-        raise RuntimeError(f"{API_KEY_ENV} is not configured.")
+        raise RuntimeError("GROQ_API_KEY is not configured.")
     return OpenAI(
         api_key=api_key,
         base_url=BASE_URL,
@@ -186,6 +189,7 @@ def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
         max_tokens=MAX_TOKENS,
         temperature=0,
         timeout=TIMEOUT_SECONDS,
+        response_format={"type": "json_object"},
         messages=[
             {
                 "role": "user",
@@ -203,43 +207,14 @@ def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
     )
 
 
-def _raw_response_text(response: Any) -> str:
-    if response is None:
-        return ""
-    if isinstance(response, str):
-        return response
-    for method_name in ("model_dump_json", "json"):
-        method = getattr(response, method_name, None)
-        if callable(method):
-            try:
-                return method(indent=2) if method_name == "model_dump_json" else method()
-            except TypeError:
-                try:
-                    return method()
-                except Exception:
-                    pass
-            except Exception:
-                pass
-    return repr(response)
-
-
-def _empty_response_reason(response: Any) -> str | None:
-    if response is None:
-        return "Nemotron returned no response."
+def response_text(response: Any) -> str:
     choices = getattr(response, "choices", None)
     if not choices:
-        return "Nemotron returned no response choices."
-    text = getattr(getattr(choices[0], "message", None), "content", None)
+        raise RuntimeError("Llama 4 Scout returned no response choices.")
+    text = getattr(choices[0].message, "content", None)
     if not isinstance(text, str) or not text.strip():
-        return "Nemotron returned empty content."
-    return None
-
-
-def response_text(response: Any) -> str:
-    reason = _empty_response_reason(response)
-    if reason:
-        raise RuntimeError(reason)
-    return response.choices[0].message.content
+        raise RuntimeError("Llama 4 Scout returned empty content.")
+    return text
 
 
 def clean_json_output(text: str) -> str:
@@ -277,26 +252,6 @@ def grade_pdf(pdf_path: Path, map_file: str, debug_prefix: Path) -> dict[str, An
 
     client = create_client()
     response = request_grade(client, prompt, image_base64)
-    first_reason = _empty_response_reason(response)
-    debug_payload["first_attempt"] = {
-        "empty_response_reason": first_reason,
-        "raw_response": _raw_response_text(response),
-    }
-    if first_reason:
-        time.sleep(5)
-        response = request_grade(client, prompt, image_base64)
-        retry_reason = _empty_response_reason(response)
-        debug_payload["retry_attempt"] = {
-            "empty_response_reason": retry_reason,
-            "raw_response": _raw_response_text(response),
-        }
-        debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
-        if retry_reason:
-            raise RuntimeError(retry_reason)
-    else:
-        debug_payload["retry_attempt"] = None
-        debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
-
     raw_text = response_text(response)
     raw_path = Path(f"{debug_prefix}_raw.txt")
     raw_path.write_text(raw_text, encoding="utf-8")
