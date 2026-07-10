@@ -18,6 +18,17 @@ BASE_URL = "https://openrouter.ai/api/v1"
 API_KEY_ENV = "OPENROUTER_API_KEY"
 MAX_TOKENS = 1800
 TIMEOUT_SECONDS = 90
+NO_REFERENCE_WARNING = (
+    "Scores involving unit coverage, patient-case completeness, or prior-course "
+    "knowledge are provisional because no reference materials were supplied."
+)
+REFERENCE_FIELDS = (
+    ("patient_case", "Patient case"),
+    ("unit_content", "Unit learning objectives or session content"),
+    ("expected_differential_diagnoses", "Expected/key differential diagnoses"),
+    ("prior_concepts", "Relevant previously learned concepts"),
+    ("instructor_notes", "Instructor notes or expected content"),
+)
 
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
@@ -130,14 +141,45 @@ def schema(map_file: str) -> dict[str, Any]:
     return result
 
 
-def build_prompt(map_file: str) -> str:
+def _format_reference_material(
+    reference_material: dict[str, str] | None,
+) -> tuple[str, bool]:
+    material = reference_material or {}
+    sections: list[str] = []
+    for key, label in REFERENCE_FIELDS:
+        value = str(material.get(key, "")).strip()
+        if value:
+            sections.append(f"{label}:\n{value}")
+    if not sections:
+        return f"No reference material supplied.\nWARNING: {NO_REFERENCE_WARNING}", False
+    return "\n\n".join(sections), True
+
+
+def build_prompt(map_file: str, reference_material: dict[str, str] | None = None) -> str:
+    reference_text, has_reference = _format_reference_material(reference_material)
+    no_reference_rule = (
+        ""
+        if has_reference
+        else f'\n- Include this exact warning in grading_notes: "{NO_REFERENCE_WARNING}"'
+    )
     return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
-Grade only the visible concept map image.
+
+REFERENCE MATERIAL:
+{reference_text}
+
+STUDENT CONCEPT MAP:
+The uploaded image is the student's concept map.
 
 Rubric JSON:
 {json.dumps(_rubric(), separators=(",", ":"))}
 
 Rules:
+- Grade only what appears in the STUDENT CONCEPT MAP image.
+- Use REFERENCE MATERIAL only to determine what content was expected.
+- Do not treat REFERENCE MATERIAL text as evidence that appears in the map.
+- evidence_from_map must contain only content visible in the STUDENT CONCEPT MAP.
+- Missing expected content should reduce the relevant score according to the rubric.
+- Do not require content that is not present in the supplied REFERENCE MATERIAL.
 - Scores must be integers 1, 2, 3, or 4 only.
 - Overall decisions must be exactly Yes or No only.
 - No Partial, Borderline, Maybe, 0, 5, or decimals.
@@ -145,6 +187,7 @@ Rules:
 - Include evidence_from_map when visible.
 - If evidence is missing, write "No clear evidence found in the concept map."
 - Do not hallucinate evidence.
+- Keep REFERENCE MATERIAL and STUDENT CONCEPT MAP evidence separate.{no_reference_rule}
 - Return JSON only using this exact schema:
 {json.dumps(schema(map_file), separators=(",", ":"))}
 """
@@ -191,12 +234,18 @@ def clean_json_output(text: str) -> str:
     return match.group(0).strip() if match else text
 
 
-def grade_pdf(pdf_path: Path, map_file: str, debug_prefix: Path) -> dict[str, Any]:
+def grade_pdf(
+    pdf_path: Path,
+    map_file: str,
+    debug_prefix: Path,
+    reference_material: dict[str, str] | None = None,
+) -> dict[str, Any]:
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_base64 = render_pdf_first_page(pdf_path, image_path)
-    prompt = build_prompt(map_file)
+    prompt = build_prompt(map_file, reference_material)
     prompt_path = Path(f"{debug_prefix}_prompt.txt")
     prompt_path.write_text(prompt, encoding="utf-8")
+    _, has_reference_material = _format_reference_material(reference_material)
 
     client = create_client()
     response = request_grade(client, prompt, image_base64)
@@ -220,6 +269,7 @@ def grade_pdf(pdf_path: Path, map_file: str, debug_prefix: Path) -> dict[str, An
             "model": MODEL,
             "image_path": str(image_path),
             "image_bytes": image_path.stat().st_size,
+            "reference_material_supplied": has_reference_material,
             "max_tokens": MAX_TOKENS,
             "timeout_seconds": TIMEOUT_SECONDS,
         },

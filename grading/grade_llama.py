@@ -18,6 +18,17 @@ BASE_URL = "https://api.groq.com/openai/v1"
 API_KEY_ENV = "GROQ_API_KEY"
 MAX_TOKENS = 3000
 TIMEOUT_SECONDS = 180
+NO_REFERENCE_WARNING = (
+    "Scores involving unit coverage, patient-case completeness, or prior-course "
+    "knowledge are provisional because no reference materials were supplied."
+)
+REFERENCE_FIELDS = (
+    ("patient_case", "Patient case"),
+    ("unit_content", "Unit learning objectives or session content"),
+    ("expected_differential_diagnoses", "Expected/key differential diagnoses"),
+    ("prior_concepts", "Relevant previously learned concepts"),
+    ("instructor_notes", "Instructor notes or expected content"),
+)
 
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
@@ -169,14 +180,38 @@ def schema(map_file: str) -> dict[str, Any]:
     return result
 
 
-def build_prompt(map_file: str) -> str:
+def _format_reference_material(
+    reference_material: dict[str, str] | None,
+) -> tuple[str, bool]:
+    material = reference_material or {}
+    sections: list[str] = []
+    for key, label in REFERENCE_FIELDS:
+        value = str(material.get(key, "")).strip()
+        if value:
+            sections.append(f"{label}:\n{value}")
+    if not sections:
+        return f"No reference material supplied.\nWARNING: {NO_REFERENCE_WARNING}", False
+    return "\n\n".join(sections), True
+
+
+def build_prompt(map_file: str, reference_material: dict[str, str] | None = None) -> str:
     rubric_payload = {
         "criteria": CRITERION_TEXT,
         "score_descriptors": _rubric(),
     }
-    return f"""Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities. Grade visible map only.
+    reference_text, has_reference = _format_reference_material(reference_material)
+    no_reference_rule = (
+        ""
+        if has_reference
+        else f' Include this exact warning in grading_notes: "{NO_REFERENCE_WARNING}"'
+    )
+    return f"""Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities.
+REFERENCE MATERIAL:
+{reference_text}
+STUDENT CONCEPT MAP:
+The uploaded image is the student's concept map.
 Rubric:{json.dumps(rubric_payload, separators=(",", ":"))}
-Rules: scores integers 1-4 only; decisions Yes/No only; no Partial/Borderline/Maybe/0/5/decimals; JSON only; no hallucinated evidence.
+Rules: grade only what appears in the STUDENT CONCEPT MAP image. Use REFERENCE MATERIAL only to determine expected content. Do not treat REFERENCE MATERIAL as map evidence. evidence_from_map must contain only visible map content. Missing expected content should reduce relevant scores. Do not require content absent from supplied REFERENCE MATERIAL. Scores integers 1-4 only; decisions Yes/No only; no Partial/Borderline/Maybe/0/5/decimals; JSON only; no hallucinated evidence.{no_reference_rule}
 Keep explanation one short sentence. evidence_from_map max 1 short item per criterion; use "No clear evidence found in the concept map." when missing.
 strengths max 2 short strings; areas_for_improvement max 2 short strings; grading_notes max 1 sentence.
 Schema:{json.dumps(schema(map_file), separators=(",", ":"))}
@@ -225,13 +260,19 @@ def clean_json_output(text: str) -> str:
     return match.group(0).strip() if match else text
 
 
-def grade_pdf(pdf_path: Path, map_file: str, debug_prefix: Path) -> dict[str, Any]:
+def grade_pdf(
+    pdf_path: Path,
+    map_file: str,
+    debug_prefix: Path,
+    reference_material: dict[str, str] | None = None,
+) -> dict[str, Any]:
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_info = render_pdf_first_page(pdf_path, image_path)
     image_base64 = str(image_info["base64"])
-    prompt = build_prompt(map_file)
+    prompt = build_prompt(map_file, reference_material)
     prompt_path = Path(f"{debug_prefix}_prompt.txt")
     prompt_path.write_text(prompt, encoding="utf-8")
+    _, has_reference_material = _format_reference_material(reference_material)
     debug_path = Path(f"{debug_prefix}_debug.json")
     debug_payload = {
         "provider": PROVIDER,
@@ -244,6 +285,7 @@ def grade_pdf(pdf_path: Path, map_file: str, debug_prefix: Path) -> dict[str, An
         "render_matrix": image_info["render_matrix"],
         "max_width_px": image_info["max_width_px"],
         "jpeg_quality": image_info["jpeg_quality"],
+        "reference_material_supplied": has_reference_material,
         "prompt_characters": len(prompt),
         "max_tokens": MAX_TOKENS,
         "timeout_seconds": TIMEOUT_SECONDS,

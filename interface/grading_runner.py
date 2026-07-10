@@ -300,6 +300,7 @@ def run_evaluation(
     model_names: Iterable[str],
     original_filename: str,
     progress_callback: Any | None = None,
+    reference_material: dict[str, str] | None = None,
 ) -> list[EvaluationOutcome]:
     """Run one direct grading call for each selected model."""
     names = list(model_names)
@@ -326,7 +327,12 @@ def run_evaluation(
         try:
             if progress_callback:
                 progress_callback(f"Running {model_name} grading")
-            grade = module.grade_pdf(pdf_path, map_file, debug_prefix)
+            grade = module.grade_pdf(
+                pdf_path,
+                map_file,
+                debug_prefix,
+                reference_material=reference_material,
+            )
             raw_response = grade.get("response")
             data = parse_model_json(str(grade["cleaned_text"]))
 

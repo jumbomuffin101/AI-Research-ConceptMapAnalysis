@@ -16,6 +16,11 @@ from interface.grading_runner import (
 from interface.result_display import display_results
 
 
+NO_REFERENCE_WARNING = (
+    "Scores involving unit coverage, patient-case completeness, or prior-course "
+    "knowledge are provisional because no reference materials were supplied."
+)
+
 st.set_page_config(page_title="AI Concept Map Grading Demo", layout="wide")
 
 st.title("AI Concept Map Grading Demo")
@@ -36,8 +41,39 @@ model_selection = st.radio(
     horizontal=True,
 )
 
+st.subheader("Reference Materials (Optional)")
+st.caption(
+    "Reference materials define what students were expected to use. They are not "
+    "treated as evidence from the concept map."
+)
+with st.expander("Add patient case, unit content, DDx, prior concepts, or instructor notes"):
+    reference_material = {
+        "patient_case": st.text_area("Patient case", height=120),
+        "unit_content": st.text_area(
+            "Unit learning objectives or session content", height=120
+        ),
+        "expected_differential_diagnoses": st.text_area(
+            "Expected/key differential diagnoses", height=90
+        ),
+        "prior_concepts": st.text_area(
+            "Relevant previously learned concepts", height=90
+        ),
+        "instructor_notes": st.text_area(
+            "Instructor notes or expected content", height=120
+        ),
+    }
+
+if not any(value.strip() for value in reference_material.values()):
+    st.warning(NO_REFERENCE_WARNING)
+
+reference_fingerprint = hashlib.sha256(
+    "\n\n".join(
+        f"{key}:{value.strip()}" for key, value in sorted(reference_material.items())
+    ).encode("utf-8")
+).hexdigest()
 previous_model_selection = st.session_state.get("previous_model_selection")
 previous_file_fingerprint = st.session_state.get("previous_file_fingerprint")
+previous_reference_fingerprint = st.session_state.get("previous_reference_fingerprint")
 if previous_model_selection is None:
     st.session_state["previous_model_selection"] = model_selection
 elif model_selection != previous_model_selection:
@@ -51,6 +87,14 @@ if previous_file_fingerprint != uploaded_file_fingerprint:
     st.session_state.pop("evaluation_debug", None)
     st.session_state.pop("evaluation_error", None)
     st.session_state["previous_file_fingerprint"] = uploaded_file_fingerprint
+
+if previous_reference_fingerprint is None:
+    st.session_state["previous_reference_fingerprint"] = reference_fingerprint
+elif previous_reference_fingerprint != reference_fingerprint:
+    st.session_state.pop("evaluation_results", None)
+    st.session_state.pop("evaluation_debug", None)
+    st.session_state.pop("evaluation_error", None)
+    st.session_state["previous_reference_fingerprint"] = reference_fingerprint
 
 st.button("Multi-AI Consensus Grading - Coming Soon", disabled=True)
 
@@ -74,6 +118,7 @@ if st.button("Run Evaluation", type="primary"):
                         model_names=selected_model_names(model_selection),
                         original_filename=uploaded_file.name,
                         progress_callback=show_progress,
+                        reference_material=reference_material,
                     )
                 show_progress("Rendering results")
                 st.session_state["evaluation_results"] = results
