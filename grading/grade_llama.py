@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -202,14 +203,43 @@ def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
     )
 
 
-def response_text(response: Any) -> str:
+def _raw_response_text(response: Any) -> str:
+    if response is None:
+        return ""
+    if isinstance(response, str):
+        return response
+    for method_name in ("model_dump_json", "json"):
+        method = getattr(response, method_name, None)
+        if callable(method):
+            try:
+                return method(indent=2) if method_name == "model_dump_json" else method()
+            except TypeError:
+                try:
+                    return method()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    return repr(response)
+
+
+def _empty_response_reason(response: Any) -> str | None:
+    if response is None:
+        return "Nemotron returned no response."
     choices = getattr(response, "choices", None)
     if not choices:
-        raise RuntimeError("Nemotron returned no response choices.")
-    text = getattr(choices[0].message, "content", None)
+        return "Nemotron returned no response choices."
+    text = getattr(getattr(choices[0], "message", None), "content", None)
     if not isinstance(text, str) or not text.strip():
-        raise RuntimeError("Nemotron returned empty content.")
-    return text
+        return "Nemotron returned empty content."
+    return None
+
+
+def response_text(response: Any) -> str:
+    reason = _empty_response_reason(response)
+    if reason:
+        raise RuntimeError(reason)
+    return response.choices[0].message.content
 
 
 def clean_json_output(text: str) -> str:
@@ -247,9 +277,31 @@ def grade_pdf(pdf_path: Path, map_file: str, debug_prefix: Path) -> dict[str, An
 
     client = create_client()
     response = request_grade(client, prompt, image_base64)
+    first_reason = _empty_response_reason(response)
+    debug_payload["first_attempt"] = {
+        "empty_response_reason": first_reason,
+        "raw_response": _raw_response_text(response),
+    }
+    if first_reason:
+        time.sleep(5)
+        response = request_grade(client, prompt, image_base64)
+        retry_reason = _empty_response_reason(response)
+        debug_payload["retry_attempt"] = {
+            "empty_response_reason": retry_reason,
+            "raw_response": _raw_response_text(response),
+        }
+        debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+        if retry_reason:
+            raise RuntimeError(retry_reason)
+    else:
+        debug_payload["retry_attempt"] = None
+        debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+
     raw_text = response_text(response)
     raw_path = Path(f"{debug_prefix}_raw.txt")
     raw_path.write_text(raw_text, encoding="utf-8")
+    debug_payload["raw_path"] = str(raw_path)
+    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
     return {
         "model": MODEL,
