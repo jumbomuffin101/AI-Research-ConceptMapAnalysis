@@ -157,6 +157,28 @@ def _require_yes_no(value: Any, field_path: str) -> None:
         raise MalformedResultError(f"'{field_path}' must be exactly 'Yes' or 'No'.")
 
 
+def _normalize_evidence_from_map(result: dict[str, Any]) -> None:
+    """Normalize criterion evidence fields before schema validation."""
+    fallback = "No clear evidence found in the concept map."
+    for group, fields in CATEGORY_FIELDS.items():
+        section = result.get(group)
+        if not isinstance(section, dict):
+            continue
+        for field in fields:
+            item = section.get(field)
+            if not isinstance(item, dict):
+                continue
+            evidence = item.get("evidence_from_map")
+            if isinstance(evidence, list):
+                continue
+            if isinstance(evidence, str):
+                item["evidence_from_map"] = [evidence] if evidence.strip() else [fallback]
+            elif evidence is None:
+                item["evidence_from_map"] = [fallback]
+            else:
+                item["evidence_from_map"] = [str(evidence)]
+
+
 def parse_model_json(raw_text: str) -> dict[str, Any]:
     """Parse and validate the final grading JSON schema."""
     if not raw_text or not raw_text.strip():
@@ -170,6 +192,7 @@ def parse_model_json(raw_text: str) -> dict[str, Any]:
 
     if not isinstance(result, dict):
         raise MalformedResultError("The model response JSON must be an object.")
+    _normalize_evidence_from_map(result)
     if _contains_forbidden_decision_text(result):
         raise MalformedResultError(
             "The model result contains a forbidden non-binary decision label."
