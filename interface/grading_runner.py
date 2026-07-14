@@ -179,7 +179,61 @@ def _normalize_evidence_from_map(result: dict[str, Any]) -> None:
                 item["evidence_from_map"] = [str(evidence)]
 
 
-def parse_model_json(raw_text: str) -> dict[str, Any]:
+def _normalize_decision_value(value: Any) -> tuple[str, str | None]:
+    """Normalize model decision labels to the rubric's binary Yes/No values."""
+    if isinstance(value, str):
+        original = value.strip()
+    elif value is None:
+        original = ""
+    else:
+        original = str(value).strip()
+
+    normalized = re.sub(r"\s+", " ", original).strip().lower()
+    if normalized in {"yes", "meets", "meets expectations"}:
+        return "Yes", None
+    if normalized in {"no", "does not meet", "does not meet expectations"}:
+        return "No", None
+    return "No", original or repr(value)
+
+
+def _append_grading_note(result: dict[str, Any], note: str) -> None:
+    current = result.get("grading_notes", "")
+    if isinstance(current, list):
+        current_text = " ".join(str(item) for item in current if str(item).strip())
+    else:
+        current_text = str(current).strip()
+    result["grading_notes"] = f"{current_text} {note}".strip() if current_text else note
+
+
+def _normalize_decision_fields(result: dict[str, Any]) -> None:
+    """Normalize Llama 4 Scout decision labels before schema validation."""
+    converted: list[str] = []
+
+    field_paths: list[tuple[dict[str, Any], str, str]] = [
+        (result, "overall_meets_expectations", "overall_meets_expectations")
+    ]
+    for group in CATEGORY_FIELDS:
+        section = result.get(group)
+        if isinstance(section, dict):
+            field_paths.append((section, "overall_decision", f"{group}.overall_decision"))
+
+    for container, field, field_path in field_paths:
+        original_value = container.get(field)
+        normalized_value, ambiguous_original = _normalize_decision_value(original_value)
+        container[field] = normalized_value
+        if ambiguous_original is not None:
+            converted.append(f"{field_path}={ambiguous_original!r}")
+
+    if converted:
+        _append_grading_note(
+            result,
+            "Decision labels normalized to Yes/No; original ambiguous values: "
+            + "; ".join(converted)
+            + ".",
+        )
+
+
+def parse_model_json(raw_text: str, normalize_decisions: bool = False) -> dict[str, Any]:
     """Parse and validate the final grading JSON schema."""
     if not raw_text or not raw_text.strip():
         raise ModelResponseError("The model returned an empty response.")
@@ -193,7 +247,9 @@ def parse_model_json(raw_text: str) -> dict[str, Any]:
     if not isinstance(result, dict):
         raise MalformedResultError("The model response JSON must be an object.")
     _normalize_evidence_from_map(result)
-    if _contains_forbidden_decision_text(result):
+    if normalize_decisions:
+        _normalize_decision_fields(result)
+    elif _contains_forbidden_decision_text(result):
         raise MalformedResultError(
             "The model result contains a forbidden non-binary decision label."
         )
@@ -334,7 +390,10 @@ def run_evaluation(
                 reference_material=reference_material,
             )
             raw_response = grade.get("response")
-            data = parse_model_json(str(grade["cleaned_text"]))
+            data = parse_model_json(
+                str(grade["cleaned_text"]),
+                normalize_decisions=model_name == "Llama 4 Scout",
+            )
 
             output_path = (
                 OUTPUT_DIR
