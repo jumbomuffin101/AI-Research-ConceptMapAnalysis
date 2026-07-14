@@ -32,6 +32,12 @@ MODEL_IDS = {
 }
 
 CATEGORY_FIELDS = grade_gemma.CATEGORY_FIELDS
+DOMAIN_LABELS = {
+    "knowledge_acquisition": "Knowledge Acquisition",
+    "integration": "Integration",
+    "application": "Application",
+    "transfer": "Transfer",
+}
 
 FORBIDDEN_DECISION_TEXT = (
     "Partial",
@@ -205,6 +211,89 @@ def _append_grading_note(result: dict[str, Any], note: str) -> None:
     result["grading_notes"] = f"{current_text} {note}".strip() if current_text else note
 
 
+def _criterion_label(field_name: str) -> str:
+    return field_name.replace("_", " ").title()
+
+
+def _short_reason_from_item(item: dict[str, Any]) -> str:
+    explanation = str(item.get("explanation", "")).strip()
+    if explanation:
+        return explanation.rstrip(".")
+    evidence = item.get("evidence_from_map")
+    if isinstance(evidence, list):
+        useful_evidence = [
+            str(value).strip()
+            for value in evidence
+            if str(value).strip()
+            and str(value).strip() != "No clear evidence found in the concept map."
+        ]
+        if useful_evidence:
+            return useful_evidence[0].rstrip(".")
+    elif isinstance(evidence, str) and evidence.strip():
+        return evidence.strip().rstrip(".")
+    return ""
+
+
+def _join_labels(labels: list[str]) -> str:
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return labels[0]
+    return " and ".join([", ".join(labels[:-1]), labels[-1]]) if len(labels) > 2 else " and ".join(labels)
+
+
+def _generated_if_no_explanation(group: str, section: dict[str, Any]) -> str:
+    fallback = (
+        "This domain does not meet expectations based on the criterion scores "
+        "and available evidence."
+    )
+    scored_items: list[tuple[int, str, dict[str, Any]]] = []
+    for field in CATEGORY_FIELDS.get(group, []):
+        item = section.get(field)
+        if not isinstance(item, dict):
+            continue
+        score = item.get("score")
+        if isinstance(score, int) and not isinstance(score, bool):
+            scored_items.append((score, field, item))
+
+    if not scored_items:
+        return fallback
+
+    scored_items.sort(key=lambda value: value[0])
+    lowest_items = scored_items[:2]
+    labels = [_criterion_label(field) for _, field, _ in lowest_items]
+    label_text = _join_labels(labels)
+    if not label_text:
+        return fallback
+
+    domain_label = DOMAIN_LABELS.get(group, _criterion_label(group))
+    reasons = [
+        _short_reason_from_item(item)
+        for _, _, item in lowest_items
+        if _short_reason_from_item(item)
+    ]
+    if reasons:
+        reason_text = "; ".join(reasons[:2])
+        return (
+            f"{domain_label} does not meet expectations because {label_text} "
+            f"were incomplete: {reason_text}."
+        )
+    return f"{domain_label} does not meet expectations because {label_text} were incomplete."
+
+
+def _normalize_if_no_explanations(result: dict[str, Any]) -> None:
+    """Fill missing Llama 4 Scout domain explanations before schema validation."""
+    for group in CATEGORY_FIELDS:
+        section = result.get(group)
+        if not isinstance(section, dict):
+            continue
+        if section.get("overall_decision") != "No":
+            continue
+        if str(section.get("if_no_explanation", "")).strip():
+            continue
+        section["if_no_explanation"] = _generated_if_no_explanation(group, section)
+
+
 def _normalize_decision_fields(result: dict[str, Any]) -> None:
     """Normalize Llama 4 Scout decision labels before schema validation."""
     converted: list[str] = []
@@ -249,6 +338,7 @@ def parse_model_json(raw_text: str, normalize_decisions: bool = False) -> dict[s
     _normalize_evidence_from_map(result)
     if normalize_decisions:
         _normalize_decision_fields(result)
+        _normalize_if_no_explanations(result)
     elif _contains_forbidden_decision_text(result):
         raise MalformedResultError(
             "The model result contains a forbidden non-binary decision label."
