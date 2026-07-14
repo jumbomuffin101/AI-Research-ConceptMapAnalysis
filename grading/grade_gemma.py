@@ -18,10 +18,6 @@ BASE_URL = "https://openrouter.ai/api/v1"
 API_KEY_ENV = "OPENROUTER_API_KEY"
 MAX_TOKENS = 1800
 TIMEOUT_SECONDS = 90
-NO_REFERENCE_WARNING = (
-    "Scores involving unit coverage, patient-case completeness, or prior-course "
-    "knowledge are provisional because no reference materials were supplied."
-)
 REFERENCE_FIELDS = (
     ("patient_case", "Patient case"),
     ("unit_content", "Unit learning objectives or session content"),
@@ -151,62 +147,78 @@ def _format_reference_material(
         if value:
             sections.append(f"{label}:\n{value}")
     if not sections:
-        return f"No reference material supplied.\nWARNING: {NO_REFERENCE_WARNING}", False
+        return "", False
     return "\n\n".join(sections), True
 
 
 def build_prompt(map_file: str, reference_material: dict[str, str] | None = None) -> str:
     reference_text, has_reference = _format_reference_material(reference_material)
-    no_reference_rule = (
-        ""
+    reference_section = (
+        f"""REFERENCE MATERIAL:
+{reference_text}
+
+Use REFERENCE MATERIAL only to determine expected content. Do not treat it as map evidence. Do not require content absent from supplied references.
+
+"""
         if has_reference
-        else f'\n- Include this exact warning in grading_notes: "{NO_REFERENCE_WARNING}"'
+        else ""
     )
     return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
-
-REFERENCE MATERIAL:
-{reference_text}
 
 STUDENT CONCEPT MAP:
 The uploaded image is the student's concept map.
 
-Rubric JSON:
+{reference_section}Rubric JSON:
 {json.dumps(_rubric(), separators=(",", ":"))}
 
 Rules:
-- Grade only what appears in the STUDENT CONCEPT MAP image.
-- Use REFERENCE MATERIAL only to determine what content was expected.
-- Do not treat REFERENCE MATERIAL text as evidence that appears in the map.
-- evidence_from_map must contain only content visible in the STUDENT CONCEPT MAP.
-- Missing expected content should reduce the relevant score according to the rubric.
-- Do not require content that is not present in the supplied REFERENCE MATERIAL.
+- Grade only demonstrated content and visible relationships in the STUDENT CONCEPT MAP image.
+- Grade only the visible concept map against the rubric descriptors when no reference material is supplied.
+- evidence_from_map must contain only visible map content.
+- Do not infer content that is not visible.
+- Do not infer missing knowledge from general medical plausibility.
+- Do not reward isolated medical terms as synthesized knowledge.
+- Score 1: criterion is absent, irrelevant, or visibly incorrect.
+- Score 2: some relevant content exists, but it is general, incomplete, simplistic, or weakly connected.
+- Score 3: content is relevant and mostly synthesized, with meaningful visible connections when required.
+- Score 4: the complete score-4 descriptor is visibly demonstrated with detailed, comprehensive, synthesized content.
+- Do not assign 1 merely because reference context was not supplied.
+- Visible relevant concepts should receive at least 2 when they partially address the criterion.
+- Use the exact Spring 2025 rubric descriptors as the final authority.
 - Scores must be integers 1, 2, 3, or 4 only.
 - Overall decisions must be exactly Yes or No only.
 - No Partial, Borderline, Maybe, 0, 5, or decimals.
-- Use brief explanations only.
-- Include evidence_from_map when visible.
 - If evidence is missing, write "No clear evidence found in the concept map."
-- Do not hallucinate evidence.
-- Grade only demonstrated content and visible relationships.
-- Do not reward the presence of isolated medical terms.
-- Do not infer missing knowledge from general medical plausibility.
-- A correct term without synthesis or connection does not satisfy a score-3 or score-4 descriptor.
-- Score 4 only when the full score-4 descriptor is clearly satisfied.
-- Score 3 only when evidence is relevant and mostly synthesized.
-- Score 2 when evidence is partly relevant, too general, incomplete, or weakly connected.
-- Score 1 when evidence is absent, irrelevant, or unclear.
-- Knowledge Acquisition overall_decision is Yes only when the map demonstrates sufficient key knowledge from the case and unit content across the domain. A few strong criteria must not compensate for major missing areas.
-- Integration overall_decision is Yes only when key knowledge is connected accurately and comprehensively. Isolated concepts or weak connections are insufficient.
-- Application overall_decision is Yes only when the map clearly explains key clinical data using relevant basic science and visible pathophysiology flows.
-- Transfer overall_decision is Yes only when previously learned content visibly deepens understanding of the current condition.
-- overall_meets_expectations must be "Yes" only when all four domain overall_decision values are "Yes".
+- Explanations: one brief sentence.
+- evidence_from_map: 1-2 short items per criterion.
+- strengths: maximum 2 short items.
+- areas_for_improvement: maximum 2-3 short items.
+- grading_notes: maximum one sentence.
 - If any domain overall_decision is "No", overall_meets_expectations must be "No".
-- A weak map must not pass because it contains some correct concepts.
-- Before returning JSON, perform a consistency check: each domain decision must agree with its criterion scores and evidence, the final overall decision must agree with all four domain decisions, and any No domain requires final overall No.
-- Keep REFERENCE MATERIAL and STUDENT CONCEPT MAP evidence separate.{no_reference_rule}
-- Return JSON only using this exact schema:
+- Return raw valid JSON only. No Markdown, no prose outside JSON.
+- Use this exact schema:
 {json.dumps(schema(map_file), separators=(",", ":"))}
 """
+
+
+def build_repair_prompt(map_file: str, malformed_output: str) -> str:
+    return f"""Your previous answer was malformed JSON. Do not regrade or change the evaluation.
+Return the same evaluation as raw valid JSON only. No Markdown. No prose.
+
+Required schema:
+{json.dumps(schema(map_file), separators=(",", ":"))}
+
+Malformed output:
+{malformed_output}
+"""
+
+
+def _json_is_malformed(text: str) -> bool:
+    try:
+        json.loads(clean_json_output(text))
+    except json.JSONDecodeError:
+        return True
+    return False
 
 
 def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
@@ -215,6 +227,7 @@ def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
         max_tokens=MAX_TOKENS,
         temperature=0,
         timeout=TIMEOUT_SECONDS,
+        response_format={"type": "json_object"},
         messages=[
             {
                 "role": "user",
@@ -229,6 +242,17 @@ def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
                 ],
             }
         ],
+    )
+
+
+def request_repair(client: Any, prompt: str) -> Any:
+    return client.chat.completions.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        temperature=0,
+        timeout=TIMEOUT_SECONDS,
+        response_format={"type": "json_object"},
+        messages=[{"role": "user", "content": prompt}],
     )
 
 
@@ -268,6 +292,24 @@ def grade_pdf(
     raw_text = response_text(response)
     raw_path = Path(f"{debug_prefix}_raw.txt")
     raw_path.write_text(raw_text, encoding="utf-8")
+    first_raw_path = None
+    repair_prompt_path = None
+    repair_raw_path = None
+    repaired = False
+
+    if _json_is_malformed(raw_text):
+        first_raw_path = Path(f"{debug_prefix}_raw_malformed_first.txt")
+        first_raw_path.write_text(raw_text, encoding="utf-8")
+        repair_prompt = build_repair_prompt(map_file, raw_text)
+        repair_prompt_path = Path(f"{debug_prefix}_repair_prompt.txt")
+        repair_prompt_path.write_text(repair_prompt, encoding="utf-8")
+        repair_response = request_repair(client, repair_prompt)
+        raw_text = response_text(repair_response)
+        repair_raw_path = Path(f"{debug_prefix}_raw_repair.txt")
+        repair_raw_path.write_text(raw_text, encoding="utf-8")
+        raw_path = repair_raw_path
+        response = repair_response
+        repaired = True
 
     return {
         "model": MODEL,
@@ -286,6 +328,10 @@ def grade_pdf(
             "image_path": str(image_path),
             "image_bytes": image_path.stat().st_size,
             "reference_material_supplied": has_reference_material,
+            "json_repair_attempted": repaired,
+            "first_malformed_raw_path": str(first_raw_path) if first_raw_path else None,
+            "repair_prompt_path": str(repair_prompt_path) if repair_prompt_path else None,
+            "repair_raw_path": str(repair_raw_path) if repair_raw_path else None,
             "max_tokens": MAX_TOKENS,
             "timeout_seconds": TIMEOUT_SECONDS,
         },

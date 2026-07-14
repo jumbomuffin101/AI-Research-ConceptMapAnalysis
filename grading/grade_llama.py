@@ -18,10 +18,6 @@ BASE_URL = "https://api.groq.com/openai/v1"
 API_KEY_ENV = "GROQ_API_KEY"
 MAX_TOKENS = 3000
 TIMEOUT_SECONDS = 180
-NO_REFERENCE_WARNING = (
-    "Scores involving unit coverage, patient-case completeness, or prior-course "
-    "knowledge are provisional because no reference materials were supplied."
-)
 REFERENCE_FIELDS = (
     ("patient_case", "Patient case"),
     ("unit_content", "Unit learning objectives or session content"),
@@ -190,7 +186,7 @@ def _format_reference_material(
         if value:
             sections.append(f"{label}:\n{value}")
     if not sections:
-        return f"No reference material supplied.\nWARNING: {NO_REFERENCE_WARNING}", False
+        return "", False
     return "\n\n".join(sections), True
 
 
@@ -200,20 +196,19 @@ def build_prompt(map_file: str, reference_material: dict[str, str] | None = None
         "score_descriptors": _rubric(),
     }
     reference_text, has_reference = _format_reference_material(reference_material)
-    no_reference_rule = (
-        ""
+    reference_section = (
+        f"REFERENCE MATERIAL:\n{reference_text}\nUse REFERENCE MATERIAL only to determine expected content. Do not treat it as map evidence. Do not require content absent from supplied references.\n"
         if has_reference
-        else f' Include this exact warning in grading_notes: "{NO_REFERENCE_WARNING}"'
+        else ""
     )
     return f"""Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities.
-REFERENCE MATERIAL:
-{reference_text}
 STUDENT CONCEPT MAP:
 The uploaded image is the student's concept map.
+{reference_section}
 Rubric:{json.dumps(rubric_payload, separators=(",", ":"))}
-Rules: grade only what appears in the STUDENT CONCEPT MAP image. Use REFERENCE MATERIAL only to determine expected content. Do not treat REFERENCE MATERIAL as map evidence. evidence_from_map must contain only visible map content. Missing expected content should reduce relevant scores. Do not require content absent from supplied REFERENCE MATERIAL. Scores integers 1-4 only; decisions Yes/No only; no Partial/Borderline/Maybe/0/5/decimals; JSON only; no hallucinated evidence.{no_reference_rule}
-Keep explanation one short sentence. evidence_from_map max 1 short item per criterion; use "No clear evidence found in the concept map." when missing.
-strengths max 2 short strings; areas_for_improvement max 2 short strings; grading_notes max 1 sentence.
+Rules: grade only demonstrated visible content and relationships in the STUDENT CONCEPT MAP image. Grade only the visible concept map against rubric descriptors when no reference material is supplied. evidence_from_map must contain only visible map content. Do not infer invisible content. Do not reward isolated terms as synthesized knowledge. Score 1: criterion is absent, irrelevant, or visibly incorrect. Score 2: some relevant content exists, but it is general, incomplete, simplistic, or weakly connected. Score 3: content is relevant and mostly synthesized, with meaningful visible connections when required. Score 4: the complete score-4 descriptor is visibly demonstrated with detailed, comprehensive, synthesized content. Do not assign 1 merely because reference context was not supplied. Visible relevant concepts should receive at least 2 when they partially address the criterion. Use exact Spring 2025 rubric descriptors as final authority. Scores integers 1-4 only; decisions Yes/No only; no Partial/Borderline/Maybe/0/5/decimals; JSON only; no hallucinated evidence. If any domain overall_decision is "No", overall_meets_expectations must be "No".
+Keep explanation one short sentence. evidence_from_map max 1-2 short items per criterion; use "No clear evidence found in the concept map." only when evidence is missing.
+strengths max 2 short strings; areas_for_improvement max 2-3 short strings; grading_notes max 1 sentence.
 Schema:{json.dumps(schema(map_file), separators=(",", ":"))}
 """
 

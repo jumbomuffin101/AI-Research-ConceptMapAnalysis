@@ -299,6 +299,26 @@ def _normalize_if_no_explanations(result: dict[str, Any]) -> None:
         section["if_no_explanation"] = _generated_if_no_explanation(group, section)
 
 
+def _normalize_final_decision_consistency(result: dict[str, Any]) -> None:
+    """Ensure final overall decision cannot be Yes when any domain is No."""
+    domain_decisions = []
+    for group in CATEGORY_FIELDS:
+        section = result.get(group)
+        if isinstance(section, dict):
+            domain_decisions.append(section.get("overall_decision"))
+    if "No" not in domain_decisions:
+        return
+    if result.get("overall_meets_expectations") == "No":
+        return
+    original_value = result.get("overall_meets_expectations")
+    result["overall_meets_expectations"] = "No"
+    _append_grading_note(
+        result,
+        "Final overall decision normalized to No because at least one domain "
+        f"overall_decision was No; original overall_meets_expectations={original_value!r}.",
+    )
+
+
 def _normalize_decision_fields(result: dict[str, Any]) -> None:
     """Normalize Llama 4 Scout decision labels before schema validation."""
     converted: list[str] = []
@@ -344,6 +364,7 @@ def parse_model_json(raw_text: str, normalize_decisions: bool = False) -> dict[s
     if normalize_decisions:
         _normalize_decision_fields(result)
     _normalize_if_no_explanations(result)
+    _normalize_final_decision_consistency(result)
     if not normalize_decisions and _contains_forbidden_decision_text(result):
         raise MalformedResultError(
             "The model result contains a forbidden non-binary decision label."
