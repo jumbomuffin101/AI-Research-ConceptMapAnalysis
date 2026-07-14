@@ -274,22 +274,27 @@ def _generated_if_no_explanation(group: str, section: dict[str, Any]) -> str:
     ]
     if reasons:
         reason_text = "; ".join(reasons[:2])
+        verb = "was" if len(labels) == 1 else "were"
         return (
             f"{domain_label} does not meet expectations because {label_text} "
-            f"were incomplete: {reason_text}."
+            f"{verb} incomplete: {reason_text}."
         )
-    return f"{domain_label} does not meet expectations because {label_text} were incomplete."
+    verb = "was" if len(labels) == 1 else "were"
+    return f"{domain_label} does not meet expectations because {label_text} {verb} incomplete."
 
 
 def _normalize_if_no_explanations(result: dict[str, Any]) -> None:
-    """Fill missing Llama 4 Scout domain explanations before schema validation."""
+    """Fill missing domain explanations before schema validation."""
     for group in CATEGORY_FIELDS:
         section = result.get(group)
         if not isinstance(section, dict):
             continue
         if section.get("overall_decision") != "No":
             continue
-        if str(section.get("if_no_explanation", "")).strip():
+        explanation = section.get("if_no_explanation")
+        if isinstance(explanation, str) and explanation.strip():
+            continue
+        if explanation is not None and not isinstance(explanation, str):
             continue
         section["if_no_explanation"] = _generated_if_no_explanation(group, section)
 
@@ -338,8 +343,8 @@ def parse_model_json(raw_text: str, normalize_decisions: bool = False) -> dict[s
     _normalize_evidence_from_map(result)
     if normalize_decisions:
         _normalize_decision_fields(result)
-        _normalize_if_no_explanations(result)
-    elif _contains_forbidden_decision_text(result):
+    _normalize_if_no_explanations(result)
+    if not normalize_decisions and _contains_forbidden_decision_text(result):
         raise MalformedResultError(
             "The model result contains a forbidden non-binary decision label."
         )
