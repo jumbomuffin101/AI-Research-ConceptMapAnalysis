@@ -187,6 +187,22 @@ Rules:
 - Include evidence_from_map when visible.
 - If evidence is missing, write "No clear evidence found in the concept map."
 - Do not hallucinate evidence.
+- Grade only demonstrated content and visible relationships.
+- Do not reward the presence of isolated medical terms.
+- Do not infer missing knowledge from general medical plausibility.
+- A correct term without synthesis or connection does not satisfy a score-3 or score-4 descriptor.
+- Score 4 only when the full score-4 descriptor is clearly satisfied.
+- Score 3 only when evidence is relevant and mostly synthesized.
+- Score 2 when evidence is partly relevant, too general, incomplete, or weakly connected.
+- Score 1 when evidence is absent, irrelevant, or unclear.
+- Knowledge Acquisition overall_decision is Yes only when the map demonstrates sufficient key knowledge from the case and unit content across the domain. A few strong criteria must not compensate for major missing areas.
+- Integration overall_decision is Yes only when key knowledge is connected accurately and comprehensively. Isolated concepts or weak connections are insufficient.
+- Application overall_decision is Yes only when the map clearly explains key clinical data using relevant basic science and visible pathophysiology flows.
+- Transfer overall_decision is Yes only when previously learned content visibly deepens understanding of the current condition.
+- overall_meets_expectations must be "Yes" only when all four domain overall_decision values are "Yes".
+- If any domain overall_decision is "No", overall_meets_expectations must be "No".
+- A weak map must not pass because it contains some correct concepts.
+- Before returning JSON, perform a consistency check: each domain decision must agree with its criterion scores and evidence, the final overall decision must agree with all four domain decisions, and any No domain requires final overall No.
 - Keep REFERENCE MATERIAL and STUDENT CONCEPT MAP evidence separate.{no_reference_rule}
 - Return JSON only using this exact schema:
 {json.dumps(schema(map_file), separators=(",", ":"))}
