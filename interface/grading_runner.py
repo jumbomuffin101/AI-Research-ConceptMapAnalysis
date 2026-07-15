@@ -21,6 +21,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = PROJECT_ROOT / "outputs" / "web_demo"
 DEBUG_DIR = OUTPUT_DIR / "debug"
 EVALUATION_SUMMARY_DIR = PROJECT_ROOT / "outputs" / "evaluation_summary"
+RAW_EVALUATION_DIR = EVALUATION_SUMMARY_DIR / "raw"
+FAILURE_EVALUATION_DIR = EVALUATION_SUMMARY_DIR / "failures"
 
 MODEL_MODULES = {
     "Gemma": grade_gemma,
@@ -74,6 +76,7 @@ class EvaluationResult:
     model_id: str
     data: dict[str, Any]
     output_path: Path
+    saved_result_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +138,13 @@ def _failure_suffix(model_name: str) -> str:
     if model_name == "Llama 4 Scout":
         return "llama4_scout_failure"
     return f"{_model_slug(model_name)}_failure"
+
+
+def _result_suffix(model_name: str) -> str:
+    """Keep saved result filenames stable and easy to identify."""
+    if model_name == "Llama 4 Scout":
+        return "llama4_scout"
+    return _model_slug(model_name)
 
 
 def _strip_json_fences(raw_text: str) -> str:
@@ -468,6 +478,64 @@ def _save_failed_response(
     return debug_path
 
 
+def _save_successful_evaluation(
+    *,
+    original_filename: str,
+    evaluated_at: str,
+    model_name: str,
+    model_id: str,
+    data: dict[str, Any],
+) -> Path:
+    """Persist one validated model result, replacing only an older success."""
+    RAW_EVALUATION_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = RAW_EVALUATION_DIR / (
+        f"{_safe_stem(original_filename)}_{_result_suffix(model_name)}.json"
+    )
+    payload = {
+        "map_file": Path(original_filename).name,
+        "evaluated_at": evaluated_at,
+        "model_label": model_name,
+        "model_id": model_id,
+        "result": data,
+    }
+    output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return output_path
+
+
+def _save_evaluation_failure(
+    *,
+    timestamp: str,
+    run_id: str,
+    original_filename: str,
+    evaluated_at: str,
+    model_name: str,
+    model_id: str,
+    error_message: str,
+    debug_path: Path,
+) -> Path:
+    """Persist a failed run without touching a previously saved success."""
+    FAILURE_EVALUATION_DIR.mkdir(parents=True, exist_ok=True)
+    failure_path = FAILURE_EVALUATION_DIR / (
+        f"{timestamp}_{run_id}_{_safe_stem(original_filename)}_"
+        f"{_failure_suffix(model_name)}.json"
+    )
+    failure_path.write_text(
+        json.dumps(
+            {
+                "map_file": Path(original_filename).name,
+                "evaluated_at": evaluated_at,
+                "model_label": model_name,
+                "model_id": model_id,
+                "error": error_message,
+                "debug_path": str(debug_path),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return failure_path
+
+
 def _extract_map_number(filename: str) -> int | None:
     """Infer a map number from the uploaded filename when possible."""
     stem = Path(filename).stem
@@ -557,7 +625,8 @@ def run_evaluation(
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-    EVALUATION_SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
+    RAW_EVALUATION_DIR.mkdir(parents=True, exist_ok=True)
+    FAILURE_EVALUATION_DIR.mkdir(parents=True, exist_ok=True)
 
     evaluated_at_datetime = datetime.now(timezone.utc)
     evaluated_at = evaluated_at_datetime.isoformat()
@@ -587,6 +656,14 @@ def run_evaluation(
                 normalize_decisions=model_name == "Llama 4 Scout",
             )
 
+            saved_result_path = _save_successful_evaluation(
+                original_filename=original_filename,
+                evaluated_at=evaluated_at,
+                model_name=model_name,
+                model_id=model_id,
+                data=data,
+            )
+
             output_path = (
                 OUTPUT_DIR
                 / f"{timestamp}_{run_id}_{file_stem}_{_model_slug(model_name)}.json"
@@ -602,7 +679,15 @@ def run_evaluation(
             }
             debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
-            results.append(EvaluationResult(model_name, model_id, data, output_path))
+            results.append(
+                EvaluationResult(
+                    model_name,
+                    model_id,
+                    data,
+                    output_path,
+                    saved_result_path,
+                )
+            )
         except Exception as exc:
             raw = getattr(exc, "raw_response", None)
             if raw is None:
@@ -616,6 +701,16 @@ def run_evaluation(
                 error_message=str(exc),
                 raw_response=raw,
             )
+            _save_evaluation_failure(
+                timestamp=timestamp,
+                run_id=run_id,
+                original_filename=original_filename,
+                evaluated_at=evaluated_at,
+                model_name=model_name,
+                model_id=model_id,
+                error_message=str(exc),
+                debug_path=debug_path,
+            )
             results.append(
                 EvaluationFailure(
                     model_name=model_name,
@@ -624,10 +719,4 @@ def run_evaluation(
                     debug_path=debug_path,
                 )
             )
-
-    _save_batch_summary(
-        original_filename=original_filename,
-        evaluated_at=evaluated_at,
-        results=results,
-    )
     return results

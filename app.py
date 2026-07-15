@@ -80,12 +80,14 @@ elif model_selection != previous_model_selection:
     st.session_state.pop("evaluation_results", None)
     st.session_state.pop("evaluation_debug", None)
     st.session_state.pop("evaluation_error", None)
+    st.session_state.pop("evaluation_saved", None)
     st.session_state["previous_model_selection"] = model_selection
 
 if previous_file_fingerprint != uploaded_file_fingerprint:
     st.session_state.pop("evaluation_results", None)
     st.session_state.pop("evaluation_debug", None)
     st.session_state.pop("evaluation_error", None)
+    st.session_state.pop("evaluation_saved", None)
     st.session_state["previous_file_fingerprint"] = uploaded_file_fingerprint
 
 if previous_reference_fingerprint is None:
@@ -94,6 +96,7 @@ elif previous_reference_fingerprint != reference_fingerprint:
     st.session_state.pop("evaluation_results", None)
     st.session_state.pop("evaluation_debug", None)
     st.session_state.pop("evaluation_error", None)
+    st.session_state.pop("evaluation_saved", None)
     st.session_state["previous_reference_fingerprint"] = reference_fingerprint
 
 st.button("Multi-AI Consensus Grading - Coming Soon", disabled=True)
@@ -103,6 +106,7 @@ if st.button("Run Evaluation", type="primary"):
         st.error("Upload a PDF before running the evaluation.")
     else:
         st.session_state.pop("evaluation_results", None)
+        st.session_state.pop("evaluation_saved", None)
         try:
             status_placeholder = st.empty()
 
@@ -122,10 +126,16 @@ if st.button("Run Evaluation", type="primary"):
                     )
                 show_progress("Rendering results")
                 st.session_state["evaluation_results"] = results
+                st.session_state["evaluation_saved"] = any(
+                    getattr(result, "saved_result_path", None) is not None
+                    for result in results
+                )
         except GradingError as exc:
             st.error(str(exc))
         except Exception as exc:
             st.error(f"Evaluation failed unexpectedly: {exc}")
 
 if st.session_state.get("evaluation_results"):
+    if st.session_state.get("evaluation_saved"):
+        st.success("Saved successful evaluation result.")
     display_results(st.session_state["evaluation_results"])

@@ -1,7 +1,8 @@
-"""Generate a Markdown report from saved concept map evaluation summaries."""
+"""Generate consolidated reports from automatically saved successful evaluations."""
 
 from __future__ import annotations
 
+import csv
 import json
 import re
 from pathlib import Path
@@ -10,34 +11,31 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SUMMARY_DIR = PROJECT_ROOT / "outputs" / "evaluation_summary"
+RAW_DIR = SUMMARY_DIR / "raw"
+FAILURE_DIR = SUMMARY_DIR / "failures"
 REPORT_PATH = SUMMARY_DIR / "concept_map_evaluation_report.md"
+CSV_PATH = SUMMARY_DIR / "concept_map_evaluation_summary.csv"
+JSON_PATH = SUMMARY_DIR / "concept_map_evaluation_summary.json"
 
+MODEL_KEYS = {"Gemma": "gemma", "Llama 4 Scout": "llama_4_scout"}
+MODEL_TITLES = {"gemma": "Gemma", "llama_4_scout": "Llama 4 Scout"}
 DOMAIN_FIELDS = {
     "knowledge_acquisition": [
-        "basic_science",
-        "health_system_science",
-        "clinical_science",
-        "patient_case_information",
-        "determinants_of_health",
+        "basic_science", "health_system_science", "clinical_science",
+        "patient_case_information", "determinants_of_health",
     ],
     "integration": [
-        "prioritized_differential_diagnosis",
-        "illness_scripts",
-        "basic_to_foundational_science",
-        "patient_data_to_clinical_information",
+        "prioritized_differential_diagnosis", "illness_scripts",
+        "basic_to_foundational_science", "patient_data_to_clinical_information",
         "patient_data_to_basic_science",
     ],
     "application": [
-        "working_diagnosis_pathophysiology",
-        "patient_data_pathophysiology",
+        "working_diagnosis_pathophysiology", "patient_data_pathophysiology",
     ],
     "transfer": [
-        "prior_basic_science",
-        "prior_clinical_concepts",
-        "deepens_understanding",
+        "prior_basic_science", "prior_clinical_concepts", "deepens_understanding",
     ],
 }
-
 DOMAIN_TITLES = {
     "knowledge_acquisition": "Knowledge Acquisition",
     "integration": "Integration",
@@ -45,191 +43,212 @@ DOMAIN_TITLES = {
     "transfer": "Transfer",
 }
 
-MODEL_TITLES = {
-    "gemma": "Gemma",
-    "llama_4_scout": "Llama 4 Scout",
-}
+
+def _map_key(filename: str) -> str:
+    return re.sub(r"\s+", " ", Path(filename).name).strip().lower()
 
 
-def load_results() -> list[tuple[int, dict[str, Any]]]:
-    results: list[tuple[int, dict[str, Any]]] = []
-    for path in sorted(SUMMARY_DIR.glob("map_*_results.json"), key=map_file_sort_key):
-        match = re.search(r"map_(\d+)_results\.json$", path.name)
-        if not match:
+def _sort_key(filename: str) -> list[Any]:
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", filename)]
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def load_evaluations() -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], str]]:
+    """Return newest success for each map/model plus latest failure for missing pairs."""
+    maps: dict[str, dict[str, Any]] = {}
+    successes: dict[tuple[str, str], dict[str, Any]] = {}
+
+    for path in RAW_DIR.glob("*.json") if RAW_DIR.exists() else []:
+        record = _read_json(path)
+        if not record:
             continue
-        results.append((int(match.group(1)), json.loads(path.read_text(encoding="utf-8"))))
-    return results
+        filename = record.get("map_file")
+        model_key = MODEL_KEYS.get(record.get("model_label"))
+        result = record.get("result")
+        if not isinstance(filename, str) or model_key is None or not isinstance(result, dict):
+            continue
+        key = (_map_key(filename), model_key)
+        current = successes.get(key)
+        if current is None or str(record.get("evaluated_at", "")) >= str(current.get("evaluated_at", "")):
+            successes[key] = record
+
+    for (map_key, model_key), record in successes.items():
+        maps.setdefault(map_key, {"map_file": record["map_file"], "models": {}, "failures": {}})
+        maps[map_key]["models"][model_key] = record
+
+    failure_messages: dict[tuple[str, str], tuple[str, str]] = {}
+    for path in FAILURE_DIR.glob("*.json") if FAILURE_DIR.exists() else []:
+        record = _read_json(path)
+        if not record:
+            continue
+        filename = record.get("map_file")
+        model_key = MODEL_KEYS.get(record.get("model_label"))
+        if not isinstance(filename, str) or model_key is None:
+            continue
+        key = (_map_key(filename), model_key)
+        current = failure_messages.get(key)
+        timestamp = str(record.get("evaluated_at", ""))
+        if current is None or timestamp >= current[0]:
+            failure_messages[key] = (timestamp, str(record.get("error", "Unknown model failure.")))
+        maps.setdefault(_map_key(filename), {"map_file": filename, "models": {}, "failures": {}})
+
+    missing_failures: dict[tuple[str, str], str] = {}
+    for map_key, entry in maps.items():
+        for model_key in MODEL_TITLES:
+            if model_key not in entry["models"]:
+                message = failure_messages.get((map_key, model_key), ("", "No successful result was saved."))[1]
+                entry["failures"][model_key] = message
+                missing_failures[(map_key, model_key)] = message
+    return maps, missing_failures
 
 
-def map_file_sort_key(path: Path) -> int:
-    match = re.search(r"map_(\d+)_results\.json$", path.name)
-    return int(match.group(1)) if match else 999
+def _result(entry: dict[str, Any], model_key: str) -> dict[str, Any] | None:
+    record = entry["models"].get(model_key)
+    return record.get("result") if isinstance(record, dict) and isinstance(record.get("result"), dict) else None
 
 
-def criterion_label(field_name: str) -> str:
-    return field_name.replace("_", " ").title()
+def _overall(result: dict[str, Any] | None) -> str:
+    return str(result.get("overall_meets_expectations", "N/A")) if result else "N/A"
 
 
-def model_score(model_payload: dict[str, Any] | None, domain: str, criterion: str) -> str:
-    if not isinstance(model_payload, dict):
+def _score(result: dict[str, Any] | None, domain: str, criterion: str) -> str:
+    if not result or not isinstance(result.get(domain), dict):
         return "N/A"
-    section = model_payload.get(domain)
-    if not isinstance(section, dict):
-        return "N/A"
-    item = section.get(criterion)
-    if not isinstance(item, dict):
-        return "N/A"
-    score = item.get("score")
-    return str(score) if score is not None else "N/A"
+    item = result[domain].get(criterion)
+    return str(item.get("score", "N/A")) if isinstance(item, dict) else "N/A"
 
 
-def model_overall(model_payload: dict[str, Any] | None) -> str:
-    if not isinstance(model_payload, dict):
-        return "N/A"
-    return str(model_payload.get("overall_meets_expectations", "N/A"))
-
-
-def model_items(model_payload: dict[str, Any] | None, field: str) -> list[str]:
-    if not isinstance(model_payload, dict):
-        return []
-    value = model_payload.get(field, [])
-    if isinstance(value, list):
-        return [str(item) for item in value if str(item).strip()]
-    if isinstance(value, str) and value.strip():
-        return [value.strip()]
-    return []
-
-
-def all_scores(model_payload: dict[str, Any] | None) -> list[int]:
-    if not isinstance(model_payload, dict):
-        return []
+def _average(result: dict[str, Any] | None, domain: str | None = None) -> float | None:
+    if not result:
+        return None
+    domains = [domain] if domain else DOMAIN_FIELDS.keys()
     scores: list[int] = []
-    for domain, criteria in DOMAIN_FIELDS.items():
-        section = model_payload.get(domain)
+    for domain_name in domains:
+        section = result.get(domain_name)
         if not isinstance(section, dict):
             continue
-        for criterion in criteria:
-            item = section.get(criterion)
-            if not isinstance(item, dict):
-                continue
-            score = item.get("score")
+        for criterion in DOMAIN_FIELDS[domain_name]:
+            value = section.get(criterion)
+            score = value.get("score") if isinstance(value, dict) else None
             if isinstance(score, int) and not isinstance(score, bool):
                 scores.append(score)
-    return scores
+    return sum(scores) / len(scores) if scores else None
 
 
-def average_score(model_payload: dict[str, Any] | None) -> str:
-    scores = all_scores(model_payload)
-    if not scores:
-        return "N/A"
-    return f"{sum(scores) / len(scores):.2f}"
+def _items(result: dict[str, Any] | None, field: str) -> list[str]:
+    value = result.get(field, []) if result else []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return [str(value)] if str(value).strip() else []
 
 
-def add_bullets(lines: list[str], items: list[str]) -> None:
-    if not items:
-        lines.append("- N/A")
-        return
-    for item in items:
-        lines.append(f"- {item}")
+def _bullets(lines: list[str], values: list[str]) -> None:
+    for value in values or ["N/A"]:
+        lines.append(f"- {value}")
 
 
-def render_map_section(lines: list[str], map_number: int, result: dict[str, Any]) -> None:
-    gemma = result.get("gemma")
-    llama = result.get("llama_4_scout")
+def render_report(maps: dict[str, dict[str, Any]]) -> str:
+    lines = ["# Concept Map Evaluation Results", ""]
+    entries = sorted(maps.values(), key=lambda entry: _sort_key(entry["map_file"]))
+    if not entries:
+        lines += ["No successful evaluation results were found in `outputs/evaluation_summary/raw/`.", ""]
 
-    lines.append(f"## Map {map_number}")
+    for number, entry in enumerate(entries, start=1):
+        gemma, llama = _result(entry, "gemma"), _result(entry, "llama_4_scout")
+        lines += [f"## Map {number}: {entry['map_file']}", "", "### Overall", "",
+                  f"Gemma: {_overall(gemma)}", f"Llama 4 Scout: {_overall(llama)}", ""]
+        for domain, criteria in DOMAIN_FIELDS.items():
+            lines += [f"### {DOMAIN_TITLES[domain]}", "", "| Criterion | Gemma | Llama 4 Scout |", "|---|---:|---:|"]
+            for criterion in criteria:
+                lines.append(f"| {criterion.replace('_', ' ').title()} | {_score(gemma, domain, criterion)} | {_score(llama, domain, criterion)} |")
+            lines.append("")
+        for heading, field in [("Strengths", "strengths"), ("Areas for Improvement", "areas_for_improvement"), ("Grading Notes", "grading_notes")]:
+            lines += [f"### {heading}", "", "Gemma:"]
+            _bullets(lines, _items(gemma, field))
+            lines += ["", "Llama 4 Scout:"]
+            _bullets(lines, _items(llama, field))
+            lines.append("")
+        if entry["failures"]:
+            lines += ["### Missing Model Results", ""]
+            for model_key, message in entry["failures"].items():
+                lines.append(f"- {MODEL_TITLES[model_key]}: {message}")
+            lines.append("")
+
+    comparable = [entry for entry in entries if _result(entry, "gemma") and _result(entry, "llama_4_scout")]
+    agreed = sum(_overall(_result(entry, "gemma")) == _overall(_result(entry, "llama_4_scout")) for entry in comparable)
+    lines += ["## Cross-Model Summary", "", "| Map | Gemma Overall | Llama 4 Scout Overall | Agreed | Gemma Avg Score | Llama 4 Scout Avg Score |", "|---|---|---|---|---:|---:|"]
+    for index, entry in enumerate(entries, start=1):
+        gemma, llama = _result(entry, "gemma"), _result(entry, "llama_4_scout")
+        agreement = "Yes" if gemma and llama and _overall(gemma) == _overall(llama) else "No"
+        g_avg, l_avg = _average(gemma), _average(llama)
+        lines.append(f"| Map {index} | {_overall(gemma)} | {_overall(llama)} | {agreement} | {g_avg:.2f} | {l_avg:.2f} |" if g_avg is not None and l_avg is not None else f"| Map {index} | {_overall(gemma)} | {_overall(llama)} | {agreement} | {f'{g_avg:.2f}' if g_avg is not None else 'N/A'} | {f'{l_avg:.2f}' if l_avg is not None else 'N/A'} |")
+    percent = (agreed / len(comparable) * 100) if comparable else 0.0
+    lines += ["", f"- Agreement count: {agreed}", f"- Agreement percentage: {percent:.1f}% ({len(comparable)} comparable maps)"]
+    for model_key in MODEL_TITLES:
+        successful = sum(_result(entry, model_key) is not None for entry in entries)
+        lines.append(f"- {MODEL_TITLES[model_key]} successful runs: {successful}; failed/missing runs: {len(entries) - successful}")
+    lines += ["", "### Average Domain Scores", "", "| Model | Knowledge Acquisition | Integration | Application | Transfer |"]
+    lines.append("|---|---:|---:|---:|---:|")
+    for model_key, title in MODEL_TITLES.items():
+        averages: list[str] = []
+        for domain in DOMAIN_FIELDS:
+            values = [
+                value
+                for entry in entries
+                if (value := _average(_result(entry, model_key), domain)) is not None
+            ]
+            averages.append(f"{sum(values) / len(values):.2f}" if values else "N/A")
+        lines.append(f"| {title} | " + " | ".join(averages) + " |")
     lines.append("")
-    lines.append(f"Source file: `{result.get('map_file', 'N/A')}`")
-    lines.append("")
-    lines.append("### Overall")
-    lines.append("")
-    lines.append(f"Gemma: {model_overall(gemma)}")
-    lines.append(f"Llama 4 Scout: {model_overall(llama)}")
-    lines.append("")
-
-    for domain, criteria in DOMAIN_FIELDS.items():
-        lines.append(f"### {DOMAIN_TITLES[domain]}")
-        lines.append("")
-        lines.append("| Criterion | Gemma | Llama 4 Scout |")
-        lines.append("|---|---:|---:|")
-        for criterion in criteria:
-            lines.append(
-                f"| {criterion_label(criterion)} | "
-                f"{model_score(gemma, domain, criterion)} | "
-                f"{model_score(llama, domain, criterion)} |"
-            )
-        lines.append("")
-
-    lines.append("### Strengths")
-    lines.append("")
-    lines.append("Gemma:")
-    add_bullets(lines, model_items(gemma, "strengths"))
-    lines.append("")
-    lines.append("Llama 4 Scout:")
-    add_bullets(lines, model_items(llama, "strengths"))
-    lines.append("")
-
-    lines.append("### Areas for Improvement")
-    lines.append("")
-    lines.append("Gemma:")
-    add_bullets(lines, model_items(gemma, "areas_for_improvement"))
-    lines.append("")
-    lines.append("Llama 4 Scout:")
-    add_bullets(lines, model_items(llama, "areas_for_improvement"))
-    lines.append("")
+    return "\n".join(lines)
 
 
-def render_cross_model_summary(lines: list[str], results: list[tuple[int, dict[str, Any]]]) -> None:
-    agreed = 0
-    disagreed = 0
-
-    lines.append("## Cross-Model Summary")
-    lines.append("")
-    lines.append("| Map | Gemma Overall | Llama 4 Scout Overall | Agreed | Gemma Avg Score | Llama 4 Scout Avg Score |")
-    lines.append("|---|---|---|---|---:|---:|")
-
-    for map_number, result in results:
-        gemma = result.get("gemma")
-        llama = result.get("llama_4_scout")
-        gemma_overall = model_overall(gemma)
-        llama_overall = model_overall(llama)
-        agreement = gemma_overall == llama_overall and gemma_overall != "N/A"
-        if agreement:
-            agreed += 1
-        else:
-            disagreed += 1
-        lines.append(
-            f"| Map {map_number} | {gemma_overall} | {llama_overall} | "
-            f"{'Yes' if agreement else 'No'} | {average_score(gemma)} | "
-            f"{average_score(llama)} |"
-        )
-
-    lines.append("")
-    lines.append(f"- Maps where both models agreed: {agreed}")
-    lines.append(f"- Maps where models disagreed: {disagreed}")
-    lines.append("")
+def write_machine_summaries(maps: dict[str, dict[str, Any]]) -> None:
+    entries = sorted(maps.values(), key=lambda entry: _sort_key(entry["map_file"]))
+    rows: list[dict[str, Any]] = []
+    for entry in entries:
+        row: dict[str, Any] = {"map_file": entry["map_file"]}
+        for model_key in MODEL_TITLES:
+            result = _result(entry, model_key)
+            prefix = model_key
+            row[f"{prefix}_overall"] = _overall(result)
+            row[f"{prefix}_successful"] = result is not None
+            row[f"{prefix}_failure"] = entry["failures"].get(model_key, "")
+            row[f"{prefix}_average_score"] = _average(result)
+            for domain in DOMAIN_FIELDS:
+                row[f"{prefix}_{domain}_average"] = _average(result, domain)
+                for criterion in DOMAIN_FIELDS[domain]:
+                    row[f"{prefix}_{domain}_{criterion}_score"] = _score(
+                        result, domain, criterion
+                    )
+        row["overall_agreement"] = bool(_result(entry, "gemma") and _result(entry, "llama_4_scout") and _overall(_result(entry, "gemma")) == _overall(_result(entry, "llama_4_scout")))
+        rows.append(row)
+    fieldnames = sorted({field for row in rows for field in row}) or ["map_file"]
+    with CSV_PATH.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    JSON_PATH.write_text(json.dumps({"maps": entries, "summary_rows": rows}, indent=2), encoding="utf-8")
 
 
-def generate_report() -> Path:
+def generate_report() -> tuple[Path, Path, Path]:
     SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
-    results = load_results()
-
-    lines: list[str] = ["# Concept Map Evaluation Results", ""]
-    if not results:
-        lines.append("No saved map result files were found.")
-        lines.append("")
-    else:
-        for map_number, result in results:
-            render_map_section(lines, map_number, result)
-        render_cross_model_summary(lines, results)
-
-    REPORT_PATH.write_text("\n".join(lines), encoding="utf-8")
-    return REPORT_PATH
+    maps, _ = load_evaluations()
+    REPORT_PATH.write_text(render_report(maps), encoding="utf-8")
+    write_machine_summaries(maps)
+    return REPORT_PATH, CSV_PATH, JSON_PATH
 
 
 def main() -> None:
-    report_path = generate_report()
-    print(f"Generated report: {report_path}")
+    for path in generate_report():
+        print(path)
 
 
 if __name__ == "__main__":
