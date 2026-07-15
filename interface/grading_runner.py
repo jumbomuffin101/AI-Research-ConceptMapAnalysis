@@ -20,6 +20,7 @@ from grading import grade_gemma, grade_llama
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = PROJECT_ROOT / "outputs" / "web_demo"
 DEBUG_DIR = OUTPUT_DIR / "debug"
+EVALUATION_SUMMARY_DIR = PROJECT_ROOT / "outputs" / "evaluation_summary"
 
 MODEL_MODULES = {
     "Gemma": grade_gemma,
@@ -467,6 +468,78 @@ def _save_failed_response(
     return debug_path
 
 
+def _extract_map_number(filename: str) -> int | None:
+    """Infer a map number from the uploaded filename when possible."""
+    stem = Path(filename).stem
+    for match in re.findall(r"\d+", stem):
+        value = int(match)
+        if 1 <= value <= 6:
+            return value
+    return None
+
+
+def _next_available_map_number() -> int:
+    """Choose the first unused map_N_results.json slot, bounded to 1..6."""
+    EVALUATION_SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
+    for number in range(1, 7):
+        if not (EVALUATION_SUMMARY_DIR / f"map_{number}_results.json").exists():
+            return number
+    return 6
+
+
+def _summary_model_key(model_name: str) -> str | None:
+    if model_name == "Gemma":
+        return "gemma"
+    if model_name == "Llama 4 Scout":
+        return "llama_4_scout"
+    return None
+
+
+def _summary_model_payload(result: EvaluationResult) -> dict[str, Any]:
+    data = result.data
+    return {
+        "model": data.get("model", result.model_id),
+        "overall_meets_expectations": data.get("overall_meets_expectations"),
+        "knowledge_acquisition": data.get("knowledge_acquisition"),
+        "integration": data.get("integration"),
+        "application": data.get("application"),
+        "transfer": data.get("transfer"),
+        "strengths": data.get("strengths", []),
+        "areas_for_improvement": data.get("areas_for_improvement", []),
+    }
+
+
+def _save_batch_summary(
+    *,
+    original_filename: str,
+    evaluated_at: str,
+    results: list[EvaluationOutcome],
+) -> Path | None:
+    """Save one compact batch summary JSON for the uploaded concept map."""
+    successful_results = [
+        result for result in results if isinstance(result, EvaluationResult)
+    ]
+    if not successful_results:
+        return None
+
+    map_number = _extract_map_number(original_filename) or _next_available_map_number()
+    payload: dict[str, Any] = {
+        "map_file": Path(original_filename).name,
+        "evaluated_at": evaluated_at,
+        "gemma": None,
+        "llama_4_scout": None,
+    }
+    for result in successful_results:
+        key = _summary_model_key(result.model_name)
+        if key:
+            payload[key] = _summary_model_payload(result)
+
+    EVALUATION_SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = EVALUATION_SUMMARY_DIR / f"map_{map_number}_results.json"
+    output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return output_path
+
+
 def run_evaluation(
     pdf_path: Path,
     model_names: Iterable[str],
@@ -484,8 +557,11 @@ def run_evaluation(
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    EVALUATION_SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    evaluated_at_datetime = datetime.now(timezone.utc)
+    evaluated_at = evaluated_at_datetime.isoformat()
+    timestamp = evaluated_at_datetime.strftime("%Y%m%dT%H%M%SZ")
     run_id = uuid4().hex[:8]
     file_stem = _safe_stem(original_filename)
     map_file = Path(original_filename).name
@@ -549,4 +625,9 @@ def run_evaluation(
                 )
             )
 
+    _save_batch_summary(
+        original_filename=original_filename,
+        evaluated_at=evaluated_at,
+        results=results,
+    )
     return results
