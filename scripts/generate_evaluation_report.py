@@ -125,6 +125,12 @@ def _score(result: dict[str, Any] | None, domain: str, criterion: str) -> str:
     return str(item.get("score", "N/A")) if isinstance(item, dict) else "N/A"
 
 
+def _domain_decision(result: dict[str, Any] | None, domain: str) -> str:
+    if not result or not isinstance(result.get(domain), dict):
+        return "N/A"
+    return str(result[domain].get("overall_decision", "N/A"))
+
+
 def _average(result: dict[str, Any] | None, domain: str | None = None) -> float | None:
     if not result:
         return None
@@ -168,7 +174,7 @@ def render_report(maps: dict[str, dict[str, Any]]) -> str:
             lines += [f"### {DOMAIN_TITLES[domain]}", "", "| Criterion | Gemma | Llama 4 Scout |", "|---|---:|---:|"]
             for criterion in criteria:
                 lines.append(f"| {criterion.replace('_', ' ').title()} | {_score(gemma, domain, criterion)} | {_score(llama, domain, criterion)} |")
-            lines.append("")
+            lines += ["", f"Domain decision — Gemma: {_domain_decision(gemma, domain)}; Llama 4 Scout: {_domain_decision(llama, domain)}", ""]
         for heading, field in [("Strengths", "strengths"), ("Areas for Improvement", "areas_for_improvement"), ("Grading Notes", "grading_notes")]:
             lines += [f"### {heading}", "", "Gemma:"]
             _bullets(lines, _items(gemma, field))
@@ -224,6 +230,9 @@ def write_machine_summaries(maps: dict[str, dict[str, Any]]) -> None:
             row[f"{prefix}_average_score"] = _average(result)
             for domain in DOMAIN_FIELDS:
                 row[f"{prefix}_{domain}_average"] = _average(result, domain)
+                row[f"{prefix}_{domain}_overall_decision"] = _domain_decision(
+                    result, domain
+                )
                 for criterion in DOMAIN_FIELDS[domain]:
                     row[f"{prefix}_{domain}_{criterion}_score"] = _score(
                         result, domain, criterion

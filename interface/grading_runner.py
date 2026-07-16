@@ -70,13 +70,13 @@ class MalformedResultError(GradingError):
 
 @dataclass(frozen=True)
 class EvaluationResult:
-    """One model's parsed result and persisted output location."""
+    """One model's parsed, validated result and web-demo output location."""
 
     model_name: str
     model_id: str
     data: dict[str, Any]
     output_path: Path
-    saved_result_path: Path | None = None
+    evaluated_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -502,6 +502,29 @@ def _save_successful_evaluation(
     return output_path
 
 
+def save_evaluation_results(
+    results: Iterable[EvaluationOutcome], original_filename: str
+) -> list[str]:
+    """Manually save the successful results currently displayed in Streamlit.
+
+    Failed outcomes are deliberately ignored, so they can never replace an
+    already saved successful result for the same map and model.
+    """
+    saved_models: list[str] = []
+    for result in results:
+        if not isinstance(result, EvaluationResult):
+            continue
+        _save_successful_evaluation(
+            original_filename=original_filename,
+            evaluated_at=result.evaluated_at or datetime.now(timezone.utc).isoformat(),
+            model_name=result.model_name,
+            model_id=result.model_id,
+            data=result.data,
+        )
+        saved_models.append(result.model_name)
+    return saved_models
+
+
 def _save_evaluation_failure(
     *,
     timestamp: str,
@@ -536,78 +559,6 @@ def _save_evaluation_failure(
     return failure_path
 
 
-def _extract_map_number(filename: str) -> int | None:
-    """Infer a map number from the uploaded filename when possible."""
-    stem = Path(filename).stem
-    for match in re.findall(r"\d+", stem):
-        value = int(match)
-        if 1 <= value <= 6:
-            return value
-    return None
-
-
-def _next_available_map_number() -> int:
-    """Choose the first unused map_N_results.json slot, bounded to 1..6."""
-    EVALUATION_SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
-    for number in range(1, 7):
-        if not (EVALUATION_SUMMARY_DIR / f"map_{number}_results.json").exists():
-            return number
-    return 6
-
-
-def _summary_model_key(model_name: str) -> str | None:
-    if model_name == "Gemma":
-        return "gemma"
-    if model_name == "Llama 4 Scout":
-        return "llama_4_scout"
-    return None
-
-
-def _summary_model_payload(result: EvaluationResult) -> dict[str, Any]:
-    data = result.data
-    return {
-        "model": data.get("model", result.model_id),
-        "overall_meets_expectations": data.get("overall_meets_expectations"),
-        "knowledge_acquisition": data.get("knowledge_acquisition"),
-        "integration": data.get("integration"),
-        "application": data.get("application"),
-        "transfer": data.get("transfer"),
-        "strengths": data.get("strengths", []),
-        "areas_for_improvement": data.get("areas_for_improvement", []),
-    }
-
-
-def _save_batch_summary(
-    *,
-    original_filename: str,
-    evaluated_at: str,
-    results: list[EvaluationOutcome],
-) -> Path | None:
-    """Save one compact batch summary JSON for the uploaded concept map."""
-    successful_results = [
-        result for result in results if isinstance(result, EvaluationResult)
-    ]
-    if not successful_results:
-        return None
-
-    map_number = _extract_map_number(original_filename) or _next_available_map_number()
-    payload: dict[str, Any] = {
-        "map_file": Path(original_filename).name,
-        "evaluated_at": evaluated_at,
-        "gemma": None,
-        "llama_4_scout": None,
-    }
-    for result in successful_results:
-        key = _summary_model_key(result.model_name)
-        if key:
-            payload[key] = _summary_model_payload(result)
-
-    EVALUATION_SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = EVALUATION_SUMMARY_DIR / f"map_{map_number}_results.json"
-    output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return output_path
-
-
 def run_evaluation(
     pdf_path: Path,
     model_names: Iterable[str],
@@ -625,7 +576,6 @@ def run_evaluation(
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-    RAW_EVALUATION_DIR.mkdir(parents=True, exist_ok=True)
     FAILURE_EVALUATION_DIR.mkdir(parents=True, exist_ok=True)
 
     evaluated_at_datetime = datetime.now(timezone.utc)
@@ -656,14 +606,6 @@ def run_evaluation(
                 normalize_decisions=model_name == "Llama 4 Scout",
             )
 
-            saved_result_path = _save_successful_evaluation(
-                original_filename=original_filename,
-                evaluated_at=evaluated_at,
-                model_name=model_name,
-                model_id=model_id,
-                data=data,
-            )
-
             output_path = (
                 OUTPUT_DIR
                 / f"{timestamp}_{run_id}_{file_stem}_{_model_slug(model_name)}.json"
@@ -679,15 +621,7 @@ def run_evaluation(
             }
             debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
-            results.append(
-                EvaluationResult(
-                    model_name,
-                    model_id,
-                    data,
-                    output_path,
-                    saved_result_path,
-                )
-            )
+            results.append(EvaluationResult(model_name, model_id, data, output_path, evaluated_at))
         except Exception as exc:
             raw = getattr(exc, "raw_response", None)
             if raw is None:

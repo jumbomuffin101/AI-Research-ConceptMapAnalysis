@@ -11,9 +11,11 @@ import streamlit as st
 from interface.grading_runner import (
     GradingError,
     run_evaluation,
+    save_evaluation_results,
     selected_model_names,
 )
 from interface.result_display import display_results
+from scripts.generate_evaluation_report import generate_report
 
 
 NO_REFERENCE_WARNING = (
@@ -80,14 +82,14 @@ elif model_selection != previous_model_selection:
     st.session_state.pop("evaluation_results", None)
     st.session_state.pop("evaluation_debug", None)
     st.session_state.pop("evaluation_error", None)
-    st.session_state.pop("evaluation_saved", None)
+    st.session_state.pop("saved_model_results", None)
     st.session_state["previous_model_selection"] = model_selection
 
 if previous_file_fingerprint != uploaded_file_fingerprint:
     st.session_state.pop("evaluation_results", None)
     st.session_state.pop("evaluation_debug", None)
     st.session_state.pop("evaluation_error", None)
-    st.session_state.pop("evaluation_saved", None)
+    st.session_state.pop("saved_model_results", None)
     st.session_state["previous_file_fingerprint"] = uploaded_file_fingerprint
 
 if previous_reference_fingerprint is None:
@@ -96,7 +98,7 @@ elif previous_reference_fingerprint != reference_fingerprint:
     st.session_state.pop("evaluation_results", None)
     st.session_state.pop("evaluation_debug", None)
     st.session_state.pop("evaluation_error", None)
-    st.session_state.pop("evaluation_saved", None)
+    st.session_state.pop("saved_model_results", None)
     st.session_state["previous_reference_fingerprint"] = reference_fingerprint
 
 st.button("Multi-AI Consensus Grading - Coming Soon", disabled=True)
@@ -106,7 +108,7 @@ if st.button("Run Evaluation", type="primary"):
         st.error("Upload a PDF before running the evaluation.")
     else:
         st.session_state.pop("evaluation_results", None)
-        st.session_state.pop("evaluation_saved", None)
+        st.session_state.pop("saved_model_results", None)
         try:
             status_placeholder = st.empty()
 
@@ -126,16 +128,49 @@ if st.button("Run Evaluation", type="primary"):
                     )
                 show_progress("Rendering results")
                 st.session_state["evaluation_results"] = results
-                st.session_state["evaluation_saved"] = any(
-                    getattr(result, "saved_result_path", None) is not None
-                    for result in results
-                )
         except GradingError as exc:
             st.error(str(exc))
         except Exception as exc:
             st.error(f"Evaluation failed unexpectedly: {exc}")
 
 if st.session_state.get("evaluation_results"):
-    if st.session_state.get("evaluation_saved"):
-        st.success("Saved successful evaluation result.")
     display_results(st.session_state["evaluation_results"])
+
+    if st.button("Save Results"):
+        saved_models = save_evaluation_results(
+            st.session_state["evaluation_results"],
+            uploaded_file.name if uploaded_file is not None else "concept_map.pdf",
+        )
+        if saved_models:
+            st.session_state["saved_model_results"] = saved_models
+        else:
+            st.warning("No successful model results are available to save.")
+
+    saved_models = st.session_state.get("saved_model_results", [])
+    if saved_models:
+        st.success("Results saved successfully.")
+        st.caption("Saved model results: " + ", ".join(saved_models))
+
+    if st.button("Generate Evaluation Report"):
+        try:
+            report_path, csv_path, json_path = generate_report()
+            st.session_state["evaluation_report_files"] = {
+                "markdown": str(report_path),
+                "csv": str(csv_path),
+                "json": str(json_path),
+            }
+            st.success("Evaluation report generated.")
+        except Exception as exc:
+            st.error(f"Could not generate the evaluation report: {exc}")
+
+    report_files = st.session_state.get("evaluation_report_files", {})
+    if report_files:
+        download_specs = [
+            ("markdown", "Download Markdown Report", "concept_map_evaluation_report.md", "text/markdown"),
+            ("csv", "Download CSV Summary", "concept_map_evaluation_summary.csv", "text/csv"),
+            ("json", "Download JSON Summary", "concept_map_evaluation_summary.json", "application/json"),
+        ]
+        for key, label, filename, mime in download_specs:
+            path = Path(report_files[key])
+            if path.exists():
+                st.download_button(label, data=path.read_bytes(), file_name=filename, mime=mime)
