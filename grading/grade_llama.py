@@ -156,7 +156,7 @@ def schema(map_file: str) -> dict[str, Any]:
     result: dict[str, Any] = {"map_file": map_file, "model": MODEL}
     for group, fields in CATEGORY_FIELDS.items():
         result[group] = {
-            field: {"score": 1, "explanation": "", "evidence_from_map": []}
+            field: {"score": 1, "explanation": ""}
             for field in fields
         }
         result[group]["overall_decision"] = "No"
@@ -193,8 +193,8 @@ STUDENT CONCEPT MAP:
 The uploaded image is the student's concept map.
 {reference_section}
 Rubric:{json.dumps(rubric_payload, separators=(",", ":"))}
-Rules: grade only demonstrated visible content and relationships in the STUDENT CONCEPT MAP image. Grade only the visible concept map against rubric descriptors when no reference material is supplied. Score only content actually visible in the student concept map; reference material is never map evidence. evidence_from_map must contain only specific visible map content. Every numeric criterion must include evidence_from_map as a JSON list of 1-3 short strings, or [] when no supporting evidence is visible. Do not infer invisible content. Do not reward isolated terms as synthesized knowledge. Score 1: criterion is absent, irrelevant, or visibly incorrect. Score 2: some relevant content exists, but it is general, incomplete, simplistic, or weakly connected. Score 3: content is relevant and mostly synthesized, with meaningful visible connections when required. Score 4: the complete score-4 descriptor is visibly demonstrated with detailed, comprehensive, synthesized content. Do not assign 1 merely because reference context was not supplied. Visible relevant concepts should receive at least 2 when they partially address the criterion. Use exact Spring 2025 rubric descriptors as final authority. Scores integers 1-4 only; decisions Yes/No only; no Partial/Borderline/Maybe/0/5/decimals; JSON only; no hallucinated evidence. If any domain overall_decision is "No", overall_meets_expectations must be "No".
-Keep explanation one short sentence. evidence_from_map max 1-3 short items per criterion, or [] if no evidence is visible.
+Rules: grade only demonstrated visible content and relationships in the STUDENT CONCEPT MAP image. Grade only the visible concept map against rubric descriptors when no reference material is supplied. Score only content actually visible in the student concept map; reference material is never map evidence. Do not infer invisible content. Do not reward isolated terms as synthesized knowledge. Score 1: criterion is absent, irrelevant, or visibly incorrect. Score 2: some relevant content exists, but it is general, incomplete, simplistic, or weakly connected. Score 3: content is relevant and mostly synthesized, with meaningful visible connections when required. Score 4: the complete score-4 descriptor is visibly demonstrated with detailed, comprehensive, synthesized content. Do not assign 1 merely because reference context was not supplied. Visible relevant concepts should receive at least 2 when they partially address the criterion. Use exact Spring 2025 rubric descriptors as final authority. Scores integers 1-4 only; decisions Yes/No only; no Partial/Borderline/Maybe/0/5/decimals; JSON only; no hallucinated evidence. If any domain overall_decision is "No", overall_meets_expectations must be "No".
+Keep explanation one short sentence.
 strengths max 2 short strings; areas_for_improvement max 2-3 short strings; grading_notes max 1 sentence.
 Schema:{json.dumps(schema(map_file), separators=(",", ":"))}
 """

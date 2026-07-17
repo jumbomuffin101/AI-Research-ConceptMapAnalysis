@@ -174,27 +174,6 @@ def _require_yes_no(value: Any, field_path: str) -> None:
         raise MalformedResultError(f"'{field_path}' must be exactly 'Yes' or 'No'.")
 
 
-def _normalize_evidence_from_map(result: dict[str, Any]) -> None:
-    """Normalize criterion evidence fields before schema validation."""
-    for group, fields in CATEGORY_FIELDS.items():
-        section = result.get(group)
-        if not isinstance(section, dict):
-            continue
-        for field in fields:
-            item = section.get(field)
-            if not isinstance(item, dict):
-                continue
-            evidence = item.get("evidence_from_map")
-            if isinstance(evidence, list):
-                continue
-            if isinstance(evidence, str):
-                item["evidence_from_map"] = [evidence] if evidence.strip() else []
-            elif evidence is None:
-                item["evidence_from_map"] = []
-            else:
-                item["evidence_from_map"] = [str(evidence)]
-
-
 def _normalize_decision_value(value: Any) -> tuple[str, str | None]:
     """Normalize model decision labels to the rubric's binary Yes/No values."""
     if isinstance(value, str):
@@ -370,7 +349,6 @@ def parse_model_json(raw_text: str, normalize_decisions: bool = False) -> dict[s
 
     if not isinstance(result, dict):
         raise MalformedResultError("The model response JSON must be an object.")
-    _normalize_evidence_from_map(result)
     if normalize_decisions:
         _normalize_decision_fields(result)
     _normalize_if_no_explanations(result)
@@ -418,11 +396,6 @@ def parse_model_json(raw_text: str, normalize_decisions: bool = False) -> dict[s
             if not isinstance(item.get("explanation"), str):
                 raise MalformedResultError(
                     f"'{group}.{field}.explanation' must be a string."
-                )
-            evidence = item.get("evidence_from_map")
-            if not isinstance(evidence, list):
-                raise MalformedResultError(
-                    f"'{group}.{field}.evidence_from_map' must be a list."
                 )
     return result
 

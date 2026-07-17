@@ -117,7 +117,7 @@ def schema(map_file: str) -> dict[str, Any]:
     result: dict[str, Any] = {"map_file": map_file, "model": MODEL}
     for group, fields in CATEGORY_FIELDS.items():
         result[group] = {
-            field: {"score": 1, "explanation": "", "evidence_from_map": []}
+            field: {"score": 1, "explanation": ""}
             for field in fields
         }
         result[group]["overall_decision"] = "No"
@@ -163,8 +163,6 @@ Rules:
 - Grade only demonstrated content and visible relationships in the STUDENT CONCEPT MAP image.
 - Grade only the visible concept map against the rubric descriptors when no reference material is supplied.
 - Score only content actually visible in the student concept map; reference material is never map evidence.
-- evidence_from_map must contain only specific content visible in the student concept map.
-- Every numeric criterion must include evidence_from_map as a JSON list of 1-3 short strings, or [] when no supporting evidence is visible.
 - Do not infer content that is not visible.
 - Do not infer missing knowledge from general medical plausibility.
 - Do not reward isolated medical terms as synthesized knowledge.
@@ -179,7 +177,6 @@ Rules:
 - Overall decisions must be exactly Yes or No only.
 - No Partial, Borderline, Maybe, 0, 5, or decimals.
 - Explanations: one brief sentence.
-- evidence_from_map: 1-3 short items per criterion, or [] if no evidence is visible.
 - strengths: maximum 2 short items.
 - areas_for_improvement: maximum 2-3 short items.
 - grading_notes: maximum one sentence.
