@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from interface.reference_materials import format_reference_context
+from grading.spring_2025_prompt import build_grading_prompt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUBRIC_PATH = PROJECT_ROOT / "rubric" / "concept_map_rubric.json"
@@ -143,77 +143,7 @@ def schema(map_file: str) -> dict[str, Any]:
 def build_prompt(
     map_file: str, reference_materials: list[dict[str, str]] | None = None
 ) -> str:
-    reference_context = format_reference_context(reference_materials or [])
-    reference_section = (
-        f"""REFERENCE MATERIAL
-The following files define the patient case and/or course content the student was expected to use.
-
-{reference_context}
-
-STUDENT CONCEPT MAP
-The concept map image is the only source of evidence for what the student actually included.
-
-Instructions for reference use:
-- Use the reference material only as the comparison standard.
-- Score only content visibly present in the student concept map.
-- Do not treat reference-material content as if it appears in the map.
-- For learned-this-unit criteria, compare visible map content against uploaded unit/session material.
-- For patient-case completeness, compare visible map content against the uploaded patient case.
-- For DDx, compare the map against clinically relevant alternatives supported by the reference materials.
-- Do not require every reference detail unless required by the rubric.
-- Do not lower scores solely because expected reference information is absent from the uploaded files.
-
-"""
-        if reference_context
-        else ""
-    )
-    return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
-Grade only the visible concept map image.
-
-{reference_section}Rubric JSON:
-{json.dumps(_rubric(), separators=(",", ":"))}
-
-Rules:
-- Grade strictly according to the exact Spring 2025 rubric descriptors.
-- Judge relevance, detail, synthesis, visible connections, and comprehensiveness.
-- Medically correct words or isolated concepts are not sufficient for a high score.
-- Do not reward content that could be inferred but is not visibly represented in the concept map.
-- Scores must be integers 1, 2, 3, or 4 only.
-- Overall decisions must be exactly Yes or No only.
-- No Partial, Borderline, Maybe, 0, 5, or decimals.
-- Use brief explanations only.
-
-Score calibration:
-- Score 1: the criterion is absent, irrelevant, unclear, or does not meaningfully address the criterion; required connections are absent or unclear.
-- Score 2: some relevant information is present, but it is general, incomplete, simplistic, weakly connected, or only an isolated label/list without synthesis.
-- Score 3: relevant information is clearly present, mostly synthesized, and required connections are meaningfully demonstrated; it satisfies most but not all of the score-4 descriptor.
-- Score 4: reserve for clear fulfillment of the full descriptor with detailed, synthesized, comprehensive content. Required breadth across sessions, diagnoses, components, or map areas must be visibly demonstrated.
-- When uncertain between two scores, choose the lower score unless the higher descriptor is clearly satisfied.
-
-Domain calibration:
-- Knowledge Acquisition: do not give high scores for terminology alone. Distinguish isolated facts from knowledge meaningfully connected across the map. Do not infer Health System Science or Determinants of Health from generic management or patient information. Patient Case Information must be relevant and synthesized; copied facts alone are not automatically comprehensive.
-- Integration: requires visible relationships. Two nearby concepts do not demonstrate integration unless their relationship is visibly represented. A score-4 DDx must be explicitly prioritized; an unranked list is not prioritized. Illness scripts and science/clinical integration require visible logical flow, not proximity.
-- Application: requires visible causal or mechanistic pathophysiology flows. Listing a diagnosis, symptoms, labs, or treatments is not pathophysiological application. Score 3 or 4 only when explanatory flows are clearly demonstrated.
-- Transfer: award credit only when previously learned concepts are visibly used to deepen understanding of the current condition. Do not assume a concept is prior knowledge merely because it is basic or clinical science. Generic medical knowledge without deeper application scores 1 or 2.
-
-Reference-material rules:
-- If reference materials are uploaded, use them only to understand expected knowledge and available patient-case information. Never give credit for content that appears only in those files or assume the student included it. Missing expected content may reduce a score under the rubric, but do not require irrelevant reference details outside the rubric.
-- If no reference materials are uploaded, grade normally from the visible concept map and rubric; do not penalize because references are unavailable.
-
-Domain decisions:
-- Knowledge Acquisition is Yes only when the map meaningfully includes key knowledge from the case and unit.
-- Integration is Yes only when key knowledge is connected accurately and comprehensively.
-- Application is Yes only when key clinical data is explained using relevant basic science.
-- Transfer is Yes only when previously learned content visibly deepens understanding.
-- A major missing rubric component requires No even when other criteria are strong. Do not infer a domain decision from average score alone.
-
-Final decision and consistency review:
-- This map meets expectations is Yes only when performance is adequate across the rubric as a whole; a few high scores cannot compensate for major missing domains.
-- The final overall decision should reflect the concept map as a whole. A single weak criterion or domain does not automatically require an overall No. Consider whether the map, overall, meets expectations based on the full rubric.
-- Before returning JSON, re-check every criterion against its descriptor, verify every 4 satisfies the full score-4 descriptor, verify isolated content was not over-scored, verify Integration/Application reflect visible connections, and verify domain and final decisions are defensible across all four domains.
-- Return JSON only using this exact schema:
-{json.dumps(schema(map_file), separators=(",", ":"))}
-"""
+    return build_grading_prompt(map_file, schema(map_file), reference_materials)
 
 
 def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
