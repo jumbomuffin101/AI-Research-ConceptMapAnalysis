@@ -588,7 +588,7 @@ def run_evaluation(
             raw_response = grade.get("response")
             data = parse_model_json(
                 str(grade["cleaned_text"]),
-                normalize_decisions=model_name == "Llama 4 Scout",
+                normalize_decisions=True,
             )
 
             output_path = (
