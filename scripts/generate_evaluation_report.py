@@ -17,8 +17,8 @@ REPORT_PATH = SUMMARY_DIR / "concept_map_evaluation_report.md"
 CSV_PATH = SUMMARY_DIR / "concept_map_evaluation_summary.csv"
 JSON_PATH = SUMMARY_DIR / "concept_map_evaluation_summary.json"
 
-MODEL_KEYS = {"Gemma": "gemma", "Llama 4 Scout": "llama_4_scout"}
-MODEL_TITLES = {"gemma": "Gemma", "llama_4_scout": "Llama 4 Scout"}
+MODEL_KEYS = {"Gemma": "gemma", "Llama 4 Maverick": "llama_4_maverick"}
+MODEL_TITLES = {"gemma": "Gemma", "llama_4_maverick": "Llama 4 Maverick"}
 DOMAIN_FIELDS = {
     "knowledge_acquisition": [
         "basic_science", "health_system_science", "clinical_science",
@@ -169,16 +169,16 @@ def render_report(maps: dict[str, dict[str, Any]]) -> str:
     for number, entry in enumerate(entries, start=1):
         gemma, llama = _result(entry, "gemma"), _result(entry, "llama_4_scout")
         lines += [f"## Map {number}: {entry['map_file']}", "", "### Overall", "",
-                  f"Gemma: {_overall(gemma)}", f"Llama 4 Scout: {_overall(llama)}", ""]
+                  f"Gemma: {_overall(gemma)}", f"Llama 4 Maverick: {_overall(llama)}", ""]
         for domain, criteria in DOMAIN_FIELDS.items():
-            lines += [f"### {DOMAIN_TITLES[domain]}", "", "| Criterion | Gemma | Llama 4 Scout |", "|---|---:|---:|"]
+            lines += [f"### {DOMAIN_TITLES[domain]}", "", "| Criterion | Gemma | Llama 4 Maverick |", "|---|---:|---:|"]
             for criterion in criteria:
                 lines.append(f"| {criterion.replace('_', ' ').title()} | {_score(gemma, domain, criterion)} | {_score(llama, domain, criterion)} |")
-            lines += ["", f"Domain decision — Gemma: {_domain_decision(gemma, domain)}; Llama 4 Scout: {_domain_decision(llama, domain)}", ""]
+            lines += ["", f"Domain decision — Gemma: {_domain_decision(gemma, domain)}; Llama 4 Maverick: {_domain_decision(llama, domain)}", ""]
         for heading, field in [("Strengths", "strengths"), ("Areas for Improvement", "areas_for_improvement"), ("Grading Notes", "grading_notes")]:
             lines += [f"### {heading}", "", "Gemma:"]
             _bullets(lines, _items(gemma, field))
-            lines += ["", "Llama 4 Scout:"]
+            lines += ["", "Llama 4 Maverick:"]
             _bullets(lines, _items(llama, field))
             lines.append("")
         if entry["failures"]:
@@ -189,7 +189,7 @@ def render_report(maps: dict[str, dict[str, Any]]) -> str:
 
     comparable = [entry for entry in entries if _result(entry, "gemma") and _result(entry, "llama_4_scout")]
     agreed = sum(_overall(_result(entry, "gemma")) == _overall(_result(entry, "llama_4_scout")) for entry in comparable)
-    lines += ["## Cross-Model Summary", "", "| Map | Gemma Overall | Llama 4 Scout Overall | Agreed | Gemma Avg Score | Llama 4 Scout Avg Score |", "|---|---|---|---|---:|---:|"]
+    lines += ["## Cross-Model Summary", "", "| Map | Gemma Overall | Llama 4 Maverick Overall | Agreed | Gemma Avg Score | Llama 4 Maverick Avg Score |", "|---|---|---|---|---:|---:|"]
     for index, entry in enumerate(entries, start=1):
         gemma, llama = _result(entry, "gemma"), _result(entry, "llama_4_scout")
         agreement = "Yes" if gemma and llama and _overall(gemma) == _overall(llama) else "No"

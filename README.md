@@ -31,7 +31,7 @@ PDF-to-Image Conversion
     |
     v
 Vision Language Model
-    (Gemma via OpenRouter OR Llama 4 Scout via Groq)
+    (Gemma via OpenRouter OR Llama 4 Maverick via Groq)
     |
     v
 Rubric-Based Grading
@@ -47,7 +47,7 @@ Interactive Web Dashboard
 
 - PDF concept map upload
 - PDF-to-image conversion
-- Dual-model evaluation (Gemma + Llama 4 Scout)
+- Dual-model evaluation (Gemma + Llama 4 Maverick)
 - Direct rubric-based grading
 - Rubric-based scoring
 - Knowledge Acquisition grading
@@ -66,19 +66,19 @@ Interactive Web Dashboard
 ### Primary Models
 
 - `google/gemma-4-26b-a4b-it:free`
-- `meta-llama/llama-4-scout-17b-16e-instruct`
+- `meta-llama/llama-4-maverick-17b-128e-instruct`
 
-Gemma uses OpenRouter. Llama 4 Scout uses Groq. Both models generate full Spring 2025 rubric-aligned JSON grading.
+Gemma uses OpenRouter. Llama 4 Maverick uses Groq. Both models generate full Spring 2025 rubric-aligned JSON grading.
 
 Required environment variables:
 
 - `OPENROUTER_API_KEY` for Gemma
-- `GROQ_API_KEY` for Llama 4 Scout
+- `GROQ_API_KEY` for Llama 4 Maverick
 
 Users may run:
 
 - Gemma only
-- Llama 4 Scout only
+- Llama 4 Maverick only
 - Both models simultaneously
 
 ## Repository Structure
@@ -115,7 +115,7 @@ runtime.txt
 
 ## Web Demo
 
-The Streamlit demo accepts any concept map PDF, runs Gemma, Llama 4 Scout, or both, and displays rubric scores, reasoning, evidence, strengths, and areas for improvement. Valid results are saved under `outputs/web_demo/`.
+The Streamlit demo accepts any concept map PDF, runs Gemma, Llama 4 Maverick, or both, and displays rubric scores, reasoning, evidence, strengths, and areas for improvement. Valid results are saved under `outputs/web_demo/`.
 
 If one selected model fails, the app keeps any successful model result visible and shows a warning for the failed model. Raw failed responses are saved under `outputs/web_demo/debug/` for troubleshooting.
 

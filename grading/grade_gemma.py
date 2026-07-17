@@ -13,8 +13,6 @@ from typing import Any
 from grading.spring_2025_prompt import build_grading_prompt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RUBRIC_PATH = PROJECT_ROOT / "rubric" / "concept_map_rubric.json"
-
 MODEL = "google/gemma-4-26b-a4b-it:free"
 PROVIDER = "OpenRouter"
 BASE_URL = "https://openrouter.ai/api/v1"
@@ -113,15 +111,6 @@ def render_pdf_first_page(pdf_path: Path, output_path: Path) -> str:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(image_bytes)
     return base64.b64encode(image_bytes).decode("utf-8")
-
-
-def _rubric() -> dict[str, Any]:
-    rubric_data = json.loads(RUBRIC_PATH.read_text(encoding="utf-8"))
-    return {
-        group: rubric_data[group]
-        for group in CATEGORY_FIELDS
-        if isinstance(rubric_data.get(group), dict)
-    }
 
 
 def schema(map_file: str) -> dict[str, Any]:

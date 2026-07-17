@@ -1,4 +1,4 @@
-"""Direct Groq Llama 4 Scout grader for Spring 2025 concept map evaluation."""
+"""Direct Groq Llama 4 Maverick grader for Spring 2025 concept map evaluation."""
 
 from __future__ import annotations
 
@@ -12,9 +12,7 @@ from typing import Any
 from grading.spring_2025_prompt import build_grading_prompt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RUBRIC_PATH = PROJECT_ROOT / "rubric" / "concept_map_rubric.json"
-
-MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct"
 PROVIDER = "Groq"
 BASE_URL = "https://api.groq.com/openai/v1"
 API_KEY_ENV = "GROQ_API_KEY"
@@ -45,33 +43,6 @@ CATEGORY_FIELDS = {
         "deepens_understanding",
     ],
 }
-
-CRITERION_TEXT = {
-    "knowledge_acquisition": {
-        "basic_science": "Identifies key knowledge from basic sciences learned this unit",
-        "health_system_science": "Identifies key knowledge from health system science learned this unit",
-        "clinical_science": "Identifies key knowledge from clinical sciences learned this unit",
-        "patient_case_information": "Extracts key information from the patient case",
-        "determinants_of_health": "Identifies key determinants of health (DoH)",
-    },
-    "integration": {
-        "prioritized_differential_diagnosis": "Includes a prioritized differential diagnosis (DDx) that contains common, must not miss, and other possible diagnoses based on patient’s unique characteristics",
-        "illness_scripts": "Connects patient data to reflect illness script(s)",
-        "basic_to_foundational_science": "Connects basic science knowledge learned in the unit to other relevant foundational science information",
-        "patient_data_to_clinical_information": "Connects patient data to other relevant clinical information",
-        "patient_data_to_basic_science": "Connects patient data to relevant basic science knowledge",
-    },
-    "application": {
-        "working_diagnosis_pathophysiology": "Concept map explains the underlying pathophysiology of the working diagnosis",
-        "patient_data_pathophysiology": "Connections explain the pathophysiology underlying the key patient data",
-    },
-    "transfer": {
-        "prior_basic_science": "Identifies relevant basic science concepts learned in previous courses",
-        "prior_clinical_concepts": "Identifies relevant clinical concepts learned in previous courses",
-        "deepens_understanding": "Uses previously learned knowledge to deepen understanding of the pathophysiology of the condition, the “So what?”",
-    },
-}
-
 
 def _secret(name: str) -> str | None:
     try:
@@ -145,15 +116,6 @@ def render_pdf_first_page(pdf_path: Path, output_path: Path) -> dict[str, Any]:
     }
 
 
-def _rubric() -> dict[str, Any]:
-    rubric_data = json.loads(RUBRIC_PATH.read_text(encoding="utf-8"))
-    return {
-        group: rubric_data[group]
-        for group in CATEGORY_FIELDS
-        if isinstance(rubric_data.get(group), dict)
-    }
-
-
 def schema(map_file: str) -> dict[str, Any]:
     result: dict[str, Any] = {"map_file": map_file, "model": MODEL}
     for group, fields in CATEGORY_FIELDS.items():
@@ -203,10 +165,10 @@ def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
 def response_text(response: Any) -> str:
     choices = getattr(response, "choices", None)
     if not choices:
-        raise RuntimeError("Llama 4 Scout returned no response choices.")
+        raise RuntimeError("Llama 4 Maverick returned no response choices.")
     text = getattr(choices[0].message, "content", None)
     if not isinstance(text, str) or not text.strip():
-        raise RuntimeError("Llama 4 Scout returned empty content.")
+        raise RuntimeError("Llama 4 Maverick returned empty content.")
     return text
 
 

@@ -222,15 +222,21 @@ def build_grading_prompt(
         "\nREFERENCE MATERIAL\n"
         "The following files define the patient case and/or course content the student was expected to use.\n\n"
         f"{reference_context}\n\n"
-        "STUDENT CONCEPT MAP\n"
-        "The concept map image is the only source of evidence for what the student actually included.\n"
+        "Reference materials define the patient case and course content the student was expected to use. "
+        "Use them only as a comparison standard. Do not treat reference content as if it appears in the student's map.\n"
         if reference_context
         else ""
     )
     return (
-        f"{SPRING_2025_RUBRIC}\n"
+        "You are grading a medical student concept map using the Spring 2025 Concept Map "
+        "Feedback Tool for SUMMATIVE Activities.\n\n"
+        f"{SPRING_2025_RUBRIC}\n\n"
+        "Evaluate only content visibly present in the submitted concept map.\n"
         f"{reference_section}\n"
-        "Return ONLY raw valid JSON using this exact schema. No Markdown or prose outside the JSON. "
-        "Use a brief explanation for each criterion and brief strengths, areas_for_improvement, and grading_notes.\n"
+        "For each criterion, select the score from 1 to 4 whose exact rubric descriptor best matches the concept map. "
+        "Do not invent additional thresholds, weighting systems, or scoring rules.\n"
+        "Answer each domain overall Yes/No question directly as written in the rubric.\n"
+        "Answer 'This map meets expectations' as Yes or No based on the rubric as a whole.\n"
+        "Return only the existing required JSON schema exactly. No Markdown or prose outside the JSON.\n"
         f"{json.dumps(output_schema, separators=(',', ':'))}\n"
     )
