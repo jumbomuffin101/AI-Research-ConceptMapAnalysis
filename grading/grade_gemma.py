@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,14 @@ CATEGORY_FIELDS = {
         "deepens_understanding",
     ],
 }
+
+
+class EmptyGemmaResponseError(RuntimeError):
+    """Gemma returned no usable completion content for a request."""
+
+    def __init__(self, message: str, raw_response: Any) -> None:
+        super().__init__(message)
+        self.raw_response = raw_response
 
 
 def _secret(name: str) -> str | None:
@@ -174,26 +183,6 @@ Rules:
 """
 
 
-def build_repair_prompt(map_file: str, malformed_output: str) -> str:
-    return f"""Your previous answer was malformed JSON. Do not regrade or change the evaluation.
-Return the same evaluation as raw valid JSON only. No Markdown. No prose.
-
-Required schema:
-{json.dumps(schema(map_file), separators=(",", ":"))}
-
-Malformed output:
-{malformed_output}
-"""
-
-
-def _json_is_malformed(text: str) -> bool:
-    try:
-        json.loads(clean_json_output(text))
-    except json.JSONDecodeError:
-        return True
-    return False
-
-
 def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
     return client.chat.completions.create(
         model=MODEL,
@@ -218,25 +207,34 @@ def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
     )
 
 
-def request_repair(client: Any, prompt: str) -> Any:
-    return client.chat.completions.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        temperature=0,
-        timeout=TIMEOUT_SECONDS,
-        response_format={"type": "json_object"},
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-
 def response_text(response: Any) -> str:
+    if response is None:
+        raise EmptyGemmaResponseError("Gemma returned no response.", response)
     choices = getattr(response, "choices", None)
+    if choices is None:
+        raise EmptyGemmaResponseError("Gemma response has no choices.", response)
     if not choices:
-        raise RuntimeError("Gemma returned no response choices.")
-    text = getattr(choices[0].message, "content", None)
+        raise EmptyGemmaResponseError("Gemma returned no response choices.", response)
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        raise EmptyGemmaResponseError("Gemma response choice has no message.", response)
+    text = getattr(message, "content", None)
     if not isinstance(text, str) or not text.strip():
-        raise RuntimeError("Gemma returned empty content.")
+        raise EmptyGemmaResponseError("Gemma returned empty content.", response)
     return text
+
+
+def _response_debug_value(response: Any) -> Any:
+    """Create a JSON-serializable record without exposing credentials."""
+    if response is None:
+        return None
+    model_dump = getattr(response, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return model_dump(mode="json")
+        except Exception:
+            pass
+    return repr(response)
 
 
 def clean_json_output(text: str) -> str:
@@ -271,27 +269,24 @@ def grade_pdf(
 
     client = create_client()
     response = request_grade(client, prompt, image_base64)
-    raw_text = response_text(response)
+    attempts_path = Path(f"{debug_prefix}_response_attempts.json")
+    attempts: dict[str, Any] = {"first_attempt": _response_debug_value(response)}
+    try:
+        raw_text = response_text(response)
+    except EmptyGemmaResponseError as first_error:
+        attempts_path.write_text(json.dumps(attempts, indent=2), encoding="utf-8")
+        time.sleep(5)
+        retry_response = request_grade(client, prompt, image_base64)
+        attempts["retry_attempt"] = _response_debug_value(retry_response)
+        attempts_path.write_text(json.dumps(attempts, indent=2), encoding="utf-8")
+        try:
+            raw_text = response_text(retry_response)
+        except EmptyGemmaResponseError as retry_error:
+            raise EmptyGemmaResponseError(str(retry_error), retry_response) from first_error
+        response = retry_response
+
     raw_path = Path(f"{debug_prefix}_raw.txt")
     raw_path.write_text(raw_text, encoding="utf-8")
-    first_raw_path = None
-    repair_prompt_path = None
-    repair_raw_path = None
-    repaired = False
-
-    if _json_is_malformed(raw_text):
-        first_raw_path = Path(f"{debug_prefix}_raw_malformed_first.txt")
-        first_raw_path.write_text(raw_text, encoding="utf-8")
-        repair_prompt = build_repair_prompt(map_file, raw_text)
-        repair_prompt_path = Path(f"{debug_prefix}_repair_prompt.txt")
-        repair_prompt_path.write_text(repair_prompt, encoding="utf-8")
-        repair_response = request_repair(client, repair_prompt)
-        raw_text = response_text(repair_response)
-        repair_raw_path = Path(f"{debug_prefix}_raw_repair.txt")
-        repair_raw_path.write_text(raw_text, encoding="utf-8")
-        raw_path = repair_raw_path
-        response = repair_response
-        repaired = True
 
     return {
         "model": MODEL,
@@ -311,10 +306,10 @@ def grade_pdf(
             "image_bytes": image_path.stat().st_size,
             "reference_materials_used": bool(reference_files),
             "reference_files": reference_files,
-            "json_repair_attempted": repaired,
-            "first_malformed_raw_path": str(first_raw_path) if first_raw_path else None,
-            "repair_prompt_path": str(repair_prompt_path) if repair_prompt_path else None,
-            "repair_raw_path": str(repair_raw_path) if repair_raw_path else None,
+            "empty_response_retry_attempted": "retry_attempt" in attempts,
+            "response_attempts_path": str(attempts_path) if attempts_path.exists() else None,
+            "first_attempt": attempts["first_attempt"],
+            "retry_attempt": attempts.get("retry_attempt"),
             "max_tokens": MAX_TOKENS,
             "timeout_seconds": TIMEOUT_SECONDS,
         },
