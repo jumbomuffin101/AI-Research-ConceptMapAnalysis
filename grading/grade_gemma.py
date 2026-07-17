@@ -117,7 +117,7 @@ def schema(map_file: str) -> dict[str, Any]:
     result: dict[str, Any] = {"map_file": map_file, "model": MODEL}
     for group, fields in CATEGORY_FIELDS.items():
         result[group] = {
-            field: {"score": 1, "explanation": ""}
+            field: {"score": 1, "explanation": "", "evidence_from_map": []}
             for field in fields
         }
         result[group]["overall_decision"] = "No"
@@ -129,60 +129,22 @@ def schema(map_file: str) -> dict[str, Any]:
     return result
 
 
-def _format_reference_material(
-    reference_material: dict[str, Any] | None,
-) -> tuple[str, bool]:
-    material = reference_material or {}
-    if not material:
-        return "", False
-    return json.dumps(material, ensure_ascii=False, separators=(",", ":")), True
-
-
-def build_prompt(map_file: str, reference_material: dict[str, Any] | None = None) -> str:
-    reference_text, has_reference = _format_reference_material(reference_material)
-    reference_section = (
-        f"""REFERENCE MATERIAL:
-{reference_text}
-
-Use REFERENCE MATERIAL only to determine expected content. Do not treat it as map evidence. Do not require content absent from supplied references.
-For learned-this-unit criteria, compare visible map content with the supplied unit reference. For patient-case criteria, compare visible map content with the supplied case. For DDx and transfer, use the reference only to identify relevant expected alternatives or prior concepts.
-
-"""
-        if has_reference
-        else ""
-    )
+def build_prompt(map_file: str) -> str:
     return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
+Grade only the visible concept map image.
 
-STUDENT CONCEPT MAP:
-The uploaded image is the student's concept map.
-
-{reference_section}Rubric JSON:
+Rubric JSON:
 {json.dumps(_rubric(), separators=(",", ":"))}
 
 Rules:
-- Grade only demonstrated content and visible relationships in the STUDENT CONCEPT MAP image.
-- Grade only the visible concept map against the rubric descriptors when no reference material is supplied.
-- Score only content actually visible in the student concept map; reference material is never map evidence.
-- Do not infer content that is not visible.
-- Do not infer missing knowledge from general medical plausibility.
-- Do not reward isolated medical terms as synthesized knowledge.
-- Score 1: criterion is absent, irrelevant, or visibly incorrect.
-- Score 2: some relevant content exists, but it is general, incomplete, simplistic, or weakly connected.
-- Score 3: content is relevant and mostly synthesized, with meaningful visible connections when required.
-- Score 4: the complete score-4 descriptor is visibly demonstrated with detailed, comprehensive, synthesized content.
-- Do not assign 1 merely because reference context was not supplied.
-- Visible relevant concepts should receive at least 2 when they partially address the criterion.
-- Use the exact Spring 2025 rubric descriptors as the final authority.
 - Scores must be integers 1, 2, 3, or 4 only.
 - Overall decisions must be exactly Yes or No only.
 - No Partial, Borderline, Maybe, 0, 5, or decimals.
-- Explanations: one brief sentence.
-- strengths: maximum 2 short items.
-- areas_for_improvement: maximum 2-3 short items.
-- grading_notes: maximum one sentence.
-- If any domain overall_decision is "No", overall_meets_expectations must be "No".
-- Return raw valid JSON only. No Markdown, no prose outside JSON.
-- Use this exact schema:
+- Use brief explanations only.
+- Include evidence_from_map when visible.
+- If evidence is missing, write "No clear evidence found in the concept map."
+- Do not hallucinate evidence.
+- Return JSON only using this exact schema:
 {json.dumps(schema(map_file), separators=(",", ":"))}
 """
 
@@ -264,14 +226,12 @@ def grade_pdf(
     pdf_path: Path,
     map_file: str,
     debug_prefix: Path,
-    reference_material: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_base64 = render_pdf_first_page(pdf_path, image_path)
-    prompt = build_prompt(map_file, reference_material)
+    prompt = build_prompt(map_file)
     prompt_path = Path(f"{debug_prefix}_prompt.txt")
     prompt_path.write_text(prompt, encoding="utf-8")
-    _, has_reference_material = _format_reference_material(reference_material)
 
     client = create_client()
     response = request_grade(client, prompt, image_base64)
@@ -313,7 +273,6 @@ def grade_pdf(
             "model": MODEL,
             "image_path": str(image_path),
             "image_bytes": image_path.stat().st_size,
-            "reference_material_supplied": has_reference_material,
             "json_repair_attempted": repaired,
             "first_malformed_raw_path": str(first_raw_path) if first_raw_path else None,
             "repair_prompt_path": str(repair_prompt_path) if repair_prompt_path else None,
