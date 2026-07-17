@@ -209,6 +209,7 @@ Domain decisions:
 
 Final decision and consistency review:
 - This map meets expectations is Yes only when performance is adequate across the rubric as a whole; a few high scores cannot compensate for major missing domains.
+- The final overall decision should reflect the concept map as a whole. A single weak criterion or domain does not automatically require an overall No. Consider whether the map, overall, meets expectations based on the full rubric.
 - Before returning JSON, re-check every criterion against its descriptor, verify every 4 satisfies the full score-4 descriptor, verify isolated content was not over-scored, verify Integration/Application reflect visible connections, and verify domain and final decisions are defensible across all four domains.
 - Return JSON only using this exact schema:
 {json.dumps(schema(map_file), separators=(",", ":"))}

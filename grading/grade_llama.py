@@ -205,6 +205,7 @@ Instructions for reference use:
 {reference_section}
 Rubric:{json.dumps(rubric_payload, separators=(",", ":"))}
 Rules: scores integers 1-4 only; decisions Yes/No only; no Partial/Borderline/Maybe/0/5/decimals; JSON only.
+The final overall decision should reflect the concept map as a whole. A single weak criterion or domain does not automatically require an overall No. Consider whether the map, overall, meets expectations based on the full rubric.
 Keep explanation one short sentence.
 strengths max 2 short strings; areas_for_improvement max 2 short strings; grading_notes max 1 sentence.
 Schema:{json.dumps(schema(map_file), separators=(",", ":"))}
