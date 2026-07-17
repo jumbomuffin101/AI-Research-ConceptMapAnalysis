@@ -18,14 +18,6 @@ BASE_URL = "https://api.groq.com/openai/v1"
 API_KEY_ENV = "GROQ_API_KEY"
 MAX_TOKENS = 3000
 TIMEOUT_SECONDS = 180
-REFERENCE_FIELDS = (
-    ("patient_case", "Patient case"),
-    ("unit_content", "Unit learning objectives or session content"),
-    ("expected_differential_diagnoses", "Expected/key differential diagnoses"),
-    ("prior_concepts", "Relevant previously learned concepts"),
-    ("instructor_notes", "Instructor notes or expected content"),
-)
-
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
         "basic_science",
@@ -177,27 +169,22 @@ def schema(map_file: str) -> dict[str, Any]:
 
 
 def _format_reference_material(
-    reference_material: dict[str, str] | None,
+    reference_material: dict[str, Any] | None,
 ) -> tuple[str, bool]:
     material = reference_material or {}
-    sections: list[str] = []
-    for key, label in REFERENCE_FIELDS:
-        value = str(material.get(key, "")).strip()
-        if value:
-            sections.append(f"{label}:\n{value}")
-    if not sections:
+    if not material:
         return "", False
-    return "\n\n".join(sections), True
+    return json.dumps(material, ensure_ascii=False, separators=(",", ":")), True
 
 
-def build_prompt(map_file: str, reference_material: dict[str, str] | None = None) -> str:
+def build_prompt(map_file: str, reference_material: dict[str, Any] | None = None) -> str:
     rubric_payload = {
         "criteria": CRITERION_TEXT,
         "score_descriptors": _rubric(),
     }
     reference_text, has_reference = _format_reference_material(reference_material)
     reference_section = (
-        f"REFERENCE MATERIAL:\n{reference_text}\nUse REFERENCE MATERIAL only to determine expected content. Do not treat it as map evidence. Do not require content absent from supplied references.\n"
+        f"REFERENCE MATERIAL:\n{reference_text}\nUse REFERENCE MATERIAL only to determine expected content. Do not treat it as map evidence. Do not require content absent from supplied references. For learned-this-unit criteria, compare visible map content with the supplied unit reference. For patient-case criteria, compare visible map content with the supplied case. For DDx and transfer, use the reference only to identify relevant expected alternatives or prior concepts.\n"
         if has_reference
         else ""
     )
@@ -206,8 +193,8 @@ STUDENT CONCEPT MAP:
 The uploaded image is the student's concept map.
 {reference_section}
 Rubric:{json.dumps(rubric_payload, separators=(",", ":"))}
-Rules: grade only demonstrated visible content and relationships in the STUDENT CONCEPT MAP image. Grade only the visible concept map against rubric descriptors when no reference material is supplied. evidence_from_map must contain only visible map content. Do not infer invisible content. Do not reward isolated terms as synthesized knowledge. Score 1: criterion is absent, irrelevant, or visibly incorrect. Score 2: some relevant content exists, but it is general, incomplete, simplistic, or weakly connected. Score 3: content is relevant and mostly synthesized, with meaningful visible connections when required. Score 4: the complete score-4 descriptor is visibly demonstrated with detailed, comprehensive, synthesized content. Do not assign 1 merely because reference context was not supplied. Visible relevant concepts should receive at least 2 when they partially address the criterion. Use exact Spring 2025 rubric descriptors as final authority. Scores integers 1-4 only; decisions Yes/No only; no Partial/Borderline/Maybe/0/5/decimals; JSON only; no hallucinated evidence. If any domain overall_decision is "No", overall_meets_expectations must be "No".
-Keep explanation one short sentence. evidence_from_map max 1-2 short items per criterion; use "No clear evidence found in the concept map." only when evidence is missing.
+Rules: grade only demonstrated visible content and relationships in the STUDENT CONCEPT MAP image. Grade only the visible concept map against rubric descriptors when no reference material is supplied. Score only content actually visible in the student concept map; reference material is never map evidence. evidence_from_map must contain only specific visible map content. Every numeric criterion must include evidence_from_map as a JSON list of 1-3 short strings, or [] when no supporting evidence is visible. Do not infer invisible content. Do not reward isolated terms as synthesized knowledge. Score 1: criterion is absent, irrelevant, or visibly incorrect. Score 2: some relevant content exists, but it is general, incomplete, simplistic, or weakly connected. Score 3: content is relevant and mostly synthesized, with meaningful visible connections when required. Score 4: the complete score-4 descriptor is visibly demonstrated with detailed, comprehensive, synthesized content. Do not assign 1 merely because reference context was not supplied. Visible relevant concepts should receive at least 2 when they partially address the criterion. Use exact Spring 2025 rubric descriptors as final authority. Scores integers 1-4 only; decisions Yes/No only; no Partial/Borderline/Maybe/0/5/decimals; JSON only; no hallucinated evidence. If any domain overall_decision is "No", overall_meets_expectations must be "No".
+Keep explanation one short sentence. evidence_from_map max 1-3 short items per criterion, or [] if no evidence is visible.
 strengths max 2 short strings; areas_for_improvement max 2-3 short strings; grading_notes max 1 sentence.
 Schema:{json.dumps(schema(map_file), separators=(",", ":"))}
 """
@@ -259,7 +246,7 @@ def grade_pdf(
     pdf_path: Path,
     map_file: str,
     debug_prefix: Path,
-    reference_material: dict[str, str] | None = None,
+    reference_material: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_info = render_pdf_first_page(pdf_path, image_path)

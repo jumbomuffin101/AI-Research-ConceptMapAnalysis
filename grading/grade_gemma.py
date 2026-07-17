@@ -18,14 +18,6 @@ BASE_URL = "https://openrouter.ai/api/v1"
 API_KEY_ENV = "OPENROUTER_API_KEY"
 MAX_TOKENS = 1800
 TIMEOUT_SECONDS = 90
-REFERENCE_FIELDS = (
-    ("patient_case", "Patient case"),
-    ("unit_content", "Unit learning objectives or session content"),
-    ("expected_differential_diagnoses", "Expected/key differential diagnoses"),
-    ("prior_concepts", "Relevant previously learned concepts"),
-    ("instructor_notes", "Instructor notes or expected content"),
-)
-
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
         "basic_science",
@@ -138,26 +130,22 @@ def schema(map_file: str) -> dict[str, Any]:
 
 
 def _format_reference_material(
-    reference_material: dict[str, str] | None,
+    reference_material: dict[str, Any] | None,
 ) -> tuple[str, bool]:
     material = reference_material or {}
-    sections: list[str] = []
-    for key, label in REFERENCE_FIELDS:
-        value = str(material.get(key, "")).strip()
-        if value:
-            sections.append(f"{label}:\n{value}")
-    if not sections:
+    if not material:
         return "", False
-    return "\n\n".join(sections), True
+    return json.dumps(material, ensure_ascii=False, separators=(",", ":")), True
 
 
-def build_prompt(map_file: str, reference_material: dict[str, str] | None = None) -> str:
+def build_prompt(map_file: str, reference_material: dict[str, Any] | None = None) -> str:
     reference_text, has_reference = _format_reference_material(reference_material)
     reference_section = (
         f"""REFERENCE MATERIAL:
 {reference_text}
 
 Use REFERENCE MATERIAL only to determine expected content. Do not treat it as map evidence. Do not require content absent from supplied references.
+For learned-this-unit criteria, compare visible map content with the supplied unit reference. For patient-case criteria, compare visible map content with the supplied case. For DDx and transfer, use the reference only to identify relevant expected alternatives or prior concepts.
 
 """
         if has_reference
@@ -174,7 +162,9 @@ The uploaded image is the student's concept map.
 Rules:
 - Grade only demonstrated content and visible relationships in the STUDENT CONCEPT MAP image.
 - Grade only the visible concept map against the rubric descriptors when no reference material is supplied.
-- evidence_from_map must contain only visible map content.
+- Score only content actually visible in the student concept map; reference material is never map evidence.
+- evidence_from_map must contain only specific content visible in the student concept map.
+- Every numeric criterion must include evidence_from_map as a JSON list of 1-3 short strings, or [] when no supporting evidence is visible.
 - Do not infer content that is not visible.
 - Do not infer missing knowledge from general medical plausibility.
 - Do not reward isolated medical terms as synthesized knowledge.
@@ -188,9 +178,8 @@ Rules:
 - Scores must be integers 1, 2, 3, or 4 only.
 - Overall decisions must be exactly Yes or No only.
 - No Partial, Borderline, Maybe, 0, 5, or decimals.
-- If evidence is missing, write "No clear evidence found in the concept map."
 - Explanations: one brief sentence.
-- evidence_from_map: 1-2 short items per criterion.
+- evidence_from_map: 1-3 short items per criterion, or [] if no evidence is visible.
 - strengths: maximum 2 short items.
 - areas_for_improvement: maximum 2-3 short items.
 - grading_notes: maximum one sentence.
@@ -278,7 +267,7 @@ def grade_pdf(
     pdf_path: Path,
     map_file: str,
     debug_prefix: Path,
-    reference_material: dict[str, str] | None = None,
+    reference_material: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_base64 = render_pdf_first_page(pdf_path, image_path)

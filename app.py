@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from interface.grading_runner import (
     selected_model_names,
 )
 from interface.result_display import display_results
+from reference_materials import load_julia_parker_reference
 from scripts.generate_evaluation_report import generate_report
 
 
@@ -44,12 +46,14 @@ model_selection = st.radio(
 )
 
 st.subheader("Reference Materials (Optional)")
+st.caption("Reference set: Julia Parker Week 6")
+use_reference_materials = st.toggle("Use reference materials", value=True)
 st.caption(
     "Reference materials define what students were expected to use. They are not "
     "treated as evidence from the concept map."
 )
 with st.expander("Add patient case, unit content, DDx, prior concepts, or instructor notes"):
-    reference_material = {
+    additional_reference_material = {
         "patient_case": st.text_area("Patient case", height=120),
         "unit_content": st.text_area(
             "Unit learning objectives or session content", height=120
@@ -65,13 +69,23 @@ with st.expander("Add patient case, unit content, DDx, prior concepts, or instru
         ),
     }
 
-if not any(value.strip() for value in reference_material.values()):
+if use_reference_materials:
+    reference_material: dict[str, object] | None = load_julia_parker_reference()
+    supplemental = {
+        key: value.strip()
+        for key, value in additional_reference_material.items()
+        if value.strip()
+    }
+    if supplemental:
+        reference_material["additional_reference_material"] = supplemental
+else:
+    reference_material = None
+
+if reference_material is None:
     st.warning(NO_REFERENCE_WARNING)
 
 reference_fingerprint = hashlib.sha256(
-    "\n\n".join(
-        f"{key}:{value.strip()}" for key, value in sorted(reference_material.items())
-    ).encode("utf-8")
+    json.dumps(reference_material, sort_keys=True, ensure_ascii=False).encode("utf-8")
 ).hexdigest()
 previous_model_selection = st.session_state.get("previous_model_selection")
 previous_file_fingerprint = st.session_state.get("previous_file_fingerprint")

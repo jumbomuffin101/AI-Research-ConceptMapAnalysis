@@ -1,0 +1,96 @@
+{
+  "reference_set_name": "Julia Parker Week 6",
+  "patient_case": {
+    "demographics": [
+      "Julia Parker is a 19-year-old female college student.",
+      "Height 63.5 inches; weight 176 pounds; BP 135/85."
+    ],
+    "history": [
+      "Chronic irregular menses/oligomenorrhea since menarche, now approximately 5 months of amenorrhea.",
+      "Cycles occur about 3-4 times yearly, vary from 21-90 days, and can last 3-4 weeks with heavy bleeding and clots.",
+      "Acne and progressive facial hair growth/hirsutism.",
+      "No major diet, exercise, or weight change; no abdominal pain, nausea, or abnormal vaginal discharge.",
+      "Family history includes obesity, type 2 diabetes, infertility, hypothyroidism, hypercholesterolemia, and cardiac disease."
+    ],
+    "physical_exam": [
+      "Moderate acne on face, chest, and back; mild upper-lip and chin hirsutism (Ferriman-Gallwey 8).",
+      "Acanthosis nigricans over neck, axilla, and groin.",
+      "Oily skin, hair thinning, stretch marks; Tanner stage 5; normal pelvic examination."
+    ],
+    "labs": [
+      "Urine and quantitative pregnancy testing are negative.",
+      "TSH 6 mU/L with normal free T4 1.3.",
+      "LH 18 and FSH 6 (LH greater than FSH); estradiol 15 (low).",
+      "Total testosterone 70 and free testosterone 7.8 are elevated; SHBG 4 is low.",
+      "Prolactin 11 and 17-hydroxyprogesterone 110 are normal; DHEAS is within reference range.",
+      "Triglycerides 169 and LDL 129 are elevated; HDL 38 is low; HbA1c 5.6."
+    ],
+    "imaging": [
+      "Pelvic ultrasound shows enlarged ovaries with 12 or more 2-9 mm peripheral follicles and increased central stroma (polycystic ovarian morphology)."
+    ],
+    "diagnosis_and_management": [
+      "Likely polycystic ovary syndrome (PCOS): anovulation/oligomenorrhea, hyperandrogenism, and polycystic ovarian morphology.",
+      "Management includes a combined oral contraceptive, metformin, weight management, regular exercise, and a healthy diet.",
+      "Relevant risks include dyslipidemia, insulin resistance/metabolic disease, and unopposed-estrogen endometrial risk."
+    ]
+  },
+  "unit_content": {
+    "female_hormonal_cycle": [
+      "Hypothalamic-pituitary-ovarian axis and GnRH pulsatility.",
+      "FSH, LH, estradiol, activin, and inhibin regulation of follicular maturation.",
+      "Ovarian and endometrial cycle phases; folliculogenesis, ovulation, corpus luteum formation and decline.",
+      "Estrogen/progesterone feedback and the mid-cycle LH surge.",
+      "Hormone-level timing and structural changes in ovary and endometrium."
+    ],
+    "amenorrhea": [
+      "Definitions and evaluation of primary amenorrhea, secondary amenorrhea, and oligomenorrhea.",
+      "HPO-axis and anatomic causes: hypothalamic, pituitary, ovarian, endocrine, and outflow-tract disorders.",
+      "Anovulation, PCOS, hyperandrogenism, insulin resistance, and CYP17-related androgen production.",
+      "PCOS diagnostic criteria, treatment, metabolic sequelae, and unopposed-estrogen/endometrial risk.",
+      "Management by cause, including lifestyle modification, hormonal therapy, and surgery when indicated."
+    ]
+  },
+  "expected_basic_science": [
+    "Hypothalamic-pituitary-ovarian axis and GnRH pulse generation.",
+    "FSH/LH regulation, estradiol/progesterone feedback, and LH surge.",
+    "Follicular maturation, ovulation, corpus luteum, ovarian and endometrial cycles.",
+    "Anovulation mechanisms and hyperandrogenism.",
+    "Insulin resistance, CYP17-related ovarian androgen production, and low SHBG.",
+    "Unopposed estrogen and endometrial hyperplasia/cancer risk."
+  ],
+  "expected_clinical_science": [
+    "Amenorrhea/oligomenorrhea definitions and evaluation.",
+    "PCOS Rotterdam criteria and differential diagnosis of amenorrhea with hyperandrogenism.",
+    "Pregnancy exclusion; interpretation of TSH, prolactin, LH/FSH, estradiol, testosterone, SHBG, 17-hydroxyprogesterone, DHEAS, metabolic tests, and pelvic ultrasound.",
+    "PCOS treatment with combined oral contraceptives, metformin, and lifestyle modification; complications including metabolic and endometrial risk."
+  ],
+  "expected_health_system_science": [
+    "Access to timely specialty care and the impact of prior dismissal of menstrual concerns.",
+    "Preventive care and guideline-based cervical cancer screening.",
+    "Shared decision-making about contraceptive options and treatment goals."
+  ],
+  "expected_determinants_of_health": [
+    "Family history of obesity, type 2 diabetes, infertility, hypothyroidism, dyslipidemia, and cardiac disease.",
+    "Diet, physical activity, weight concerns, and busy college schedule.",
+    "Campus housing and access barriers to specialist care.",
+    "Prior clinical dismissal and weight-related stigma."
+  ],
+  "expected_differential_diagnoses": [
+    "Pregnancy.",
+    "Polycystic ovary syndrome.",
+    "Hypothalamic amenorrhea or functional hypothalamic causes.",
+    "Pituitary causes including hyperprolactinemia/prolactinoma.",
+    "Premature ovarian insufficiency/failure.",
+    "Thyroid disease.",
+    "Nonclassic congenital adrenal hyperplasia.",
+    "Androgen-secreting ovarian or adrenal tumor.",
+    "Cushing syndrome and other endocrine causes.",
+    "Outflow tract disorders including Mullerian agenesis, androgen insensitivity, congenital obstruction, and Asherman syndrome."
+  ],
+  "relevant_prior_knowledge": [
+    "Endocrine feedback loops and receptor signaling.",
+    "Insulin resistance, dyslipidemia, obesity, and type 2 diabetes risk.",
+    "Reproductive anatomy, puberty, and menstrual physiology.",
+    "Clinical reasoning, differential diagnosis, laboratory interpretation, and preventive care."
+  ]
+}

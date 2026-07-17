@@ -176,7 +176,6 @@ def _require_yes_no(value: Any, field_path: str) -> None:
 
 def _normalize_evidence_from_map(result: dict[str, Any]) -> None:
     """Normalize criterion evidence fields before schema validation."""
-    fallback = "No clear evidence found in the concept map."
     for group, fields in CATEGORY_FIELDS.items():
         section = result.get(group)
         if not isinstance(section, dict):
@@ -189,9 +188,9 @@ def _normalize_evidence_from_map(result: dict[str, Any]) -> None:
             if isinstance(evidence, list):
                 continue
             if isinstance(evidence, str):
-                item["evidence_from_map"] = [evidence] if evidence.strip() else [fallback]
+                item["evidence_from_map"] = [evidence] if evidence.strip() else []
             elif evidence is None:
-                item["evidence_from_map"] = [fallback]
+                item["evidence_from_map"] = []
             else:
                 item["evidence_from_map"] = [str(evidence)]
 
@@ -564,7 +563,7 @@ def run_evaluation(
     model_names: Iterable[str],
     original_filename: str,
     progress_callback: Any | None = None,
-    reference_material: dict[str, str] | None = None,
+    reference_material: dict[str, Any] | None = None,
 ) -> list[EvaluationOutcome]:
     """Run one direct grading call for each selected model."""
     names = list(model_names)

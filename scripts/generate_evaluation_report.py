@@ -131,6 +131,25 @@ def _domain_decision(result: dict[str, Any] | None, domain: str) -> str:
     return str(result[domain].get("overall_decision", "N/A"))
 
 
+def _evidence(result: dict[str, Any] | None, domain: str, criterion: str) -> list[str]:
+    if not result or not isinstance(result.get(domain), dict):
+        return []
+    item = result[domain].get(criterion)
+    if not isinstance(item, dict):
+        return []
+    evidence = item.get("evidence_from_map", [])
+    if isinstance(evidence, list):
+        return [str(value) for value in evidence if str(value).strip()]
+    return [str(evidence)] if evidence is not None and str(evidence).strip() else []
+
+
+def _markdown_evidence(result: dict[str, Any] | None, domain: str, criterion: str) -> str:
+    items = _evidence(result, domain, criterion)
+    if not items:
+        return "None visible"
+    return "<br>".join(item.replace("|", "\\|") for item in items)
+
+
 def _average(result: dict[str, Any] | None, domain: str | None = None) -> float | None:
     if not result:
         return None
@@ -171,9 +190,17 @@ def render_report(maps: dict[str, dict[str, Any]]) -> str:
         lines += [f"## Map {number}: {entry['map_file']}", "", "### Overall", "",
                   f"Gemma: {_overall(gemma)}", f"Llama 4 Scout: {_overall(llama)}", ""]
         for domain, criteria in DOMAIN_FIELDS.items():
-            lines += [f"### {DOMAIN_TITLES[domain]}", "", "| Criterion | Gemma | Llama 4 Scout |", "|---|---:|---:|"]
+            lines += [
+                f"### {DOMAIN_TITLES[domain]}", "",
+                "| Criterion | Gemma Score | Gemma Evidence From Map | Llama 4 Scout Score | Llama 4 Scout Evidence From Map |",
+                "|---|---:|---|---:|---|",
+            ]
             for criterion in criteria:
-                lines.append(f"| {criterion.replace('_', ' ').title()} | {_score(gemma, domain, criterion)} | {_score(llama, domain, criterion)} |")
+                lines.append(
+                    f"| {criterion.replace('_', ' ').title()} | {_score(gemma, domain, criterion)} | "
+                    f"{_markdown_evidence(gemma, domain, criterion)} | {_score(llama, domain, criterion)} | "
+                    f"{_markdown_evidence(llama, domain, criterion)} |"
+                )
             lines += ["", f"Domain decision — Gemma: {_domain_decision(gemma, domain)}; Llama 4 Scout: {_domain_decision(llama, domain)}", ""]
         for heading, field in [("Strengths", "strengths"), ("Areas for Improvement", "areas_for_improvement"), ("Grading Notes", "grading_notes")]:
             lines += [f"### {heading}", "", "Gemma:"]
@@ -236,6 +263,9 @@ def write_machine_summaries(maps: dict[str, dict[str, Any]]) -> None:
                 for criterion in DOMAIN_FIELDS[domain]:
                     row[f"{prefix}_{domain}_{criterion}_score"] = _score(
                         result, domain, criterion
+                    )
+                    row[f"{prefix}_{domain}_{criterion}_evidence_from_map"] = json.dumps(
+                        _evidence(result, domain, criterion), ensure_ascii=False
                     )
         row["overall_agreement"] = bool(_result(entry, "gemma") and _result(entry, "llama_4_scout") and _overall(_result(entry, "gemma")) == _overall(_result(entry, "llama_4_scout")))
         rows.append(row)
