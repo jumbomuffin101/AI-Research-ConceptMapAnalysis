@@ -9,6 +9,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from interface.reference_materials import format_reference_context
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUBRIC_PATH = PROJECT_ROOT / "rubric" / "concept_map_rubric.json"
 
@@ -156,7 +158,7 @@ def schema(map_file: str) -> dict[str, Any]:
     result: dict[str, Any] = {"map_file": map_file, "model": MODEL}
     for group, fields in CATEGORY_FIELDS.items():
         result[group] = {
-            field: {"score": 1, "explanation": "", "evidence_from_map": []}
+            field: {"score": 1, "explanation": ""}
             for field in fields
         }
         result[group]["overall_decision"] = "No"
@@ -168,15 +170,42 @@ def schema(map_file: str) -> dict[str, Any]:
     return result
 
 
-def build_prompt(map_file: str) -> str:
+def build_prompt(
+    map_file: str, reference_materials: list[dict[str, str]] | None = None
+) -> str:
     rubric_payload = {
         "criteria": CRITERION_TEXT,
         "score_descriptors": _rubric(),
     }
+    reference_context = format_reference_context(reference_materials or [])
+    reference_section = (
+        f"""REFERENCE MATERIAL
+The following files define the patient case and/or course content the student was expected to use.
+
+{reference_context}
+
+STUDENT CONCEPT MAP
+The concept map image is the only source of evidence for what the student actually included.
+
+Instructions for reference use:
+- Use the reference material only as the comparison standard.
+- Score only content visibly present in the student concept map.
+- Do not treat reference-material content as if it appears in the map.
+- For learned-this-unit criteria, compare visible map content against uploaded unit/session material.
+- For patient-case completeness, compare visible map content against the uploaded patient case.
+- For DDx, compare the map against clinically relevant alternatives supported by the reference materials.
+- Do not require every reference detail unless required by the rubric.
+- Do not lower scores solely because expected reference information is absent from the uploaded files.
+
+"""
+        if reference_context
+        else ""
+    )
     return f"""Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities. Grade visible map only.
+{reference_section}
 Rubric:{json.dumps(rubric_payload, separators=(",", ":"))}
-Rules: scores integers 1-4 only; decisions Yes/No only; no Partial/Borderline/Maybe/0/5/decimals; JSON only; no hallucinated evidence.
-Keep explanation one short sentence. evidence_from_map max 1 short item per criterion; use "No clear evidence found in the concept map." when missing.
+Rules: scores integers 1-4 only; decisions Yes/No only; no Partial/Borderline/Maybe/0/5/decimals; JSON only.
+Keep explanation one short sentence.
 strengths max 2 short strings; areas_for_improvement max 2 short strings; grading_notes max 1 sentence.
 Schema:{json.dumps(schema(map_file), separators=(",", ":"))}
 """
@@ -228,13 +257,24 @@ def grade_pdf(
     pdf_path: Path,
     map_file: str,
     debug_prefix: Path,
+    reference_materials: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_info = render_pdf_first_page(pdf_path, image_path)
     image_base64 = str(image_info["base64"])
-    prompt = build_prompt(map_file)
+    prompt = build_prompt(map_file, reference_materials)
     prompt_path = Path(f"{debug_prefix}_prompt.txt")
-    prompt_path.write_text(prompt, encoding="utf-8")
+    reference_files = [item["filename"] for item in reference_materials or []]
+    if reference_files:
+        prompt_path.write_text(
+            "Reference text omitted from debug output. Files used: "
+            + ", ".join(reference_files)
+            + "\n\n"
+            + build_prompt(map_file),
+            encoding="utf-8",
+        )
+    else:
+        prompt_path.write_text(prompt, encoding="utf-8")
     debug_path = Path(f"{debug_prefix}_debug.json")
     debug_payload = {
         "provider": PROVIDER,
@@ -247,6 +287,8 @@ def grade_pdf(
         "render_matrix": image_info["render_matrix"],
         "max_width_px": image_info["max_width_px"],
         "jpeg_quality": image_info["jpeg_quality"],
+        "reference_materials_used": bool(reference_files),
+        "reference_files": reference_files,
         "prompt_characters": len(prompt),
         "max_tokens": MAX_TOKENS,
         "timeout_seconds": TIMEOUT_SECONDS,

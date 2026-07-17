@@ -14,6 +14,10 @@ from interface.grading_runner import (
     save_evaluation_results,
     selected_model_names,
 )
+from interface.reference_materials import (
+    ReferenceMaterialError,
+    extract_reference_materials,
+)
 from interface.result_display import display_results
 from scripts.generate_evaluation_report import generate_report
 
@@ -37,8 +41,26 @@ model_selection = st.radio(
     horizontal=True,
 )
 
+reference_uploads = st.file_uploader(
+    "Reference Materials (Optional)",
+    type=["pdf", "txt"],
+    accept_multiple_files=True,
+    help="Upload the patient case and relevant session slides for this evaluation only.",
+)
+if reference_uploads:
+    st.caption("Reference materials loaded:")
+    st.markdown("\n".join(f"- {file.name}" for file in reference_uploads))
+
+reference_fingerprint = hashlib.sha256(
+    b"".join(
+        file.name.encode("utf-8") + b"\0" + file.getvalue()
+        for file in (reference_uploads or [])
+    )
+).hexdigest()
+
 previous_model_selection = st.session_state.get("previous_model_selection")
 previous_file_fingerprint = st.session_state.get("previous_file_fingerprint")
+previous_reference_fingerprint = st.session_state.get("previous_reference_fingerprint")
 if previous_model_selection is None:
     st.session_state["previous_model_selection"] = model_selection
 elif model_selection != previous_model_selection:
@@ -55,6 +77,15 @@ if previous_file_fingerprint != uploaded_file_fingerprint:
     st.session_state.pop("saved_model_results", None)
     st.session_state["previous_file_fingerprint"] = uploaded_file_fingerprint
 
+if previous_reference_fingerprint is None:
+    st.session_state["previous_reference_fingerprint"] = reference_fingerprint
+elif previous_reference_fingerprint != reference_fingerprint:
+    st.session_state.pop("evaluation_results", None)
+    st.session_state.pop("evaluation_debug", None)
+    st.session_state.pop("evaluation_error", None)
+    st.session_state.pop("saved_model_results", None)
+    st.session_state["previous_reference_fingerprint"] = reference_fingerprint
+
 st.button("Multi-AI Consensus Grading - Coming Soon", disabled=True)
 
 if st.button("Run Evaluation", type="primary"):
@@ -64,6 +95,7 @@ if st.button("Run Evaluation", type="primary"):
         st.session_state.pop("evaluation_results", None)
         st.session_state.pop("saved_model_results", None)
         try:
+            reference_materials = extract_reference_materials(reference_uploads)
             status_placeholder = st.empty()
 
             def show_progress(message: str) -> None:
@@ -78,10 +110,11 @@ if st.button("Run Evaluation", type="primary"):
                         model_names=selected_model_names(model_selection),
                         original_filename=uploaded_file.name,
                         progress_callback=show_progress,
+                        reference_materials=reference_materials,
                     )
                 show_progress("Rendering results")
                 st.session_state["evaluation_results"] = results
-        except GradingError as exc:
+        except (GradingError, ReferenceMaterialError) as exc:
             st.error(str(exc))
         except Exception as exc:
             st.error(f"Evaluation failed unexpectedly: {exc}")

@@ -9,6 +9,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from interface.reference_materials import format_reference_context
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUBRIC_PATH = PROJECT_ROOT / "rubric" / "concept_map_rubric.json"
 
@@ -117,7 +119,7 @@ def schema(map_file: str) -> dict[str, Any]:
     result: dict[str, Any] = {"map_file": map_file, "model": MODEL}
     for group, fields in CATEGORY_FIELDS.items():
         result[group] = {
-            field: {"score": 1, "explanation": "", "evidence_from_map": []}
+            field: {"score": 1, "explanation": ""}
             for field in fields
         }
         result[group]["overall_decision"] = "No"
@@ -129,11 +131,37 @@ def schema(map_file: str) -> dict[str, Any]:
     return result
 
 
-def build_prompt(map_file: str) -> str:
+def build_prompt(
+    map_file: str, reference_materials: list[dict[str, str]] | None = None
+) -> str:
+    reference_context = format_reference_context(reference_materials or [])
+    reference_section = (
+        f"""REFERENCE MATERIAL
+The following files define the patient case and/or course content the student was expected to use.
+
+{reference_context}
+
+STUDENT CONCEPT MAP
+The concept map image is the only source of evidence for what the student actually included.
+
+Instructions for reference use:
+- Use the reference material only as the comparison standard.
+- Score only content visibly present in the student concept map.
+- Do not treat reference-material content as if it appears in the map.
+- For learned-this-unit criteria, compare visible map content against uploaded unit/session material.
+- For patient-case completeness, compare visible map content against the uploaded patient case.
+- For DDx, compare the map against clinically relevant alternatives supported by the reference materials.
+- Do not require every reference detail unless required by the rubric.
+- Do not lower scores solely because expected reference information is absent from the uploaded files.
+
+"""
+        if reference_context
+        else ""
+    )
     return f"""Use the Spring 2025 Concept Map Feedback Tool for SUMMATIVE Activities exactly.
 Grade only the visible concept map image.
 
-Rubric JSON:
+{reference_section}Rubric JSON:
 {json.dumps(_rubric(), separators=(",", ":"))}
 
 Rules:
@@ -141,9 +169,6 @@ Rules:
 - Overall decisions must be exactly Yes or No only.
 - No Partial, Borderline, Maybe, 0, 5, or decimals.
 - Use brief explanations only.
-- Include evidence_from_map when visible.
-- If evidence is missing, write "No clear evidence found in the concept map."
-- Do not hallucinate evidence.
 - Return JSON only using this exact schema:
 {json.dumps(schema(map_file), separators=(",", ":"))}
 """
@@ -226,12 +251,23 @@ def grade_pdf(
     pdf_path: Path,
     map_file: str,
     debug_prefix: Path,
+    reference_materials: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_base64 = render_pdf_first_page(pdf_path, image_path)
-    prompt = build_prompt(map_file)
+    prompt = build_prompt(map_file, reference_materials)
     prompt_path = Path(f"{debug_prefix}_prompt.txt")
-    prompt_path.write_text(prompt, encoding="utf-8")
+    reference_files = [item["filename"] for item in reference_materials or []]
+    if reference_files:
+        prompt_path.write_text(
+            "Reference text omitted from debug output. Files used: "
+            + ", ".join(reference_files)
+            + "\n\n"
+            + build_prompt(map_file),
+            encoding="utf-8",
+        )
+    else:
+        prompt_path.write_text(prompt, encoding="utf-8")
 
     client = create_client()
     response = request_grade(client, prompt, image_base64)
@@ -273,6 +309,8 @@ def grade_pdf(
             "model": MODEL,
             "image_path": str(image_path),
             "image_bytes": image_path.stat().st_size,
+            "reference_materials_used": bool(reference_files),
+            "reference_files": reference_files,
             "json_repair_attempted": repaired,
             "first_malformed_raw_path": str(first_raw_path) if first_raw_path else None,
             "repair_prompt_path": str(repair_prompt_path) if repair_prompt_path else None,

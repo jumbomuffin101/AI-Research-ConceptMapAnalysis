@@ -77,6 +77,8 @@ class EvaluationResult:
     data: dict[str, Any]
     output_path: Path
     evaluated_at: str | None = None
+    reference_materials_used: bool = False
+    reference_files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -172,28 +174,6 @@ def _contains_forbidden_decision_text(value: Any) -> bool:
 def _require_yes_no(value: Any, field_path: str) -> None:
     if value not in {"Yes", "No"}:
         raise MalformedResultError(f"'{field_path}' must be exactly 'Yes' or 'No'.")
-
-
-def _normalize_evidence_from_map(result: dict[str, Any]) -> None:
-    """Normalize legacy evidence fields before schema validation."""
-    fallback = "No clear evidence found in the concept map."
-    for group, fields in CATEGORY_FIELDS.items():
-        section = result.get(group)
-        if not isinstance(section, dict):
-            continue
-        for field in fields:
-            item = section.get(field)
-            if not isinstance(item, dict):
-                continue
-            evidence = item.get("evidence_from_map")
-            if isinstance(evidence, list):
-                continue
-            if isinstance(evidence, str):
-                item["evidence_from_map"] = [evidence] if evidence.strip() else [fallback]
-            elif evidence is None:
-                item["evidence_from_map"] = [fallback]
-            else:
-                item["evidence_from_map"] = [str(evidence)]
 
 
 def _normalize_decision_value(value: Any) -> tuple[str, str | None]:
@@ -371,7 +351,6 @@ def parse_model_json(raw_text: str, normalize_decisions: bool = False) -> dict[s
 
     if not isinstance(result, dict):
         raise MalformedResultError("The model response JSON must be an object.")
-    _normalize_evidence_from_map(result)
     if normalize_decisions:
         _normalize_decision_fields(result)
     _normalize_if_no_explanations(result)
@@ -419,11 +398,6 @@ def parse_model_json(raw_text: str, normalize_decisions: bool = False) -> dict[s
             if not isinstance(item.get("explanation"), str):
                 raise MalformedResultError(
                     f"'{group}.{field}.explanation' must be a string."
-                )
-            evidence = item.get("evidence_from_map")
-            if not isinstance(evidence, list):
-                raise MalformedResultError(
-                    f"'{group}.{field}.evidence_from_map' must be a list."
                 )
     return result
 
@@ -485,6 +459,8 @@ def _save_successful_evaluation(
     model_name: str,
     model_id: str,
     data: dict[str, Any],
+    reference_materials_used: bool,
+    reference_files: tuple[str, ...],
 ) -> Path:
     """Persist one validated model result, replacing only an older success."""
     RAW_EVALUATION_DIR.mkdir(parents=True, exist_ok=True)
@@ -496,6 +472,8 @@ def _save_successful_evaluation(
         "evaluated_at": evaluated_at,
         "model_label": model_name,
         "model_id": model_id,
+        "reference_materials_used": reference_materials_used,
+        "reference_files": list(reference_files),
         "result": data,
     }
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -520,6 +498,8 @@ def save_evaluation_results(
             model_name=result.model_name,
             model_id=result.model_id,
             data=result.data,
+            reference_materials_used=result.reference_materials_used,
+            reference_files=result.reference_files,
         )
         saved_models.append(result.model_name)
     return saved_models
@@ -564,6 +544,7 @@ def run_evaluation(
     model_names: Iterable[str],
     original_filename: str,
     progress_callback: Any | None = None,
+    reference_materials: list[dict[str, str]] | None = None,
 ) -> list[EvaluationOutcome]:
     """Run one direct grading call for each selected model."""
     names = list(model_names)
@@ -583,6 +564,11 @@ def run_evaluation(
     run_id = uuid4().hex[:8]
     file_stem = _safe_stem(original_filename)
     map_file = Path(original_filename).name
+    reference_files = tuple(
+        str(item.get("filename", "")).strip()
+        for item in reference_materials or []
+        if str(item.get("filename", "")).strip()
+    )
     results: list[EvaluationOutcome] = []
 
     for model_name in names:
@@ -593,7 +579,12 @@ def run_evaluation(
         try:
             if progress_callback:
                 progress_callback(f"Running {model_name} grading")
-            grade = module.grade_pdf(pdf_path, map_file, debug_prefix)
+            grade = module.grade_pdf(
+                pdf_path,
+                map_file,
+                debug_prefix,
+                reference_materials=reference_materials,
+            )
             raw_response = grade.get("response")
             data = parse_model_json(
                 str(grade["cleaned_text"]),
@@ -615,7 +606,17 @@ def run_evaluation(
             }
             debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
-            results.append(EvaluationResult(model_name, model_id, data, output_path, evaluated_at))
+            results.append(
+                EvaluationResult(
+                    model_name,
+                    model_id,
+                    data,
+                    output_path,
+                    evaluated_at,
+                    bool(reference_files),
+                    reference_files,
+                )
+            )
         except Exception as exc:
             raw = getattr(exc, "raw_response", None)
             if raw is None:
