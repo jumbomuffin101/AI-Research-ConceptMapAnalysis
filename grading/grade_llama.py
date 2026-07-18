@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ MODEL = "qwen/qwen3.6-27b"
 PROVIDER = "Groq"
 BASE_URL = "https://api.groq.com/openai/v1"
 API_KEY_ENV = "GROQ_API_KEY"
-MAX_TOKENS = 3000
+MAX_TOKENS = 2000
 TIMEOUT_SECONDS = 180
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
@@ -51,6 +52,76 @@ class MalformedQwenJsonError(RuntimeError):
     def __init__(self, message: str, attempts: dict[str, str]) -> None:
         super().__init__(message)
         self.attempts = attempts
+
+
+class QwenRateLimitError(RuntimeError):
+    """Groq rejected the Qwen request due to a temporary rate limit."""
+
+    def __init__(self, retry_after_seconds: int, raw_response: Any | None = None) -> None:
+        super().__init__(
+            "Qwen rate limit reached. "
+            f"Please retry in approximately {retry_after_seconds} seconds."
+        )
+        self.raw_response = raw_response
+
+
+def _compact_reference_text(text: str, max_characters: int) -> str:
+    """Retain unique instructional content while dropping common slide boilerplate."""
+    ignored = re.compile(
+        r"(?:copyright|all rights reserved|poll(?:ing)?|clicker|scan (?:the )?qr|"
+        r"discussion question|page \d+|slide \d+|confidential)",
+        re.IGNORECASE,
+    )
+    seen: set[str] = set()
+    kept: list[str] = []
+    length = 0
+    for raw_line in text.splitlines():
+        line = " ".join(raw_line.split())
+        normalized = line.casefold()
+        if not line or ignored.search(line) or normalized in seen:
+            continue
+        seen.add(normalized)
+        if length + len(line) + 1 > max_characters:
+            break
+        kept.append(line)
+        length += len(line) + 1
+    return "\n".join(kept)
+
+
+def compact_reference_materials(
+    materials: Iterable[dict[str, str]], total_max_characters: int = 6000
+) -> list[dict[str, str]]:
+    """Bound Qwen reference context to keep Groq requests below the TPM budget."""
+    material_list = [item for item in materials if item.get("filename") and item.get("text")]
+    if not material_list:
+        return []
+    per_file_limit = max(1, total_max_characters // len(material_list))
+    return [
+        {"filename": str(item["filename"]), "text": _compact_reference_text(str(item["text"]), per_file_limit)}
+        for item in material_list
+    ]
+
+
+def _retry_after_seconds(error: Exception) -> int:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    retry_after = headers.get("retry-after") if headers else None
+    try:
+        if retry_after is not None:
+            return max(1, round(float(retry_after)))
+    except (TypeError, ValueError):
+        pass
+    match = re.search(r"(?:retry after|try again in)\s+(\d+(?:\.\d+)?)\s*(ms|s|sec|second)?", str(error), re.IGNORECASE)
+    if match:
+        value = float(match.group(1))
+        return max(1, round(value / 1000 if match.group(2) == "ms" else value))
+    return 60
+
+
+def _raise_rate_limit_if_needed(error: Exception) -> None:
+    status_code = getattr(error, "status_code", None)
+    if status_code == 429 or "rate_limit_exceeded" in str(error).lower():
+        raise QwenRateLimitError(_retry_after_seconds(error), getattr(error, "response", None)) from error
 
 
 def _secret(name: str) -> str | None:
@@ -144,7 +215,9 @@ def schema(map_file: str) -> dict[str, Any]:
 def build_prompt(
     map_file: str, reference_materials: list[dict[str, str]] | None = None
 ) -> str:
-    return build_grading_prompt(map_file, schema(map_file), reference_materials)
+    return build_grading_prompt(
+        map_file, schema(map_file), compact_reference_materials(reference_materials or [])
+    )
 
 
 def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
@@ -249,7 +322,11 @@ def grade_pdf(
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
     client = create_client()
-    response = request_grade(client, prompt, image_base64)
+    try:
+        response = request_grade(client, prompt, image_base64)
+    except Exception as error:
+        _raise_rate_limit_if_needed(error)
+        raise
     raw_text = response_text(response)
     attempts = {"first_attempt": raw_text}
     cleaned_text = clean_json_output(raw_text)
@@ -257,7 +334,11 @@ def grade_pdf(
         repair_attempted = False
     else:
         repair_attempted = True
-        repair_response = request_json_repair(client, raw_text, map_file)
+        try:
+            repair_response = request_json_repair(client, raw_text, map_file)
+        except Exception as error:
+            _raise_rate_limit_if_needed(error)
+            raise
         repair_text = response_text(repair_response)
         attempts["repair_attempt"] = repair_text
         response = repair_response
