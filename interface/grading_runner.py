@@ -566,6 +566,20 @@ def run_evaluation(
                 reference_materials=reference_materials,
             )
             raw_response = grade.get("response")
+            if grade.get("diagnostic"):
+                diagnostic_debug_path = Path(f"{debug_prefix}_debug.json")
+                diagnostic_debug_path.write_text(
+                    json.dumps(grade.get("debug", {}), indent=2), encoding="utf-8"
+                )
+                results.append(
+                    EvaluationFailure(
+                        model_name=model_name,
+                        model_id=model_id,
+                        error_message="Nemotron vision diagnostic completed. Download the debug file to review the raw response.",
+                        debug_path=diagnostic_debug_path,
+                    )
+                )
+                continue
             data = parse_model_json(
                 str(grade["cleaned_text"]),
                 normalize_decisions=True,

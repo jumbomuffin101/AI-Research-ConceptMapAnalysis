@@ -13,12 +13,13 @@ from typing import Any
 from grading.spring_2025_prompt import build_grading_prompt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODEL = "nvidia/nemotron-nano-12b-v2-vl:free"
-PROVIDER = "OpenRouter"
-BASE_URL = "https://openrouter.ai/api/v1"
-API_KEY_ENV = "OPENROUTER_API_KEY"
+MODEL = "nvidia/nemotron-nano-12b-v2-vl"
+PROVIDER = "NVIDIA NIM"
+BASE_URL = "https://integrate.api.nvidia.com/v1"
+API_KEY_ENV = "NVIDIA_API_KEY"
 MAX_TOKENS = 1800
-TIMEOUT_SECONDS = 180
+TIMEOUT_SECONDS = 120
+IMAGE_MIME_TYPE = "image/jpeg"
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
         "basic_science",
@@ -75,10 +76,10 @@ def _secret(name: str) -> str | None:
 
 
 def create_client() -> Any:
-    return create_openrouter_client()
+    return create_nvidia_client()
 
 
-def create_openrouter_client() -> Any:
+def create_nvidia_client() -> Any:
     try:
         from openai import OpenAI
     except ImportError as exc:
@@ -88,13 +89,36 @@ def create_openrouter_client() -> Any:
 
     api_key = _secret(API_KEY_ENV)
     if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY is not configured.")
+        raise RuntimeError("NVIDIA_API_KEY is not configured.")
     return OpenAI(
         api_key=api_key,
         base_url=BASE_URL,
         timeout=TIMEOUT_SECONDS,
         max_retries=0,
     )
+
+
+def _is_retryable_transport_error(error: Exception) -> bool:
+    status_code = getattr(error, "status_code", None)
+    return (isinstance(status_code, int) and 500 <= status_code <= 599) or "timeout" in error.__class__.__name__.lower()
+
+
+def _request_with_retry(request: Any) -> tuple[Any, dict[str, Any]]:
+    started_at = time.monotonic()
+    try:
+        response = request()
+        return response, {"http_status": 200, "response_time_seconds": round(time.monotonic() - started_at, 3), "retry_attempted": False}
+    except Exception as first_error:
+        if not _is_retryable_transport_error(first_error):
+            raise
+        time.sleep(5)
+        retry_started_at = time.monotonic()
+        try:
+            response = request()
+        except Exception as retry_error:
+            setattr(retry_error, "attempts", {"first_attempt_error": repr(first_error), "retry_attempt_error": repr(retry_error), "retry_attempted": True})
+            raise
+        return response, {"http_status": 200, "response_time_seconds": round(time.monotonic() - retry_started_at, 3), "retry_attempted": True, "first_attempt_error": repr(first_error)}
 
 
 def render_pdf_first_page(pdf_path: Path, output_path: Path) -> dict[str, Any]:
@@ -183,7 +207,7 @@ def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_base64}"
+                            "url": f"data:{IMAGE_MIME_TYPE};base64,{image_base64}"
                         },
                     },
                 ],
@@ -223,6 +247,41 @@ def clean_json_output(text: str) -> str:
     return match.group(0).strip() if match else text
 
 
+def _vision_diagnostic_enabled() -> bool:
+    return os.getenv("NEMOTRON_VISION_DIAGNOSTIC", "").strip() == "1"
+
+
+def request_vision_diagnostic(client: Any, image_base64: str) -> Any:
+    return client.chat.completions.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        temperature=0,
+        timeout=TIMEOUT_SECONDS,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Read this concept map carefully. Do not grade it. List:\n"
+                            "1. The main topic or diagnosis.\n"
+                            "2. At least 10 specific concepts or phrases you can visibly read.\n"
+                            "3. Any patient-specific information you can read.\n"
+                            "4. Any arrows or relationships between concepts you can identify.\n"
+                            "5. State whether the text is clearly readable."
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{IMAGE_MIME_TYPE};base64,{image_base64}"},
+                    },
+                ],
+            }
+        ],
+    )
+
+
 def grade_pdf(
     pdf_path: Path,
     map_file: str,
@@ -232,6 +291,41 @@ def grade_pdf(
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_info = render_pdf_first_page(pdf_path, image_path)
     image_base64 = str(image_info["base64"])
+    actual_input_path = image_path.parent / "nemotron_actual_input.jpg"
+    actual_input_path.write_bytes(image_path.read_bytes())
+    diagnostic_enabled = _vision_diagnostic_enabled()
+    if diagnostic_enabled:
+        client = create_client()
+        response, transport_debug = _request_with_retry(
+            lambda: request_vision_diagnostic(client, image_base64)
+        )
+        raw_text = response_text(response, {"diagnostic_attempt": _response_debug_value(response)})
+        diagnostic_path = image_path.parent / "nemotron_vision_diagnostic.txt"
+        diagnostic_path.write_text(raw_text, encoding="utf-8")
+        return {
+            "model": MODEL,
+            "provider": PROVIDER,
+            "raw_text": raw_text,
+            "response": response,
+            "diagnostic": True,
+            "debug": {
+                "provider": PROVIDER,
+                "base_url": BASE_URL,
+                "model": MODEL,
+                "image_path": str(image_path),
+                "actual_input_path": str(actual_input_path),
+                "image_mime_type": IMAGE_MIME_TYPE,
+                "image_width": image_info["width"],
+                "image_height": image_info["height"],
+                "image_bytes": image_info["bytes"],
+                "render_matrix": image_info["render_matrix"],
+                "jpeg_quality": image_info["jpeg_quality"],
+                "diagnostic_path": str(diagnostic_path),
+                "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}]},
+                "raw_response": _response_debug_value(response),
+                **transport_debug,
+            },
+        }
     prompt = build_prompt(map_file, reference_materials)
     prompt_path = Path(f"{debug_prefix}_prompt.txt")
     reference_files = [item["filename"] for item in reference_materials or []]
@@ -251,6 +345,8 @@ def grade_pdf(
         "base_url": BASE_URL,
         "model": MODEL,
         "image_path": str(image_info["path"]),
+        "actual_input_path": str(actual_input_path),
+        "image_mime_type": IMAGE_MIME_TYPE,
         "image_width": image_info["width"],
         "image_height": image_info["height"],
         "image_bytes": image_info["bytes"],
@@ -262,12 +358,16 @@ def grade_pdf(
         "prompt_characters": len(prompt),
         "max_tokens": MAX_TOKENS,
         "timeout_seconds": TIMEOUT_SECONDS,
+        "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}]},
     }
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
     client = create_client()
-    response = request_grade(client, prompt, image_base64)
+    response, transport_debug = _request_with_retry(
+        lambda: request_grade(client, prompt, image_base64)
+    )
     attempts = {"first_attempt": _response_debug_value(response)}
+    debug_payload.update({"raw_response": _response_debug_value(response), **transport_debug})
     try:
         raw_text = response_text(response, attempts)
     except EmptyNemotronResponseError as first_error:

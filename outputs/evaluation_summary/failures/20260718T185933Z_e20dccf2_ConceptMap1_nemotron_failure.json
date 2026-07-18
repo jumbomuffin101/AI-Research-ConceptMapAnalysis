@@ -1,0 +1,8 @@
+{
+  "map_file": "ConceptMap1.pdf",
+  "evaluated_at": "2026-07-18T18:59:33.617907+00:00",
+  "model_label": "Nemotron",
+  "model_id": "nvidia/nemotron-nano-12b-v2-vl:free",
+  "error": "Nemotron returned no response choices.",
+  "debug_path": "C:\\Users\\Aryan Rawat\\Downloads\\Projects\\ai-research\\outputs\\web_demo\\debug\\20260718T185933Z_e20dccf2_ConceptMap1_nemotron_failure.json"
+}
