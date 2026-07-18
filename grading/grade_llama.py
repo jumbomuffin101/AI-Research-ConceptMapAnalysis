@@ -1,4 +1,4 @@
-"""Direct Groq Qwen 3.6 27B grader for Spring 2025 concept map evaluation."""
+"""Direct OpenRouter Nemotron grader for Spring 2025 concept map evaluation."""
 
 from __future__ import annotations
 
@@ -6,18 +6,18 @@ import base64
 import json
 import os
 import re
-from collections.abc import Iterable
+import time
 from pathlib import Path
 from typing import Any
 
 from grading.spring_2025_prompt import build_grading_prompt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODEL = "qwen/qwen3.6-27b"
-PROVIDER = "Groq"
-BASE_URL = "https://api.groq.com/openai/v1"
-API_KEY_ENV = "GROQ_API_KEY"
-MAX_TOKENS = 2000
+MODEL = "nvidia/nemotron-nano-12b-v2-vl:free"
+PROVIDER = "OpenRouter"
+BASE_URL = "https://openrouter.ai/api/v1"
+API_KEY_ENV = "OPENROUTER_API_KEY"
+MAX_TOKENS = 1800
 TIMEOUT_SECONDS = 180
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
@@ -46,82 +46,13 @@ CATEGORY_FIELDS = {
 }
 
 
-class MalformedQwenJsonError(RuntimeError):
-    """Qwen output remained invalid JSON after its single repair attempt."""
+class EmptyNemotronResponseError(RuntimeError):
+    """Nemotron returned no usable completion content."""
 
-    def __init__(self, message: str, attempts: dict[str, str]) -> None:
+    def __init__(self, message: str, raw_response: Any, attempts: dict[str, Any]) -> None:
         super().__init__(message)
-        self.attempts = attempts
-
-
-class QwenRateLimitError(RuntimeError):
-    """Groq rejected the Qwen request due to a temporary rate limit."""
-
-    def __init__(self, retry_after_seconds: int, raw_response: Any | None = None) -> None:
-        super().__init__(
-            "Qwen rate limit reached. "
-            f"Please retry in approximately {retry_after_seconds} seconds."
-        )
         self.raw_response = raw_response
-
-
-def _compact_reference_text(text: str, max_characters: int) -> str:
-    """Retain unique instructional content while dropping common slide boilerplate."""
-    ignored = re.compile(
-        r"(?:copyright|all rights reserved|poll(?:ing)?|clicker|scan (?:the )?qr|"
-        r"discussion question|page \d+|slide \d+|confidential)",
-        re.IGNORECASE,
-    )
-    seen: set[str] = set()
-    kept: list[str] = []
-    length = 0
-    for raw_line in text.splitlines():
-        line = " ".join(raw_line.split())
-        normalized = line.casefold()
-        if not line or ignored.search(line) or normalized in seen:
-            continue
-        seen.add(normalized)
-        if length + len(line) + 1 > max_characters:
-            break
-        kept.append(line)
-        length += len(line) + 1
-    return "\n".join(kept)
-
-
-def compact_reference_materials(
-    materials: Iterable[dict[str, str]], total_max_characters: int = 6000
-) -> list[dict[str, str]]:
-    """Bound Qwen reference context to keep Groq requests below the TPM budget."""
-    material_list = [item for item in materials if item.get("filename") and item.get("text")]
-    if not material_list:
-        return []
-    per_file_limit = max(1, total_max_characters // len(material_list))
-    return [
-        {"filename": str(item["filename"]), "text": _compact_reference_text(str(item["text"]), per_file_limit)}
-        for item in material_list
-    ]
-
-
-def _retry_after_seconds(error: Exception) -> int:
-    response = getattr(error, "response", None)
-    headers = getattr(response, "headers", None)
-    retry_after = headers.get("retry-after") if headers else None
-    try:
-        if retry_after is not None:
-            return max(1, round(float(retry_after)))
-    except (TypeError, ValueError):
-        pass
-    match = re.search(r"(?:retry after|try again in)\s+(\d+(?:\.\d+)?)\s*(ms|s|sec|second)?", str(error), re.IGNORECASE)
-    if match:
-        value = float(match.group(1))
-        return max(1, round(value / 1000 if match.group(2) == "ms" else value))
-    return 60
-
-
-def _raise_rate_limit_if_needed(error: Exception) -> None:
-    status_code = getattr(error, "status_code", None)
-    if status_code == 429 or "rate_limit_exceeded" in str(error).lower():
-        raise QwenRateLimitError(_retry_after_seconds(error), getattr(error, "response", None)) from error
+        self.attempts = attempts
 
 
 def _secret(name: str) -> str | None:
@@ -144,10 +75,10 @@ def _secret(name: str) -> str | None:
 
 
 def create_client() -> Any:
-    return create_groq_client()
+    return create_openrouter_client()
 
 
-def create_groq_client() -> Any:
+def create_openrouter_client() -> Any:
     try:
         from openai import OpenAI
     except ImportError as exc:
@@ -157,7 +88,7 @@ def create_groq_client() -> Any:
 
     api_key = _secret(API_KEY_ENV)
     if not api_key:
-        raise RuntimeError("GROQ_API_KEY is not configured.")
+        raise RuntimeError("OPENROUTER_API_KEY is not configured.")
     return OpenAI(
         api_key=api_key,
         base_url=BASE_URL,
@@ -215,13 +146,11 @@ def schema(map_file: str) -> dict[str, Any]:
 def build_prompt(
     map_file: str, reference_materials: list[dict[str, str]] | None = None
 ) -> str:
-    return build_grading_prompt(
-        map_file, schema(map_file), compact_reference_materials(reference_materials or [])
-    )
+    return build_grading_prompt(map_file, schema(map_file), reference_materials)
 
 
 def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
-    """Request normal text content; Groq JSON mode rejects some Qwen responses."""
+    """Request normal text content for local JSON parsing and validation."""
     return client.chat.completions.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
@@ -244,30 +173,26 @@ def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
     )
 
 
-def request_json_repair(client: Any, malformed_output: str, map_file: str) -> Any:
-    """Ask Qwen to format its prior evaluation without changing the evaluation."""
-    repair_prompt = (
-        "Return the same evaluation as valid JSON only. Do not regrade or change scores. "
-        "Do not use markdown fences or explanatory text outside the JSON object.\n"
-        f"Required schema:\n{json.dumps(schema(map_file), separators=(',', ':'))}\n"
-        f"Malformed output to repair:\n{malformed_output}"
-    )
-    return client.chat.completions.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        temperature=0,
-        timeout=TIMEOUT_SECONDS,
-        messages=[{"role": "user", "content": repair_prompt}],
-    )
+def _response_debug_value(response: Any) -> Any:
+    dump = getattr(response, "model_dump", None)
+    if callable(dump):
+        try:
+            return dump(mode="json")
+        except Exception:
+            pass
+    return repr(response)
 
 
-def response_text(response: Any) -> str:
+def response_text(response: Any, attempts: dict[str, Any]) -> str:
+    if response is None:
+        raise EmptyNemotronResponseError("Nemotron returned no response.", response, attempts)
     choices = getattr(response, "choices", None)
     if not choices:
-        raise RuntimeError("Qwen 3.6 27B returned no response choices.")
-    text = getattr(choices[0].message, "content", None)
+        raise EmptyNemotronResponseError("Nemotron returned no response choices.", response, attempts)
+    message = getattr(choices[0], "message", None)
+    text = getattr(message, "content", None)
     if not isinstance(text, str) or not text.strip():
-        raise RuntimeError("Qwen 3.6 27B returned empty content.")
+        raise EmptyNemotronResponseError("Nemotron returned empty content.", response, attempts)
     return text
 
 
@@ -322,50 +247,32 @@ def grade_pdf(
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
     client = create_client()
+    response = request_grade(client, prompt, image_base64)
+    attempts = {"first_attempt": _response_debug_value(response)}
     try:
-        response = request_grade(client, prompt, image_base64)
-    except Exception as error:
-        _raise_rate_limit_if_needed(error)
-        raise
-    raw_text = response_text(response)
-    attempts = {"first_attempt": raw_text}
-    cleaned_text = clean_json_output(raw_text)
-    if _is_valid_json(cleaned_text):
-        repair_attempted = False
-    else:
-        repair_attempted = True
+        raw_text = response_text(response, attempts)
+    except EmptyNemotronResponseError as first_error:
+        time.sleep(5)
+        retry_response = request_grade(client, prompt, image_base64)
+        attempts["retry_attempt"] = _response_debug_value(retry_response)
         try:
-            repair_response = request_json_repair(client, raw_text, map_file)
-        except Exception as error:
-            _raise_rate_limit_if_needed(error)
-            raise
-        repair_text = response_text(repair_response)
-        attempts["repair_attempt"] = repair_text
-        response = repair_response
-        raw_text = repair_text
-        cleaned_text = clean_json_output(raw_text)
-        if not _is_valid_json(cleaned_text):
-            debug_payload["first_attempt"] = attempts["first_attempt"]
-            debug_payload["repair_attempt"] = attempts["repair_attempt"]
-            debug_payload["json_repair_attempted"] = True
-            debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
-            raise MalformedQwenJsonError(
-                "Qwen 3.6 27B returned malformed JSON after one repair attempt.",
-                attempts,
-            )
+            raw_text = response_text(retry_response, attempts)
+        except EmptyNemotronResponseError as retry_error:
+            raise EmptyNemotronResponseError(str(retry_error), retry_response, attempts) from first_error
+        response = retry_response
     raw_path = Path(f"{debug_prefix}_raw.txt")
     raw_path.write_text(raw_text, encoding="utf-8")
     debug_payload["raw_path"] = str(raw_path)
     debug_payload["first_attempt"] = attempts["first_attempt"]
-    debug_payload["repair_attempt"] = attempts.get("repair_attempt")
-    debug_payload["json_repair_attempted"] = repair_attempted
+    debug_payload["retry_attempt"] = attempts.get("retry_attempt")
+    debug_payload["empty_response_retry_attempted"] = "retry_attempt" in attempts
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
     return {
         "model": MODEL,
         "provider": PROVIDER,
         "raw_text": raw_text,
-        "cleaned_text": cleaned_text,
+        "cleaned_text": clean_json_output(raw_text),
         "response": response,
         "prompt": prompt,
         "prompt_path": prompt_path,
@@ -377,11 +284,3 @@ def grade_pdf(
             "raw_path": str(raw_path),
         },
     }
-
-
-def _is_valid_json(text: str) -> bool:
-    try:
-        json.loads(text)
-    except json.JSONDecodeError:
-        return False
-    return True

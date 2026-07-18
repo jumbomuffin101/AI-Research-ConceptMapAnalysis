@@ -37,7 +37,7 @@ uploaded_file_fingerprint = (
 )
 model_selection = st.radio(
     "Model",
-    options=["Gemma", "Qwen 3.6 27B", "Both"],
+    options=["Gemma", "Nemotron", "Both"],
     horizontal=True,
 )
 

@@ -193,10 +193,8 @@ def display_failure(result: Any) -> None:
         st.warning("NVIDIA image input failed")
     elif error_message.startswith("NVIDIA grading request failed"):
         st.warning(error_message)
-    elif error_message == "Qwen 3.6 27B returned empty content.":
+    elif error_message == "Nemotron returned empty content.":
         st.warning(f"{model_name} returned empty content.")
-    elif error_message.startswith("Qwen rate limit reached."):
-        st.warning(error_message)
     elif "implausible all-4 evaluation" in error_message:
         st.warning(
             f"{model_name} returned an implausible all-4 evaluation. "

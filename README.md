@@ -31,7 +31,7 @@ PDF-to-Image Conversion
     |
     v
 Vision Language Model
-    (Gemma via OpenRouter OR Qwen 3.6 27B via Groq)
+    (Gemma or Nemotron via OpenRouter)
     |
     v
 Rubric-Based Grading
@@ -47,7 +47,7 @@ Interactive Web Dashboard
 
 - PDF concept map upload
 - PDF-to-image conversion
-- Dual-model evaluation (Gemma + Qwen 3.6 27B)
+- Dual-model evaluation (Gemma + Nemotron)
 - Direct rubric-based grading
 - Rubric-based scoring
 - Knowledge Acquisition grading
@@ -66,19 +66,19 @@ Interactive Web Dashboard
 ### Primary Models
 
 - `google/gemma-4-26b-a4b-it:free`
-- `qwen/qwen3.6-27b`
+- `nvidia/nemotron-nano-12b-v2-vl:free`
 
-Gemma uses OpenRouter. Qwen 3.6 27B uses Groq. Both models generate full Spring 2025 rubric-aligned JSON grading.
+Gemma and Nemotron use OpenRouter. Both models generate full Spring 2025 rubric-aligned JSON grading.
 
 Required environment variables:
 
 - `OPENROUTER_API_KEY` for Gemma
-- `GROQ_API_KEY` for Qwen 3.6 27B
+- `OPENROUTER_API_KEY` for Gemma and Nemotron
 
 Users may run:
 
 - Gemma only
-- Qwen 3.6 27B only
+- Nemotron only
 - Both models simultaneously
 
 ## Repository Structure
@@ -115,7 +115,7 @@ runtime.txt
 
 ## Web Demo
 
-The Streamlit demo accepts any concept map PDF, runs Gemma, Qwen 3.6 27B, or both, and displays rubric scores, reasoning, evidence, strengths, and areas for improvement. Valid results are saved under `outputs/web_demo/`.
+The Streamlit demo accepts any concept map PDF, runs Gemma, Nemotron, or both, and displays rubric scores, reasoning, evidence, strengths, and areas for improvement. Valid results are saved under `outputs/web_demo/`.
 
 If one selected model fails, the app keeps any successful model result visible and shows a warning for the failed model. Raw failed responses are saved under `outputs/web_demo/debug/` for troubleshooting.
 
@@ -124,14 +124,14 @@ Install dependencies and configure API keys:
 ```powershell
 pip install -r requirements.txt
 $env:OPENROUTER_API_KEY="your-api-key"
-$env:GROQ_API_KEY="your-groq-api-key"
+$env:OPENROUTER_API_KEY="your-openrouter-api-key"
 ```
 
 You can instead place these values in the project `.env` file or Streamlit secrets:
 
 ```text
 OPENROUTER_API_KEY=your-openrouter-api-key
-GROQ_API_KEY=your-groq-api-key
+OPENROUTER_API_KEY=your-openrouter-api-key
 ```
 
 Start the app from the repository root:

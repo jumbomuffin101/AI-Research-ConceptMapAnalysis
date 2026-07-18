@@ -26,12 +26,12 @@ FAILURE_EVALUATION_DIR = EVALUATION_SUMMARY_DIR / "failures"
 
 MODEL_MODULES = {
     "Gemma": grade_gemma,
-    "Qwen 3.6 27B": grade_llama,
+    "Nemotron": grade_llama,
 }
 
 MODEL_IDS = {
     "Gemma": grade_gemma.MODEL,
-    "Qwen 3.6 27B": grade_llama.MODEL,
+    "Nemotron": grade_llama.MODEL,
 }
 
 CATEGORY_FIELDS = grade_gemma.CATEGORY_FIELDS
@@ -104,8 +104,8 @@ def selected_model_names(selection: str) -> list[str]:
     )
     routes = {
         "Gemma": ["Gemma"],
-        "Qwen 3.6 27B": ["Qwen 3.6 27B"],
-        "Both": ["Gemma", "Qwen 3.6 27B"],
+        "Nemotron": ["Nemotron"],
+        "Both": ["Gemma", "Nemotron"],
     }
     try:
         return routes[normalized]
@@ -115,7 +115,7 @@ def selected_model_names(selection: str) -> list[str]:
 
 def model_debug_lines(model_names: Iterable[str] | None = None) -> list[str]:
     """Return internal provider/model debug lines; app.py does not render these."""
-    names = list(model_names) if model_names is not None else ["Gemma", "Qwen 3.6 27B"]
+    names = list(model_names) if model_names is not None else ["Gemma", "Nemotron"]
     lines: list[str] = []
     for name in names:
         module = MODEL_MODULES.get(name)
@@ -137,15 +137,15 @@ def _model_slug(model_name: str) -> str:
 
 
 def _failure_suffix(model_name: str) -> str:
-    if model_name == "Qwen 3.6 27B":
-        return "qwen36_failure"
+    if model_name == "Nemotron":
+        return "nemotron_failure"
     return f"{_model_slug(model_name)}_failure"
 
 
 def _result_suffix(model_name: str) -> str:
     """Keep saved result filenames stable and easy to identify."""
-    if model_name == "Qwen 3.6 27B":
-        return "qwen36"
+    if model_name == "Nemotron":
+        return "nemotron"
     return _model_slug(model_name)
 
 
