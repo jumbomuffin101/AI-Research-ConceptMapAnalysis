@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import streamlit as st
@@ -218,6 +219,21 @@ def display_failure(result: Any) -> None:
         st.write(error_message)
         if debug_path:
             st.caption(f"Debug file: {debug_path}")
+            try:
+                debug_file = Path(debug_path)
+                debug_contents = debug_file.read_bytes()
+                if not debug_contents:
+                    raise OSError("Debug file is empty.")
+            except (OSError, TypeError, ValueError):
+                st.caption("Debug file is unavailable for download.")
+            else:
+                st.download_button(
+                    "Download Debug File",
+                    data=debug_contents,
+                    file_name=debug_file.name,
+                    mime="application/json",
+                    key=f"download-debug-{model_name}-{debug_file.name}-{id(result)}",
+                )
         st.info(
             f"To retry only this model, choose '{model_name}' in the Model "
             "selector and click Run Evaluation again."
