@@ -44,6 +44,15 @@ CATEGORY_FIELDS = {
     ],
 }
 
+
+class MalformedQwenJsonError(RuntimeError):
+    """Qwen output remained invalid JSON after its single repair attempt."""
+
+    def __init__(self, message: str, attempts: dict[str, str]) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+
+
 def _secret(name: str) -> str | None:
     try:
         from dotenv import load_dotenv
@@ -139,12 +148,12 @@ def build_prompt(
 
 
 def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
+    """Request normal text content; Groq JSON mode rejects some Qwen responses."""
     return client.chat.completions.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         temperature=0,
         timeout=TIMEOUT_SECONDS,
-        response_format={"type": "json_object"},
         messages=[
             {
                 "role": "user",
@@ -159,6 +168,23 @@ def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
                 ],
             }
         ],
+    )
+
+
+def request_json_repair(client: Any, malformed_output: str, map_file: str) -> Any:
+    """Ask Qwen to format its prior evaluation without changing the evaluation."""
+    repair_prompt = (
+        "Return the same evaluation as valid JSON only. Do not regrade or change scores. "
+        "Do not use markdown fences or explanatory text outside the JSON object.\n"
+        f"Required schema:\n{json.dumps(schema(map_file), separators=(',', ':'))}\n"
+        f"Malformed output to repair:\n{malformed_output}"
+    )
+    return client.chat.completions.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        temperature=0,
+        timeout=TIMEOUT_SECONDS,
+        messages=[{"role": "user", "content": repair_prompt}],
     )
 
 
@@ -225,16 +251,40 @@ def grade_pdf(
     client = create_client()
     response = request_grade(client, prompt, image_base64)
     raw_text = response_text(response)
+    attempts = {"first_attempt": raw_text}
+    cleaned_text = clean_json_output(raw_text)
+    if _is_valid_json(cleaned_text):
+        repair_attempted = False
+    else:
+        repair_attempted = True
+        repair_response = request_json_repair(client, raw_text, map_file)
+        repair_text = response_text(repair_response)
+        attempts["repair_attempt"] = repair_text
+        response = repair_response
+        raw_text = repair_text
+        cleaned_text = clean_json_output(raw_text)
+        if not _is_valid_json(cleaned_text):
+            debug_payload["first_attempt"] = attempts["first_attempt"]
+            debug_payload["repair_attempt"] = attempts["repair_attempt"]
+            debug_payload["json_repair_attempted"] = True
+            debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+            raise MalformedQwenJsonError(
+                "Qwen 3.6 27B returned malformed JSON after one repair attempt.",
+                attempts,
+            )
     raw_path = Path(f"{debug_prefix}_raw.txt")
     raw_path.write_text(raw_text, encoding="utf-8")
     debug_payload["raw_path"] = str(raw_path)
+    debug_payload["first_attempt"] = attempts["first_attempt"]
+    debug_payload["repair_attempt"] = attempts.get("repair_attempt")
+    debug_payload["json_repair_attempted"] = repair_attempted
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
     return {
         "model": MODEL,
         "provider": PROVIDER,
         "raw_text": raw_text,
-        "cleaned_text": clean_json_output(raw_text),
+        "cleaned_text": cleaned_text,
         "response": response,
         "prompt": prompt,
         "prompt_path": prompt_path,
@@ -246,3 +296,11 @@ def grade_pdf(
             "raw_path": str(raw_path),
         },
     }
+
+
+def _is_valid_json(text: str) -> bool:
+    try:
+        json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return True

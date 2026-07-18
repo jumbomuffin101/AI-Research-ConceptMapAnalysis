@@ -410,22 +410,23 @@ def _save_failed_response(
     model_id: str,
     error_message: str,
     raw_response: Any,
+    debug_details: dict[str, Any] | None = None,
 ) -> Path:
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     debug_path = (
         DEBUG_DIR
         / f"{timestamp}_{run_id}_{file_stem}_{_failure_suffix(model_name)}.json"
     )
+    payload = {
+        "model_name": model_name,
+        "model_id": model_id,
+        "error": error_message,
+        "raw_response": _debug_text(raw_response),
+    }
+    if debug_details:
+        payload.update(debug_details)
     debug_path.write_text(
-        json.dumps(
-            {
-                "model_name": model_name,
-                "model_id": model_id,
-                "error": error_message,
-                "raw_response": _debug_text(raw_response),
-            },
-            indent=2,
-        ),
+        json.dumps(payload, indent=2),
         encoding="utf-8",
     )
     return debug_path
@@ -608,6 +609,7 @@ def run_evaluation(
                 model_id=model_id,
                 error_message=str(exc),
                 raw_response=raw,
+                debug_details=getattr(exc, "attempts", None),
             )
             _save_evaluation_failure(
                 timestamp=timestamp,
