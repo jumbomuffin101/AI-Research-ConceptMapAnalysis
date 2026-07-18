@@ -146,7 +146,26 @@ def schema(map_file: str) -> dict[str, Any]:
 def build_prompt(
     map_file: str, reference_materials: list[dict[str, str]] | None = None
 ) -> str:
-    return build_grading_prompt(map_file, schema(map_file), reference_materials)
+    return (
+        build_grading_prompt(map_file, schema(map_file), reference_materials)
+        + "\nNemotron grading instructions:\n"
+        "- Do not use score 1 as a default or fallback.\n"
+        "- For every criterion, compare the visible concept map against all four rubric descriptors, "
+        "choose the descriptor that best matches the evidence, and use the full 1–4 range when warranted.\n"
+        "- Score 1 only when the criterion is absent, content is irrelevant, or required relationships "
+        "are absent or clearly incorrect.\n"
+        "- If some relevant content is visibly present but incomplete, general, simplistic, or weakly "
+        "connected, score 2 rather than 1.\n"
+        "- If content is relevant and mostly synthesized, score 3.\n"
+        "- Use score 4 only when the exact score-4 rubric descriptor is clearly satisfied.\n"
+        "- Do not penalize the map simply because reference material is not uploaded.\n"
+        "- When reference material is uploaded, use it only as the comparison standard; do not treat "
+        "reference content as student evidence.\n"
+        "- Before returning the final JSON, perform a score-distribution sanity check: if every criterion "
+        "is scored 1, re-review the concept map against each rubric descriptor. Keep all 1s only if the "
+        "map truly contains little or no relevant content across every criterion. Do not artificially "
+        "raise scores just to create variation.\n"
+    )
 
 
 def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
