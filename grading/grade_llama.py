@@ -13,12 +13,12 @@ from typing import Any
 from grading.spring_2025_prompt import build_grading_prompt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODEL = "meta/llama-3.2-11b-vision-instruct"
+MODEL = "moonshotai/kimi-k2.6"
 PROVIDER = "NVIDIA NIM"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 API_KEY_ENV = "NVIDIA_API_KEY"
 MAX_TOKENS = 1800
-TIMEOUT_SECONDS = 120
+TIMEOUT_SECONDS = 180
 IMAGE_MIME_TYPE = "image/jpeg"
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
@@ -264,7 +264,7 @@ def clean_json_output(text: str) -> str:
 
 
 def _vision_diagnostic_enabled() -> bool:
-    return os.getenv("LLAMA32_VISION_DIAGNOSTIC", "").strip() == "1"
+    return os.getenv("KIMI_VISION_DIAGNOSTIC", "").strip() == "1"
 
 
 def request_vision_diagnostic(client: Any, image_base64: str) -> Any:
@@ -307,7 +307,7 @@ def grade_pdf(
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_info = render_pdf_first_page(pdf_path, image_path)
     image_base64 = str(image_info["base64"])
-    actual_input_path = image_path.parent / "llama32_11b_vision_actual_input.jpg"
+    actual_input_path = image_path.parent / "kimi_k2_6_actual_input.jpg"
     actual_input_path.write_bytes(image_path.read_bytes())
     diagnostic_enabled = _vision_diagnostic_enabled()
     if diagnostic_enabled:
@@ -316,7 +316,7 @@ def grade_pdf(
             lambda: request_vision_diagnostic(client, image_base64)
         )
         raw_text = response_text(response, {"diagnostic_attempt": _response_debug_value(response)})
-        diagnostic_path = image_path.parent / "llama32_11b_vision_diagnostic.txt"
+        diagnostic_path = image_path.parent / "kimi_k2_6_vision_diagnostic.txt"
         diagnostic_path.write_text(raw_text, encoding="utf-8")
         return {
             "model": MODEL,
