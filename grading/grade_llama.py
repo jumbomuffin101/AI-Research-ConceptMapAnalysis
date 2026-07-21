@@ -18,7 +18,7 @@ PROVIDER = "NVIDIA NIM"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 API_KEY_ENV = "NVIDIA_API_KEY"
 MAX_TOKENS = 1800
-TIMEOUT_SECONDS = 120
+TIMEOUT_SECONDS = 240
 IMAGE_MIME_TYPE = "image/jpeg"
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
@@ -107,7 +107,7 @@ def _request_with_retry(request: Any) -> tuple[Any, dict[str, Any]]:
     started_at = time.monotonic()
     try:
         response = request()
-        return response, {"http_status": 200, "response_time_seconds": round(time.monotonic() - started_at, 3), "retry_attempted": False}
+        return response, {"attempt_number": 1, "http_status": 200, "request_duration_seconds": round(time.monotonic() - started_at, 3), "retry_attempted": False}
     except Exception as first_error:
         if not _is_retryable_transport_error(first_error):
             raise
@@ -116,9 +116,9 @@ def _request_with_retry(request: Any) -> tuple[Any, dict[str, Any]]:
         try:
             response = request()
         except Exception as retry_error:
-            setattr(retry_error, "attempts", {"first_attempt_error": repr(first_error), "retry_attempt_error": repr(retry_error), "retry_attempted": True})
+            setattr(retry_error, "attempts", {"attempt_number": 2, "first_attempt_error": repr(first_error), "retry_attempt_error": repr(retry_error), "http_status": getattr(retry_error, "status_code", None), "retry_attempted": True})
             raise
-        return response, {"http_status": 200, "response_time_seconds": round(time.monotonic() - retry_started_at, 3), "retry_attempted": True, "first_attempt_error": repr(first_error)}
+        return response, {"attempt_number": 2, "http_status": 200, "request_duration_seconds": round(time.monotonic() - retry_started_at, 3), "retry_attempted": True, "first_attempt_error": repr(first_error)}
 
 
 def render_pdf_first_page(pdf_path: Path, output_path: Path) -> dict[str, Any]:
@@ -129,14 +129,14 @@ def render_pdf_first_page(pdf_path: Path, output_path: Path) -> dict[str, Any]:
         if document.page_count < 1:
             raise RuntimeError("The uploaded PDF has no pages.")
         page = document[0]
-        max_width_px = 1800
+        max_width_px = 1400
         scale = max_width_px / max(page.rect.width, 1)
         pixmap = page.get_pixmap(
             matrix=fitz.Matrix(scale, scale),
             colorspace=fitz.csRGB,
             alpha=False,
         )
-        image_bytes = pixmap.tobytes("jpeg", jpg_quality=85)
+        image_bytes = pixmap.tobytes("jpeg", jpg_quality=80)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(image_bytes)
     return {
@@ -147,7 +147,7 @@ def render_pdf_first_page(pdf_path: Path, output_path: Path) -> dict[str, Any]:
         "bytes": len(image_bytes),
         "render_matrix": f"fitz.Matrix({scale:.4f}, {scale:.4f})",
         "max_width_px": max_width_px,
-        "jpeg_quality": 85,
+        "jpeg_quality": 80,
     }
 
 
@@ -353,8 +353,13 @@ def grade_pdf(
         raw_text = response_text(response, attempts)
     except EmptyLlamaVisionResponseError as first_error:
         time.sleep(5)
+        retry_started_at = time.monotonic()
         retry_response = request_grade(client, prompt, image_base64)
         attempts["retry_attempt"] = _response_debug_value(retry_response)
+        debug_payload["empty_response_retry_attempt_number"] = 2
+        debug_payload["empty_response_retry_duration_seconds"] = round(
+            time.monotonic() - retry_started_at, 3
+        )
         try:
             raw_text = response_text(retry_response, attempts)
         except EmptyLlamaVisionResponseError as retry_error:
