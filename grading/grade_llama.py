@@ -64,12 +64,23 @@ class MalformedLlamaVisionJsonError(RuntimeError):
         self.attempts = attempts
 
 
+class NvidiaKimiHttpError(RuntimeError):
+    """NVIDIA returned an HTTP response that must remain visible to the user."""
+
+    def __init__(self, message: str, response_details: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.raw_response = response_details
+        self.status_code = response_details.get("http_status")
+        self.attempts = {"nvidia_http_response": response_details}
+
+
 @dataclass
 class NvidiaChatCompletion:
     """Small adapter preserving the response interface used by this module."""
 
     data: dict[str, Any]
     http_response: Any
+    transport: dict[str, Any]
 
     @property
     def choices(self) -> list[Any]:
@@ -139,7 +150,7 @@ def _request_with_retry(request: Any) -> tuple[Any, dict[str, Any]]:
     started_at = time.monotonic()
     try:
         response = request()
-        return response, {"attempt_number": 1, "http_status": 200, "request_duration_seconds": round(time.monotonic() - started_at, 3), "retry_attempted": False}
+        return response, {"attempt_number": 1, "http_status": getattr(getattr(response, "http_response", None), "status_code", 200), "request_duration_seconds": round(time.monotonic() - started_at, 3), "retry_attempted": False}
     except Exception as first_error:
         if not _is_retryable_transport_error(first_error):
             raise
@@ -148,9 +159,17 @@ def _request_with_retry(request: Any) -> tuple[Any, dict[str, Any]]:
         try:
             response = request()
         except Exception as retry_error:
-            setattr(retry_error, "attempts", {"attempt_number": 2, "first_attempt_error": repr(first_error), "retry_attempt_error": repr(retry_error), "http_status": getattr(retry_error, "status_code", None), "retry_attempted": True})
+            setattr(retry_error, "attempts", {
+                "attempt_number": 2,
+                "first_attempt_error": repr(first_error),
+                "first_attempt_response": getattr(first_error, "attempts", None),
+                "retry_attempt_error": repr(retry_error),
+                "retry_attempt_response": getattr(retry_error, "attempts", None),
+                "http_status": getattr(retry_error, "status_code", None),
+                "retry_attempted": True,
+            })
             raise
-        return response, {"attempt_number": 2, "http_status": 200, "request_duration_seconds": round(time.monotonic() - retry_started_at, 3), "retry_attempted": True, "first_attempt_error": repr(first_error)}
+        return response, {"attempt_number": 2, "http_status": getattr(getattr(response, "http_response", None), "status_code", 200), "request_duration_seconds": round(time.monotonic() - retry_started_at, 3), "retry_attempted": True, "first_attempt_error": repr(first_error), "first_attempt_response": getattr(first_error, "attempts", None)}
 
 
 def render_pdf_first_page(pdf_path: Path, output_path: Path) -> dict[str, Any]:
@@ -220,6 +239,7 @@ def _nvidia_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _post_nvidia(client: dict[str, Any], payload: dict[str, Any]) -> NvidiaChatCompletion:
     endpoint = f"{BASE_URL}/chat/completions"
+    started_at = time.monotonic()
     response = client["requests"].post(
         endpoint,
         headers=client["headers"],
@@ -227,14 +247,43 @@ def _post_nvidia(client: dict[str, Any], payload: dict[str, Any]) -> NvidiaChatC
         stream=False,
         timeout=TIMEOUT_SECONDS,
     )
-    response.raise_for_status()
+    response_text = response.text
     try:
         data = response.json()
-    except ValueError as exc:
-        error = RuntimeError("NVIDIA NIM returned a non-JSON API response.")
-        setattr(error, "response", response)
-        raise error from exc
-    return NvidiaChatCompletion(data=data, http_response=response)
+    except (ValueError, TypeError):
+        data = None
+
+    headers = dict(getattr(response, "headers", {}) or {})
+    request_headers = {
+        key: value
+        for key, value in headers.items()
+        if key.lower() in {"x-request-id", "request-id", "x-correlation-id", "nvcf-request-id", "nvcf-requestid"}
+    }
+    response_details = {
+        "http_status": getattr(response, "status_code", None),
+        "response_text": response_text,
+        "response_json": data,
+        "request_id_headers": request_headers,
+        "response_headers": headers,
+        "elapsed_request_seconds": round(time.monotonic() - started_at, 3),
+    }
+
+    if not (200 <= int(getattr(response, "status_code", 0)) < 300):
+        body_detail = response_text.strip()
+        if isinstance(data, dict):
+            body_detail = str(data.get("detail") or data.get("error") or data.get("message") or body_detail)
+        if "function" in body_detail.lower() and "not found for account" in body_detail.lower():
+            message = (
+                "Kimi K2.6 endpoint is not available to the NVIDIA account associated "
+                "with the configured NVIDIA_API_KEY."
+            )
+        else:
+            message = f"NVIDIA NIM HTTP {response_details['http_status']}: {body_detail or 'No error detail returned.'}"
+        raise NvidiaKimiHttpError(message, response_details)
+
+    if not isinstance(data, dict):
+        raise NvidiaKimiHttpError("NVIDIA NIM returned a non-JSON API response.", response_details)
+    return NvidiaChatCompletion(data=data, http_response=response, transport=response_details)
 
 
 def _vision_messages(prompt: str, image_base64: str) -> list[dict[str, Any]]:
@@ -380,6 +429,7 @@ def grade_pdf(
                 "diagnostic_path": str(diagnostic_path),
                 "payload_shape": {"messages": [{"role": "user", "content": "<prompt>\\n\\n<img src=\"data:image/jpeg;base64,<image-bytes>\" />"}], "stream": False},
                 "raw_response": _response_debug_value(response),
+                "nvidia_http_response": response.transport,
                 **transport_debug,
             },
         }
@@ -424,7 +474,12 @@ def grade_pdf(
         lambda: request_grade(client, prompt, image_base64)
     )
     attempts = {"first_attempt": _response_debug_value(response)}
-    debug_payload.update({"raw_response": _response_debug_value(response), "response_shape": _response_shape(response), **transport_debug})
+    debug_payload.update({
+        "raw_response": _response_debug_value(response),
+        "nvidia_http_response": response.transport,
+        "response_shape": _response_shape(response),
+        **transport_debug,
+    })
     try:
         raw_text = response_text(response, attempts)
     except EmptyLlamaVisionResponseError as first_error:
