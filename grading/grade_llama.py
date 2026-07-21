@@ -1,4 +1,4 @@
-"""Direct OpenRouter Nemotron grader for Spring 2025 concept map evaluation."""
+"""Direct NVIDIA NIM Llama 3.2 90B Vision grader for Spring 2025 concept map evaluation."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Any
 from grading.spring_2025_prompt import build_grading_prompt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODEL = "nvidia/nemotron-nano-12b-v2-vl"
+MODEL = "meta/llama-3.2-90b-vision-instruct"
 PROVIDER = "NVIDIA NIM"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 API_KEY_ENV = "NVIDIA_API_KEY"
@@ -47,8 +47,8 @@ CATEGORY_FIELDS = {
 }
 
 
-class EmptyNemotronResponseError(RuntimeError):
-    """Nemotron returned no usable completion content."""
+class EmptyLlamaVisionResponseError(RuntimeError):
+    """Llama 3.2 90B Vision returned no usable completion content."""
 
     def __init__(self, message: str, raw_response: Any, attempts: dict[str, Any]) -> None:
         super().__init__(message)
@@ -170,26 +170,7 @@ def schema(map_file: str) -> dict[str, Any]:
 def build_prompt(
     map_file: str, reference_materials: list[dict[str, str]] | None = None
 ) -> str:
-    return (
-        build_grading_prompt(map_file, schema(map_file), reference_materials)
-        + "\nNemotron grading instructions:\n"
-        "- Do not use score 1 as a default or fallback.\n"
-        "- For every criterion, compare the visible concept map against all four rubric descriptors, "
-        "choose the descriptor that best matches the evidence, and use the full 1–4 range when warranted.\n"
-        "- Score 1 only when the criterion is absent, content is irrelevant, or required relationships "
-        "are absent or clearly incorrect.\n"
-        "- If some relevant content is visibly present but incomplete, general, simplistic, or weakly "
-        "connected, score 2 rather than 1.\n"
-        "- If content is relevant and mostly synthesized, score 3.\n"
-        "- Use score 4 only when the exact score-4 rubric descriptor is clearly satisfied.\n"
-        "- Do not penalize the map simply because reference material is not uploaded.\n"
-        "- When reference material is uploaded, use it only as the comparison standard; do not treat "
-        "reference content as student evidence.\n"
-        "- Before returning the final JSON, perform a score-distribution sanity check: if every criterion "
-        "is scored 1, re-review the concept map against each rubric descriptor. Keep all 1s only if the "
-        "map truly contains little or no relevant content across every criterion. Do not artificially "
-        "raise scores just to create variation.\n"
-    )
+    return build_grading_prompt(map_file, schema(map_file), reference_materials)
 
 
 def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
@@ -228,14 +209,14 @@ def _response_debug_value(response: Any) -> Any:
 
 def response_text(response: Any, attempts: dict[str, Any]) -> str:
     if response is None:
-        raise EmptyNemotronResponseError("Nemotron returned no response.", response, attempts)
+        raise EmptyLlamaVisionResponseError("Llama 3.2 90B Vision returned no response.", response, attempts)
     choices = getattr(response, "choices", None)
     if not choices:
-        raise EmptyNemotronResponseError("Nemotron returned no response choices.", response, attempts)
+        raise EmptyLlamaVisionResponseError("Llama 3.2 90B Vision returned no response choices.", response, attempts)
     message = getattr(choices[0], "message", None)
     text = getattr(message, "content", None)
     if not isinstance(text, str) or not text.strip():
-        raise EmptyNemotronResponseError("Nemotron returned empty content.", response, attempts)
+        raise EmptyLlamaVisionResponseError("Llama 3.2 90B Vision returned empty content.", response, attempts)
     return text
 
 
@@ -248,7 +229,7 @@ def clean_json_output(text: str) -> str:
 
 
 def _vision_diagnostic_enabled() -> bool:
-    return os.getenv("NEMOTRON_VISION_DIAGNOSTIC", "").strip() == "1"
+    return os.getenv("LLAMA32_VISION_DIAGNOSTIC", "").strip() == "1"
 
 
 def request_vision_diagnostic(client: Any, image_base64: str) -> Any:
@@ -291,7 +272,7 @@ def grade_pdf(
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_info = render_pdf_first_page(pdf_path, image_path)
     image_base64 = str(image_info["base64"])
-    actual_input_path = image_path.parent / "nemotron_actual_input.jpg"
+    actual_input_path = image_path.parent / "llama32_90b_vision_actual_input.jpg"
     actual_input_path.write_bytes(image_path.read_bytes())
     diagnostic_enabled = _vision_diagnostic_enabled()
     if diagnostic_enabled:
@@ -300,7 +281,7 @@ def grade_pdf(
             lambda: request_vision_diagnostic(client, image_base64)
         )
         raw_text = response_text(response, {"diagnostic_attempt": _response_debug_value(response)})
-        diagnostic_path = image_path.parent / "nemotron_vision_diagnostic.txt"
+        diagnostic_path = image_path.parent / "llama32_90b_vision_diagnostic.txt"
         diagnostic_path.write_text(raw_text, encoding="utf-8")
         return {
             "model": MODEL,
@@ -370,14 +351,14 @@ def grade_pdf(
     debug_payload.update({"raw_response": _response_debug_value(response), **transport_debug})
     try:
         raw_text = response_text(response, attempts)
-    except EmptyNemotronResponseError as first_error:
+    except EmptyLlamaVisionResponseError as first_error:
         time.sleep(5)
         retry_response = request_grade(client, prompt, image_base64)
         attempts["retry_attempt"] = _response_debug_value(retry_response)
         try:
             raw_text = response_text(retry_response, attempts)
-        except EmptyNemotronResponseError as retry_error:
-            raise EmptyNemotronResponseError(str(retry_error), retry_response, attempts) from first_error
+        except EmptyLlamaVisionResponseError as retry_error:
+            raise EmptyLlamaVisionResponseError(str(retry_error), retry_response, attempts) from first_error
         response = retry_response
     raw_path = Path(f"{debug_prefix}_raw.txt")
     raw_path.write_text(raw_text, encoding="utf-8")
