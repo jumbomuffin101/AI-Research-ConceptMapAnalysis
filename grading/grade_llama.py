@@ -56,6 +56,12 @@ class EmptyLlamaVisionResponseError(RuntimeError):
         self.attempts = attempts
 
 
+class MalformedLlamaVisionJsonError(RuntimeError):
+    def __init__(self, attempts: dict[str, Any]) -> None:
+        super().__init__("Llama 3.2 11B Vision returned malformed JSON after one repair attempt.")
+        self.attempts = attempts
+
+
 def _secret(name: str) -> str | None:
     try:
         from dotenv import load_dotenv
@@ -207,6 +213,22 @@ def _response_debug_value(response: Any) -> Any:
     return repr(response)
 
 
+def _response_shape(response: Any) -> dict[str, Any]:
+    choices = getattr(response, "choices", None)
+    first = choices[0] if isinstance(choices, list) and choices else None
+    message = getattr(first, "message", None)
+    return {
+        "http_status": getattr(getattr(response, "http_response", None), "status_code", 200),
+        "response_headers": dict(getattr(getattr(response, "http_response", None), "headers", {}) or {}),
+        "top_level_keys": list((_response_debug_value(response) or {}).keys()) if isinstance(_response_debug_value(response), dict) else [],
+        "choices_length": len(choices) if isinstance(choices, list) else 0,
+        "message_content": getattr(message, "content", None),
+        "choice_text": getattr(first, "text", None),
+        "reasoning_content": getattr(message, "reasoning_content", None),
+        "finish_reason": getattr(first, "finish_reason", None),
+    }
+
+
 def response_text(response: Any, attempts: dict[str, Any]) -> str:
     if response is None:
         raise EmptyLlamaVisionResponseError("Llama 3.2 11B Vision returned no response.", response, attempts)
@@ -214,10 +236,23 @@ def response_text(response: Any, attempts: dict[str, Any]) -> str:
     if not choices:
         raise EmptyLlamaVisionResponseError("Llama 3.2 11B Vision returned no response choices.", response, attempts)
     message = getattr(choices[0], "message", None)
-    text = getattr(message, "content", None)
-    if not isinstance(text, str) or not text.strip():
+    candidates = [
+        getattr(message, "content", None),
+        getattr(first := choices[0], "text", None),
+        getattr(message, "reasoning_content", None),
+        getattr(response, "output_text", None),
+    ]
+    text = next((value for value in candidates if isinstance(value, str) and value.strip()), None)
+    if text is None:
         raise EmptyLlamaVisionResponseError("Llama 3.2 11B Vision returned empty content.", response, attempts)
     return text
+
+
+def request_json_repair(client: Any, malformed_output: str, map_file: str) -> Any:
+    return client.chat.completions.create(
+        model=MODEL, max_tokens=MAX_TOKENS, temperature=0, timeout=TIMEOUT_SECONDS,
+        messages=[{"role": "user", "content": "Return the same evaluation as valid JSON only. Do not regrade or change scores.\nRequired schema:\n" + json.dumps(schema(map_file), separators=(",", ":")) + "\nMalformed output:\n" + malformed_output}],
+    )
 
 
 def clean_json_output(text: str) -> str:
@@ -348,7 +383,7 @@ def grade_pdf(
         lambda: request_grade(client, prompt, image_base64)
     )
     attempts = {"first_attempt": _response_debug_value(response)}
-    debug_payload.update({"raw_response": _response_debug_value(response), **transport_debug})
+    debug_payload.update({"raw_response": _response_debug_value(response), "response_shape": _response_shape(response), **transport_debug})
     try:
         raw_text = response_text(response, attempts)
     except EmptyLlamaVisionResponseError as first_error:
@@ -365,19 +400,33 @@ def grade_pdf(
         except EmptyLlamaVisionResponseError as retry_error:
             raise EmptyLlamaVisionResponseError(str(retry_error), retry_response, attempts) from first_error
         response = retry_response
+    cleaned_text = clean_json_output(raw_text)
+    try:
+        json.loads(cleaned_text)
+    except json.JSONDecodeError:
+        repair_response = request_json_repair(client, raw_text, map_file)
+        repair_text = response_text(repair_response, attempts)
+        attempts["repair_attempt"] = repair_text
+        raw_text = repair_text
+        cleaned_text = clean_json_output(raw_text)
+        try:
+            json.loads(cleaned_text)
+        except json.JSONDecodeError:
+            raise MalformedLlamaVisionJsonError(attempts)
     raw_path = Path(f"{debug_prefix}_raw.txt")
     raw_path.write_text(raw_text, encoding="utf-8")
     debug_payload["raw_path"] = str(raw_path)
     debug_payload["first_attempt"] = attempts["first_attempt"]
     debug_payload["retry_attempt"] = attempts.get("retry_attempt")
     debug_payload["empty_response_retry_attempted"] = "retry_attempt" in attempts
+    debug_payload["repair_attempt"] = attempts.get("repair_attempt")
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
     return {
         "model": MODEL,
         "provider": PROVIDER,
         "raw_text": raw_text,
-        "cleaned_text": clean_json_output(raw_text),
+        "cleaned_text": cleaned_text,
         "response": response,
         "prompt": prompt,
         "prompt_path": prompt_path,
