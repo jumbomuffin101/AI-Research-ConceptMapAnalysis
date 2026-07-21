@@ -1,4 +1,4 @@
-"""Direct NVIDIA NIM Llama 3.2 11B Vision grader for Spring 2025 concept map evaluation."""
+"""Direct NVIDIA NIM Nemotron 3 Nano Omni grader for Spring 2025 evaluation."""
 
 from __future__ import annotations
 
@@ -14,12 +14,12 @@ from typing import Any
 from grading.spring_2025_prompt import build_grading_prompt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODEL = "moonshotai/kimi-k2.6"
+MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 PROVIDER = "NVIDIA NIM"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 API_KEY_ENV = "NVIDIA_API_KEY"
-# NVIDIA Build generated API example settings for moonshotai/kimi-k2.6.
-MAX_TOKENS = 16384
+# NVIDIA's Nemotron Omni image example uses non-streaming instruct mode.
+MAX_TOKENS = 1800
 TIMEOUT_SECONDS = 180
 IMAGE_MIME_TYPE = "image/jpeg"
 CATEGORY_FIELDS = {
@@ -50,7 +50,7 @@ CATEGORY_FIELDS = {
 
 
 class EmptyLlamaVisionResponseError(RuntimeError):
-    """Llama 3.2 11B Vision returned no usable completion content."""
+    """Nemotron 3 Nano Omni returned no usable completion content."""
 
     def __init__(self, message: str, raw_response: Any, attempts: dict[str, Any]) -> None:
         super().__init__(message)
@@ -60,11 +60,11 @@ class EmptyLlamaVisionResponseError(RuntimeError):
 
 class MalformedLlamaVisionJsonError(RuntimeError):
     def __init__(self, attempts: dict[str, Any]) -> None:
-        super().__init__("Llama 3.2 11B Vision returned malformed JSON after one repair attempt.")
+        super().__init__("Nemotron 3 Nano Omni 30B returned malformed JSON after one repair attempt.")
         self.attempts = attempts
 
 
-class NvidiaKimiHttpError(RuntimeError):
+class NvidiaNemotronHttpError(RuntimeError):
     """NVIDIA returned an HTTP response that must remain visible to the user."""
 
     def __init__(self, message: str, response_details: dict[str, Any]) -> None:
@@ -225,15 +225,14 @@ def build_prompt(
 
 
 def _nvidia_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """Use the exact generated NVIDIA Build fields for Kimi K2.6."""
+    """Use NVIDIA's documented Nemotron Omni image/instruct request fields."""
     return {
         "messages": messages,
         "model": MODEL,
         "max_tokens": MAX_TOKENS,
-        "seed": 0,
         "stream": False,
         "temperature": 1,
-        "top_p": 1,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
 
 
@@ -274,29 +273,33 @@ def _post_nvidia(client: dict[str, Any], payload: dict[str, Any]) -> NvidiaChatC
             body_detail = str(data.get("detail") or data.get("error") or data.get("message") or body_detail)
         if "function" in body_detail.lower() and "not found for account" in body_detail.lower():
             message = (
-                "Kimi K2.6 endpoint is not available to the NVIDIA account associated "
-                "with the configured NVIDIA_API_KEY."
+                "Nemotron 3 Nano Omni 30B endpoint is not available to the NVIDIA account "
+                "associated with the configured NVIDIA_API_KEY."
             )
         else:
             message = f"NVIDIA NIM HTTP {response_details['http_status']}: {body_detail or 'No error detail returned.'}"
-        raise NvidiaKimiHttpError(message, response_details)
+        raise NvidiaNemotronHttpError(message, response_details)
 
     if not isinstance(data, dict):
-        raise NvidiaKimiHttpError("NVIDIA NIM returned a non-JSON API response.", response_details)
+        raise NvidiaNemotronHttpError("NVIDIA NIM returned a non-JSON API response.", response_details)
     return NvidiaChatCompletion(data=data, http_response=response, transport=response_details)
 
 
 def _vision_messages(prompt: str, image_base64: str) -> list[dict[str, Any]]:
-    # NVIDIA's Kimi API reference documents base64 image input as a user string
-    # containing an img data URI. This also matches the generated example's
-    # string-valued messages[].content shape.
+    # NVIDIA's Nemotron Omni PDF/image example uses an OpenAI-compatible list
+    # with a text part followed by an image_url data URI.
     return [
         {
             "role": "user",
-            "content": (
-                f"{prompt}\n\n"
-                f'<img src="data:{IMAGE_MIME_TYPE};base64,{image_base64}" />'
-            ),
+            "content": [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{IMAGE_MIME_TYPE};base64,{image_base64}"
+                    },
+                },
+            ],
         }
     ]
 
@@ -335,10 +338,10 @@ def _response_shape(response: Any) -> dict[str, Any]:
 
 def response_text(response: Any, attempts: dict[str, Any]) -> str:
     if response is None:
-        raise EmptyLlamaVisionResponseError("Llama 3.2 11B Vision returned no response.", response, attempts)
+        raise EmptyLlamaVisionResponseError("Nemotron 3 Nano Omni 30B returned no response.", response, attempts)
     choices = getattr(response, "choices", None)
     if not choices:
-        raise EmptyLlamaVisionResponseError("Llama 3.2 11B Vision returned no response choices.", response, attempts)
+        raise EmptyLlamaVisionResponseError("Nemotron 3 Nano Omni 30B returned no response choices.", response, attempts)
     first = choices[0]
     message = first.get("message", {}) if isinstance(first, dict) else getattr(first, "message", None)
     candidates = [
@@ -349,7 +352,7 @@ def response_text(response: Any, attempts: dict[str, Any]) -> str:
     ]
     text = next((value for value in candidates if isinstance(value, str) and value.strip()), None)
     if text is None:
-        raise EmptyLlamaVisionResponseError("Llama 3.2 11B Vision returned empty content.", response, attempts)
+        raise EmptyLlamaVisionResponseError("Nemotron 3 Nano Omni 30B returned empty content.", response, attempts)
     return text
 
 
@@ -373,17 +376,21 @@ def clean_json_output(text: str) -> str:
 
 
 def _vision_diagnostic_enabled() -> bool:
-    return os.getenv("KIMI_VISION_DIAGNOSTIC", "").strip() == "1"
+    return os.getenv("NEMOTRON3_OMNI_VISION_DIAGNOSTIC", "").strip() == "1"
 
 
 def request_vision_diagnostic(client: Any, image_base64: str) -> Any:
     diagnostic_prompt = (
-        "Read this concept map carefully. Do not grade it. List:\n"
-        "1. The main topic or diagnosis.\n"
-        "2. At least 10 specific concepts or phrases you can visibly read.\n"
-        "3. Any patient-specific information you can read.\n"
-        "4. Any arrows or relationships between concepts you can identify.\n"
-        "5. State whether the text is clearly readable."
+        "Read this concept map carefully.\n\n"
+        "Return plain text only.\n\n"
+        "1. What is the main medical topic or diagnosis?\n"
+        "2. List up to 20 specific medical concepts or phrases you can clearly read.\n"
+        "3. List any patient-specific information you can read.\n"
+        "4. Describe at least 5 visible relationships or arrows between concepts.\n"
+        "5. State whether the image text is:\n"
+        "   - Clearly readable\n"
+        "   - Partially readable\n"
+        "   - Mostly unreadable"
     )
     return _post_nvidia(client, _nvidia_payload(_vision_messages(diagnostic_prompt, image_base64)))
 
@@ -397,7 +404,7 @@ def grade_pdf(
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_info = render_pdf_first_page(pdf_path, image_path)
     image_base64 = str(image_info["base64"])
-    actual_input_path = image_path.parent / "kimi_k2_6_actual_input.jpg"
+    actual_input_path = image_path.parent / "nemotron3_omni_30b_actual_input.jpg"
     actual_input_path.write_bytes(image_path.read_bytes())
     diagnostic_enabled = _vision_diagnostic_enabled()
     if diagnostic_enabled:
@@ -406,7 +413,7 @@ def grade_pdf(
             lambda: request_vision_diagnostic(client, image_base64)
         )
         raw_text = response_text(response, {"diagnostic_attempt": _response_debug_value(response)})
-        diagnostic_path = image_path.parent / "kimi_k2_6_vision_diagnostic.txt"
+        diagnostic_path = image_path.parent / "nemotron3_omni_30b_vision_diagnostic.txt"
         diagnostic_path.write_text(raw_text, encoding="utf-8")
         return {
             "model": MODEL,
@@ -427,7 +434,7 @@ def grade_pdf(
                 "render_matrix": image_info["render_matrix"],
                 "jpeg_quality": image_info["jpeg_quality"],
                 "diagnostic_path": str(diagnostic_path),
-                "payload_shape": {"messages": [{"role": "user", "content": "<prompt>\\n\\n<img src=\"data:image/jpeg;base64,<image-bytes>\" />"}], "stream": False},
+                "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}], "stream": False, "chat_template_kwargs": {"enable_thinking": False}},
                 "raw_response": _response_debug_value(response),
                 "nvidia_http_response": response.transport,
                 **transport_debug,
@@ -465,7 +472,7 @@ def grade_pdf(
         "prompt_characters": len(prompt),
         "max_tokens": MAX_TOKENS,
         "timeout_seconds": TIMEOUT_SECONDS,
-        "payload_shape": {"messages": [{"role": "user", "content": "<prompt>\\n\\n<img src=\"data:image/jpeg;base64,<image-bytes>\" />"}], "stream": False, "seed": 0, "temperature": 1, "top_p": 1},
+        "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}], "stream": False, "temperature": 1, "chat_template_kwargs": {"enable_thinking": False}},
     }
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
@@ -483,9 +490,26 @@ def grade_pdf(
     try:
         raw_text = response_text(response, attempts)
     except EmptyLlamaVisionResponseError as first_error:
+        # _request_with_retry has already used the one allowed retry when a
+        # transport failure occurred. Do not create a third request merely
+        # because that successful retry has no completion choices.
+        if transport_debug.get("retry_attempted"):
+            raise first_error
         time.sleep(5)
         retry_started_at = time.monotonic()
-        retry_response = request_grade(client, prompt, image_base64)
+        try:
+            retry_response = request_grade(client, prompt, image_base64)
+        except Exception as retry_error:
+            setattr(
+                retry_error,
+                "attempts",
+                {
+                    "first_attempt": attempts["first_attempt"],
+                    "retry_attempt_error": repr(retry_error),
+                    "retry_attempt_response": getattr(retry_error, "attempts", None),
+                },
+            )
+            raise
         attempts["retry_attempt"] = _response_debug_value(retry_response)
         debug_payload["empty_response_retry_attempt_number"] = 2
         debug_payload["empty_response_retry_duration_seconds"] = round(

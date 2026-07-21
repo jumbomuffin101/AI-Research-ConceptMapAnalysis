@@ -193,7 +193,7 @@ def display_failure(result: Any) -> None:
         st.warning("NVIDIA image input failed")
     elif error_message.startswith("NVIDIA grading request failed"):
         st.warning(error_message)
-    elif error_message == "Llama 3.2 11B Vision returned empty content.":
+    elif error_message == "Nemotron 3 Nano Omni 30B returned empty content.":
         st.warning(f"{model_name} returned empty content.")
     elif "implausible all-4 evaluation" in error_message:
         st.warning(
