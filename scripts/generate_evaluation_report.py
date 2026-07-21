@@ -17,8 +17,8 @@ REPORT_PATH = SUMMARY_DIR / "concept_map_evaluation_report.md"
 CSV_PATH = SUMMARY_DIR / "concept_map_evaluation_summary.csv"
 JSON_PATH = SUMMARY_DIR / "concept_map_evaluation_summary.json"
 
-MODEL_KEYS = {"Gemma": "gemma", "Llama 3.2 90B Vision": "llama32_90b_vision"}
-MODEL_TITLES = {"gemma": "Gemma", "llama32_90b_vision": "Llama 3.2 90B Vision"}
+MODEL_KEYS = {"Gemma": "gemma", "Llama 3.2 11B Vision": "llama32_11b_vision"}
+MODEL_TITLES = {"gemma": "Gemma", "llama32_11b_vision": "Llama 3.2 11B Vision"}
 DOMAIN_FIELDS = {
     "knowledge_acquisition": [
         "basic_science", "health_system_science", "clinical_science",
@@ -167,7 +167,7 @@ def render_report(maps: dict[str, dict[str, Any]]) -> str:
         lines += ["No successful evaluation results were found in `outputs/evaluation_summary/raw/`.", ""]
 
     for number, entry in enumerate(entries, start=1):
-        gemma, llama = _result(entry, "gemma"), _result(entry, "llama32_90b_vision")
+        gemma, llama = _result(entry, "gemma"), _result(entry, "llama32_11b_vision")
         lines += [f"## Map {number}: {entry['map_file']}", "", "### Overall", "",
                   f"Gemma: {_overall(gemma)}", f"Nemotron: {_overall(llama)}", ""]
         for domain, criteria in DOMAIN_FIELDS.items():
@@ -187,11 +187,11 @@ def render_report(maps: dict[str, dict[str, Any]]) -> str:
                 lines.append(f"- {MODEL_TITLES[model_key]}: {message}")
             lines.append("")
 
-    comparable = [entry for entry in entries if _result(entry, "gemma") and _result(entry, "llama32_90b_vision")]
+    comparable = [entry for entry in entries if _result(entry, "gemma") and _result(entry, "llama32_11b_vision")]
     agreed = sum(_overall(_result(entry, "gemma")) == _overall(_result(entry, "nemotron")) for entry in comparable)
     lines += ["## Cross-Model Summary", "", "| Map | Gemma Overall | Nemotron Overall | Agreed | Gemma Avg Score | Nemotron Avg Score |", "|---|---|---|---|---:|---:|"]
     for index, entry in enumerate(entries, start=1):
-        gemma, llama = _result(entry, "gemma"), _result(entry, "llama32_90b_vision")
+        gemma, llama = _result(entry, "gemma"), _result(entry, "llama32_11b_vision")
         agreement = "Yes" if gemma and llama and _overall(gemma) == _overall(llama) else "No"
         g_avg, l_avg = _average(gemma), _average(llama)
         lines.append(f"| Map {index} | {_overall(gemma)} | {_overall(llama)} | {agreement} | {g_avg:.2f} | {l_avg:.2f} |" if g_avg is not None and l_avg is not None else f"| Map {index} | {_overall(gemma)} | {_overall(llama)} | {agreement} | {f'{g_avg:.2f}' if g_avg is not None else 'N/A'} | {f'{l_avg:.2f}' if l_avg is not None else 'N/A'} |")
@@ -237,7 +237,7 @@ def write_machine_summaries(maps: dict[str, dict[str, Any]]) -> None:
                     row[f"{prefix}_{domain}_{criterion}_score"] = _score(
                         result, domain, criterion
                     )
-        row["overall_agreement"] = bool(_result(entry, "gemma") and _result(entry, "llama32_90b_vision") and _overall(_result(entry, "gemma")) == _overall(_result(entry, "llama32_90b_vision")))
+        row["overall_agreement"] = bool(_result(entry, "gemma") and _result(entry, "llama32_11b_vision") and _overall(_result(entry, "gemma")) == _overall(_result(entry, "llama32_11b_vision")))
         rows.append(row)
     fieldnames = sorted({field for row in rows for field in row}) or ["map_file"]
     with CSV_PATH.open("w", newline="", encoding="utf-8") as handle:

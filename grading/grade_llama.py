@@ -1,4 +1,4 @@
-"""Direct NVIDIA NIM Llama 3.2 90B Vision grader for Spring 2025 concept map evaluation."""
+"""Direct NVIDIA NIM Llama 3.2 11B Vision grader for Spring 2025 concept map evaluation."""
 
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ from typing import Any
 from grading.spring_2025_prompt import build_grading_prompt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODEL = "meta/llama-3.2-90b-vision-instruct"
+MODEL = "meta/llama-3.2-11b-vision-instruct"
 PROVIDER = "NVIDIA NIM"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 API_KEY_ENV = "NVIDIA_API_KEY"
 MAX_TOKENS = 1800
-TIMEOUT_SECONDS = 240
+TIMEOUT_SECONDS = 120
 IMAGE_MIME_TYPE = "image/jpeg"
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
@@ -48,7 +48,7 @@ CATEGORY_FIELDS = {
 
 
 class EmptyLlamaVisionResponseError(RuntimeError):
-    """Llama 3.2 90B Vision returned no usable completion content."""
+    """Llama 3.2 11B Vision returned no usable completion content."""
 
     def __init__(self, message: str, raw_response: Any, attempts: dict[str, Any]) -> None:
         super().__init__(message)
@@ -209,14 +209,14 @@ def _response_debug_value(response: Any) -> Any:
 
 def response_text(response: Any, attempts: dict[str, Any]) -> str:
     if response is None:
-        raise EmptyLlamaVisionResponseError("Llama 3.2 90B Vision returned no response.", response, attempts)
+        raise EmptyLlamaVisionResponseError("Llama 3.2 11B Vision returned no response.", response, attempts)
     choices = getattr(response, "choices", None)
     if not choices:
-        raise EmptyLlamaVisionResponseError("Llama 3.2 90B Vision returned no response choices.", response, attempts)
+        raise EmptyLlamaVisionResponseError("Llama 3.2 11B Vision returned no response choices.", response, attempts)
     message = getattr(choices[0], "message", None)
     text = getattr(message, "content", None)
     if not isinstance(text, str) or not text.strip():
-        raise EmptyLlamaVisionResponseError("Llama 3.2 90B Vision returned empty content.", response, attempts)
+        raise EmptyLlamaVisionResponseError("Llama 3.2 11B Vision returned empty content.", response, attempts)
     return text
 
 
@@ -272,7 +272,7 @@ def grade_pdf(
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_info = render_pdf_first_page(pdf_path, image_path)
     image_base64 = str(image_info["base64"])
-    actual_input_path = image_path.parent / "llama32_90b_vision_actual_input.jpg"
+    actual_input_path = image_path.parent / "llama32_11b_vision_actual_input.jpg"
     actual_input_path.write_bytes(image_path.read_bytes())
     diagnostic_enabled = _vision_diagnostic_enabled()
     if diagnostic_enabled:
@@ -281,7 +281,7 @@ def grade_pdf(
             lambda: request_vision_diagnostic(client, image_base64)
         )
         raw_text = response_text(response, {"diagnostic_attempt": _response_debug_value(response)})
-        diagnostic_path = image_path.parent / "llama32_90b_vision_diagnostic.txt"
+        diagnostic_path = image_path.parent / "llama32_11b_vision_diagnostic.txt"
         diagnostic_path.write_text(raw_text, encoding="utf-8")
         return {
             "model": MODEL,
