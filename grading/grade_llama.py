@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,8 @@ MODEL = "moonshotai/kimi-k2.6"
 PROVIDER = "NVIDIA NIM"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 API_KEY_ENV = "NVIDIA_API_KEY"
-MAX_TOKENS = 1800
+# NVIDIA Build generated API example settings for moonshotai/kimi-k2.6.
+MAX_TOKENS = 16384
 TIMEOUT_SECONDS = 180
 IMAGE_MIME_TYPE = "image/jpeg"
 CATEGORY_FIELDS = {
@@ -62,6 +64,25 @@ class MalformedLlamaVisionJsonError(RuntimeError):
         self.attempts = attempts
 
 
+@dataclass
+class NvidiaChatCompletion:
+    """Small adapter preserving the response interface used by this module."""
+
+    data: dict[str, Any]
+    http_response: Any
+
+    @property
+    def choices(self) -> list[Any]:
+        return self.data.get("choices") or []
+
+    @property
+    def output_text(self) -> Any:
+        return self.data.get("output_text")
+
+    def model_dump(self, **_: Any) -> dict[str, Any]:
+        return self.data
+
+
 def _secret(name: str) -> str | None:
     try:
         from dotenv import load_dotenv
@@ -87,25 +108,30 @@ def create_client() -> Any:
 
 def create_nvidia_client() -> Any:
     try:
-        from openai import OpenAI
+        import requests
     except ImportError as exc:
         raise RuntimeError(
-            "The OpenAI SDK is not installed. Install dependencies with `pip install -r requirements.txt`."
+            "The requests package is not installed. Install dependencies with `pip install -r requirements.txt`."
         ) from exc
 
     api_key = _secret(API_KEY_ENV)
     if not api_key:
         raise RuntimeError("NVIDIA_API_KEY is not configured.")
-    return OpenAI(
-        api_key=api_key,
-        base_url=BASE_URL,
-        timeout=TIMEOUT_SECONDS,
-        max_retries=0,
-    )
+    # Match NVIDIA Build's generated requests example: explicit Bearer auth and
+    # non-streaming JSON responses. requests adds Content-Type for json=payload.
+    return {
+        "requests": requests,
+        "headers": {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+        },
+    }
 
 
 def _is_retryable_transport_error(error: Exception) -> bool:
     status_code = getattr(error, "status_code", None)
+    if status_code is None:
+        status_code = getattr(getattr(error, "response", None), "status_code", None)
     return (isinstance(status_code, int) and 500 <= status_code <= 599) or "timeout" in error.__class__.__name__.lower()
 
 
@@ -179,28 +205,56 @@ def build_prompt(
     return build_grading_prompt(map_file, schema(map_file), reference_materials)
 
 
+def _nvidia_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Use the exact generated NVIDIA Build fields for Kimi K2.6."""
+    return {
+        "messages": messages,
+        "model": MODEL,
+        "max_tokens": MAX_TOKENS,
+        "seed": 0,
+        "stream": False,
+        "temperature": 1,
+        "top_p": 1,
+    }
+
+
+def _post_nvidia(client: dict[str, Any], payload: dict[str, Any]) -> NvidiaChatCompletion:
+    endpoint = f"{BASE_URL}/chat/completions"
+    response = client["requests"].post(
+        endpoint,
+        headers=client["headers"],
+        json=payload,
+        stream=False,
+        timeout=TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    try:
+        data = response.json()
+    except ValueError as exc:
+        error = RuntimeError("NVIDIA NIM returned a non-JSON API response.")
+        setattr(error, "response", response)
+        raise error from exc
+    return NvidiaChatCompletion(data=data, http_response=response)
+
+
+def _vision_messages(prompt: str, image_base64: str) -> list[dict[str, Any]]:
+    # NVIDIA's Kimi API reference documents base64 image input as a user string
+    # containing an img data URI. This also matches the generated example's
+    # string-valued messages[].content shape.
+    return [
+        {
+            "role": "user",
+            "content": (
+                f"{prompt}\n\n"
+                f'<img src="data:{IMAGE_MIME_TYPE};base64,{image_base64}" />'
+            ),
+        }
+    ]
+
+
 def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
     """Request normal text content for local JSON parsing and validation."""
-    return client.chat.completions.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        temperature=0,
-        timeout=TIMEOUT_SECONDS,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{IMAGE_MIME_TYPE};base64,{image_base64}"
-                        },
-                    },
-                ],
-            }
-        ],
-    )
+    return _post_nvidia(client, _nvidia_payload(_vision_messages(prompt, image_base64)))
 
 
 def _response_debug_value(response: Any) -> Any:
@@ -216,16 +270,17 @@ def _response_debug_value(response: Any) -> Any:
 def _response_shape(response: Any) -> dict[str, Any]:
     choices = getattr(response, "choices", None)
     first = choices[0] if isinstance(choices, list) and choices else None
-    message = getattr(first, "message", None)
+    message = first.get("message", {}) if isinstance(first, dict) else getattr(first, "message", None)
+    response_dump = _response_debug_value(response)
     return {
         "http_status": getattr(getattr(response, "http_response", None), "status_code", 200),
         "response_headers": dict(getattr(getattr(response, "http_response", None), "headers", {}) or {}),
-        "top_level_keys": list((_response_debug_value(response) or {}).keys()) if isinstance(_response_debug_value(response), dict) else [],
+        "top_level_keys": list(response_dump.keys()) if isinstance(response_dump, dict) else [],
         "choices_length": len(choices) if isinstance(choices, list) else 0,
-        "message_content": getattr(message, "content", None),
-        "choice_text": getattr(first, "text", None),
-        "reasoning_content": getattr(message, "reasoning_content", None),
-        "finish_reason": getattr(first, "finish_reason", None),
+        "message_content": message.get("content") if isinstance(message, dict) else getattr(message, "content", None),
+        "choice_text": first.get("text") if isinstance(first, dict) else getattr(first, "text", None),
+        "reasoning_content": message.get("reasoning_content") if isinstance(message, dict) else getattr(message, "reasoning_content", None),
+        "finish_reason": first.get("finish_reason") if isinstance(first, dict) else getattr(first, "finish_reason", None),
     }
 
 
@@ -235,11 +290,12 @@ def response_text(response: Any, attempts: dict[str, Any]) -> str:
     choices = getattr(response, "choices", None)
     if not choices:
         raise EmptyLlamaVisionResponseError("Llama 3.2 11B Vision returned no response choices.", response, attempts)
-    message = getattr(choices[0], "message", None)
+    first = choices[0]
+    message = first.get("message", {}) if isinstance(first, dict) else getattr(first, "message", None)
     candidates = [
-        getattr(message, "content", None),
-        getattr(first := choices[0], "text", None),
-        getattr(message, "reasoning_content", None),
+        message.get("content") if isinstance(message, dict) else getattr(message, "content", None),
+        first.get("text") if isinstance(first, dict) else getattr(first, "text", None),
+        message.get("reasoning_content") if isinstance(message, dict) else getattr(message, "reasoning_content", None),
         getattr(response, "output_text", None),
     ]
     text = next((value for value in candidates if isinstance(value, str) and value.strip()), None)
@@ -249,10 +305,14 @@ def response_text(response: Any, attempts: dict[str, Any]) -> str:
 
 
 def request_json_repair(client: Any, malformed_output: str, map_file: str) -> Any:
-    return client.chat.completions.create(
-        model=MODEL, max_tokens=MAX_TOKENS, temperature=0, timeout=TIMEOUT_SECONDS,
-        messages=[{"role": "user", "content": "Return the same evaluation as valid JSON only. Do not regrade or change scores.\nRequired schema:\n" + json.dumps(schema(map_file), separators=(",", ":")) + "\nMalformed output:\n" + malformed_output}],
+    repair_prompt = (
+        "Return the same evaluation as valid JSON only. Do not regrade or change scores.\n"
+        "Required schema:\n"
+        + json.dumps(schema(map_file), separators=(",", ":"))
+        + "\nMalformed output:\n"
+        + malformed_output
     )
+    return _post_nvidia(client, _nvidia_payload([{"role": "user", "content": repair_prompt}]))
 
 
 def clean_json_output(text: str) -> str:
@@ -268,34 +328,15 @@ def _vision_diagnostic_enabled() -> bool:
 
 
 def request_vision_diagnostic(client: Any, image_base64: str) -> Any:
-    return client.chat.completions.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        temperature=0,
-        timeout=TIMEOUT_SECONDS,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "Read this concept map carefully. Do not grade it. List:\n"
-                            "1. The main topic or diagnosis.\n"
-                            "2. At least 10 specific concepts or phrases you can visibly read.\n"
-                            "3. Any patient-specific information you can read.\n"
-                            "4. Any arrows or relationships between concepts you can identify.\n"
-                            "5. State whether the text is clearly readable."
-                        ),
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{IMAGE_MIME_TYPE};base64,{image_base64}"},
-                    },
-                ],
-            }
-        ],
+    diagnostic_prompt = (
+        "Read this concept map carefully. Do not grade it. List:\n"
+        "1. The main topic or diagnosis.\n"
+        "2. At least 10 specific concepts or phrases you can visibly read.\n"
+        "3. Any patient-specific information you can read.\n"
+        "4. Any arrows or relationships between concepts you can identify.\n"
+        "5. State whether the text is clearly readable."
     )
+    return _post_nvidia(client, _nvidia_payload(_vision_messages(diagnostic_prompt, image_base64)))
 
 
 def grade_pdf(
@@ -337,7 +378,7 @@ def grade_pdf(
                 "render_matrix": image_info["render_matrix"],
                 "jpeg_quality": image_info["jpeg_quality"],
                 "diagnostic_path": str(diagnostic_path),
-                "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}]},
+                "payload_shape": {"messages": [{"role": "user", "content": "<prompt>\\n\\n<img src=\"data:image/jpeg;base64,<image-bytes>\" />"}], "stream": False},
                 "raw_response": _response_debug_value(response),
                 **transport_debug,
             },
@@ -374,7 +415,7 @@ def grade_pdf(
         "prompt_characters": len(prompt),
         "max_tokens": MAX_TOKENS,
         "timeout_seconds": TIMEOUT_SECONDS,
-        "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}]},
+        "payload_shape": {"messages": [{"role": "user", "content": "<prompt>\\n\\n<img src=\"data:image/jpeg;base64,<image-bytes>\" />"}], "stream": False, "seed": 0, "temperature": 1, "top_p": 1},
     }
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
