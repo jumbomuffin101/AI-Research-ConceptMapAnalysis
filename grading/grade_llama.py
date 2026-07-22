@@ -266,18 +266,33 @@ def build_extraction_prompt() -> str:
     )
 
 
+def output_schema_for_prompt(map_file: str) -> dict[str, Any]:
+    """Describe the grading structure without anchoring scores to a value."""
+    structure = schema(map_file)
+    for group, fields in CATEGORY_FIELDS.items():
+        for field in fields:
+            structure[group][field]["score"] = "<integer 1-4>"
+    return structure
+
+
 def build_stage_two_prompt(
     map_file: str,
     extracted_content: dict[str, Any],
     reference_materials: list[dict[str, str]] | None,
 ) -> str:
     return (
-        build_prompt(map_file, reference_materials)
+        build_grading_prompt(
+            map_file, output_schema_for_prompt(map_file), reference_materials
+        )
         + "\nSTAGE 1 EXTRACTED CONCEPT MAP CONTENT\n"
         + json.dumps(extracted_content, separators=(",", ":"))
         + "\n\nGrade only the extracted content above. The concept-map image is not available "
         "in this stage. Use reference material only as a comparison standard; it is not "
-        "student-map evidence. Return only the required grading JSON."
+        "student-map evidence. For every rubric criterion, `score` must be an integer from "
+        "1 through 4 selected by applying the corresponding Spring 2025 rubric descriptor. "
+        "Do not copy placeholder values from the output structure. Independently determine every "
+        "numeric score by comparing the extracted concept-map evidence against all four descriptors "
+        "for that specific criterion. Return only the required grading JSON."
     )
 
 
@@ -424,7 +439,7 @@ def request_json_repair(client: Any, malformed_output: str, map_file: str) -> An
     repair_prompt = (
         "Return the same evaluation as valid JSON only. Do not regrade or change scores.\n"
         "Required schema:\n"
-        + json.dumps(schema(map_file), separators=(",", ":"))
+        + json.dumps(output_schema_for_prompt(map_file), separators=(",", ":"))
         + "\nMalformed output:\n"
         + malformed_output
     )
