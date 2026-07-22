@@ -224,6 +224,63 @@ def build_prompt(
     return build_grading_prompt(map_file, schema(map_file), reference_materials)
 
 
+EXTRACTION_FIELDS = (
+    "main_topic",
+    "patient_data",
+    "basic_science_concepts",
+    "clinical_science_concepts",
+    "health_system_science_concepts",
+    "determinants_of_health",
+    "differential_diagnoses",
+    "relationships",
+    "pathophysiology_flows",
+    "prior_or_transfer_knowledge",
+    "unclear_or_unreadable_content",
+)
+
+
+def extraction_schema() -> dict[str, Any]:
+    """The non-grading, visible-content-only Stage 1 response shape."""
+    return {
+        "main_topic": "",
+        "patient_data": [],
+        "basic_science_concepts": [],
+        "clinical_science_concepts": [],
+        "health_system_science_concepts": [],
+        "determinants_of_health": [],
+        "differential_diagnoses": [],
+        "relationships": [{"from": "", "to": "", "relationship": ""}],
+        "pathophysiology_flows": [],
+        "prior_or_transfer_knowledge": [],
+        "unclear_or_unreadable_content": [],
+    }
+
+
+def build_extraction_prompt() -> str:
+    return (
+        "Extract only visibly present content from this medical concept map. Do not grade it. "
+        "Do not infer missing content. Preserve specific patient facts when readable and "
+        "write every visible arrow or relationship explicitly. Return only valid JSON with "
+        "this exact structure:\n"
+        + json.dumps(extraction_schema(), separators=(",", ":"))
+    )
+
+
+def build_stage_two_prompt(
+    map_file: str,
+    extracted_content: dict[str, Any],
+    reference_materials: list[dict[str, str]] | None,
+) -> str:
+    return (
+        build_prompt(map_file, reference_materials)
+        + "\nSTAGE 1 EXTRACTED CONCEPT MAP CONTENT\n"
+        + json.dumps(extracted_content, separators=(",", ":"))
+        + "\n\nGrade only the extracted content above. The concept-map image is not available "
+        "in this stage. Use reference material only as a comparison standard; it is not "
+        "student-map evidence. Return only the required grading JSON."
+    )
+
+
 def _nvidia_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
     """Use NVIDIA's documented Nemotron Omni image/instruct request fields."""
     return {
@@ -304,9 +361,16 @@ def _vision_messages(prompt: str, image_base64: str) -> list[dict[str, Any]]:
     ]
 
 
-def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
-    """Request normal text content for local JSON parsing and validation."""
-    return _post_nvidia(client, _nvidia_payload(_vision_messages(prompt, image_base64)))
+def request_extraction(client: Any, image_base64: str) -> Any:
+    """Stage 1: extract only visible map content from the production JPEG."""
+    return _post_nvidia(
+        client, _nvidia_payload(_vision_messages(build_extraction_prompt(), image_base64))
+    )
+
+
+def request_grade(client: Any, prompt: str) -> Any:
+    """Stage 2: grade the Stage 1 JSON without resending the concept-map image."""
+    return _post_nvidia(client, _nvidia_payload([{"role": "user", "content": prompt}]))
 
 
 def _response_debug_value(response: Any) -> Any:
@@ -367,12 +431,96 @@ def request_json_repair(client: Any, malformed_output: str, map_file: str) -> An
     return _post_nvidia(client, _nvidia_payload([{"role": "user", "content": repair_prompt}]))
 
 
+def request_extraction_repair(client: Any, malformed_output: str) -> Any:
+    repair_prompt = (
+        "Return the same extracted concept-map content as valid JSON only. Do not grade or infer. "
+        "Required extraction structure:\n"
+        + json.dumps(extraction_schema(), separators=(",", ":"))
+        + "\nMalformed output:\n"
+        + malformed_output
+    )
+    return _post_nvidia(client, _nvidia_payload([{"role": "user", "content": repair_prompt}]))
+
+
 def clean_json_output(text: str) -> str:
     text = text.strip()
     text = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```\s*$", "", text)
     match = re.search(r"\{.*\}", text, re.DOTALL)
     return match.group(0).strip() if match else text
+
+
+def _parse_json_object(text: str, error_message: str, attempts: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    cleaned = clean_json_output(text)
+    try:
+        value = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        error = RuntimeError(error_message)
+        error.attempts = {**attempts, "json_error": str(exc)}
+        raise error from exc
+    if not isinstance(value, dict):
+        error = RuntimeError(error_message)
+        error.attempts = {**attempts, "json_error": "JSON root must be an object."}
+        raise error
+    return cleaned, value
+
+
+def _validate_extraction(value: dict[str, Any], attempts: dict[str, Any]) -> dict[str, Any]:
+    missing = [field for field in EXTRACTION_FIELDS if field not in value]
+    invalid_lists = [
+        field for field in EXTRACTION_FIELDS
+        if field != "main_topic" and field in value and not isinstance(value[field], list)
+    ]
+    relationships_valid = all(
+        isinstance(item, dict) and all(isinstance(item.get(key, ""), str) for key in ("from", "to", "relationship"))
+        for item in value.get("relationships", [])
+    )
+    if missing or invalid_lists or not isinstance(value.get("main_topic"), str) or not relationships_valid:
+        error = RuntimeError("Nemotron 3 Nano Omni 30B returned an invalid extraction response.")
+        error.attempts = {
+            **attempts,
+            "missing_extraction_fields": missing,
+            "invalid_extraction_list_fields": invalid_lists,
+            "relationships_valid": relationships_valid,
+        }
+        raise error
+    return value
+
+
+def _read_response_with_one_empty_retry(
+    request: Any, stage_name: str
+) -> tuple[str, Any, dict[str, Any], dict[str, Any]]:
+    """Bound each stage to at most two calls, including empty-choice retries."""
+    response, transport_debug = _request_with_retry(request)
+    attempts: dict[str, Any] = {"first_attempt": _response_debug_value(response)}
+    try:
+        return response_text(response, attempts), response, transport_debug, attempts
+    except EmptyLlamaVisionResponseError as first_error:
+        if transport_debug.get("retry_attempted"):
+            raise first_error
+        time.sleep(5)
+        retry_started = time.monotonic()
+        try:
+            retry_response = request()
+        except Exception as retry_error:
+            retry_error.attempts = {
+                "stage": stage_name,
+                "first_attempt": attempts["first_attempt"],
+                "retry_attempt_error": repr(retry_error),
+                "retry_attempt_response": getattr(retry_error, "attempts", None),
+            }
+            raise
+        attempts["retry_attempt"] = _response_debug_value(retry_response)
+        transport_debug.update(
+            {
+                "empty_response_retry_attempted": True,
+                "empty_response_retry_duration_seconds": round(time.monotonic() - retry_started, 3),
+            }
+        )
+        try:
+            return response_text(retry_response, attempts), retry_response, transport_debug, attempts
+        except EmptyLlamaVisionResponseError as retry_error:
+            raise EmptyLlamaVisionResponseError(str(retry_error), retry_response, attempts) from first_error
 
 
 def _vision_diagnostic_enabled() -> bool:
@@ -440,19 +588,7 @@ def grade_pdf(
                 **transport_debug,
             },
         }
-    prompt = build_prompt(map_file, reference_materials)
-    prompt_path = Path(f"{debug_prefix}_prompt.txt")
     reference_files = [item["filename"] for item in reference_materials or []]
-    if reference_files:
-        prompt_path.write_text(
-            "Reference text omitted from debug output. Files used: "
-            + ", ".join(reference_files)
-            + "\n\n"
-            + build_prompt(map_file),
-            encoding="utf-8",
-        )
-    else:
-        prompt_path.write_text(prompt, encoding="utf-8")
     debug_path = Path(f"{debug_prefix}_debug.json")
     debug_payload = {
         "provider": PROVIDER,
@@ -469,77 +605,125 @@ def grade_pdf(
         "jpeg_quality": image_info["jpeg_quality"],
         "reference_materials_used": bool(reference_files),
         "reference_files": reference_files,
-        "prompt_characters": len(prompt),
         "max_tokens": MAX_TOKENS,
         "timeout_seconds": TIMEOUT_SECONDS,
-        "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}], "stream": False, "temperature": 1, "chat_template_kwargs": {"enable_thinking": False}},
+        "pipeline": "stage_1_image_extraction_then_stage_2_text_grading",
     }
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
     client = create_client()
-    response, transport_debug = _request_with_retry(
-        lambda: request_grade(client, prompt, image_base64)
+    extraction_started = time.monotonic()
+    extraction_raw, extraction_response, extraction_transport, extraction_attempts = (
+        _read_response_with_one_empty_retry(
+            lambda: request_extraction(client, image_base64), "extraction"
+        )
     )
-    attempts = {"first_attempt": _response_debug_value(response)}
-    debug_payload.update({
+    extraction_raw_path = Path(f"{debug_prefix}_extraction_raw.txt")
+    extraction_raw_path.write_text(extraction_raw, encoding="utf-8")
+    debug_payload["stage_1_extraction"] = {
+        "duration_seconds": round(time.monotonic() - extraction_started, 3),
+        "raw_path": str(extraction_raw_path),
+        "raw_response": _response_debug_value(extraction_response),
+        "nvidia_http_response": extraction_response.transport,
+        "response_shape": _response_shape(extraction_response),
+        "attempts": extraction_attempts,
+        "transport": extraction_transport,
+        "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}]},
+    }
+    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+    try:
+        _, extracted_content = _parse_json_object(
+            extraction_raw,
+            "Nemotron 3 Nano Omni 30B extraction response was not valid JSON.",
+            extraction_attempts,
+        )
+        extracted_content = _validate_extraction(extracted_content, extraction_attempts)
+    except RuntimeError:
+        extraction_repair = request_extraction_repair(client, extraction_raw)
+        extraction_repair_text = response_text(extraction_repair, extraction_attempts)
+        extraction_attempts["repair_attempt"] = extraction_repair_text
+        extraction_raw_path.write_text(
+            extraction_raw + "\n\n--- repair_attempt ---\n" + extraction_repair_text,
+            encoding="utf-8",
+        )
+        _, extracted_content = _parse_json_object(
+            extraction_repair_text,
+            "Nemotron 3 Nano Omni 30B extraction response was not valid JSON after repair.",
+            extraction_attempts,
+        )
+        extracted_content = _validate_extraction(extracted_content, extraction_attempts)
+    extraction_parsed_path = Path(f"{debug_prefix}_extraction_parsed.json")
+    extraction_parsed_path.write_text(json.dumps(extracted_content, indent=2), encoding="utf-8")
+    debug_payload["stage_1_extraction"].update({
+        "duration_seconds": round(time.monotonic() - extraction_started, 3),
+        "parsed_path": str(extraction_parsed_path),
+        "repair_attempt": extraction_attempts.get("repair_attempt"),
+    })
+    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+
+    prompt = build_stage_two_prompt(map_file, extracted_content, reference_materials)
+    prompt_path = Path(f"{debug_prefix}_prompt.txt")
+    if reference_files:
+        prompt_path.write_text(
+            "Reference text omitted from debug output. Files used: "
+            + ", ".join(reference_files)
+            + "\n\n"
+            + build_stage_two_prompt(map_file, extracted_content, None),
+            encoding="utf-8",
+        )
+    else:
+        prompt_path.write_text(prompt, encoding="utf-8")
+
+    grading_started = time.monotonic()
+    grading_raw, response, grading_transport, attempts = _read_response_with_one_empty_retry(
+        lambda: request_grade(client, prompt), "grading"
+    )
+    grading_raw_path = Path(f"{debug_prefix}_grading_raw.txt")
+    grading_raw_path.write_text(grading_raw, encoding="utf-8")
+    debug_payload["stage_2_grading"] = {
+        "duration_seconds": round(time.monotonic() - grading_started, 3),
+        "prompt_path": str(prompt_path),
+        "prompt_characters": len(prompt),
+        "raw_path": str(grading_raw_path),
         "raw_response": _response_debug_value(response),
         "nvidia_http_response": response.transport,
         "response_shape": _response_shape(response),
-        **transport_debug,
-    })
+        "attempts": attempts,
+        "transport": grading_transport,
+        "payload_shape": {"messages": [{"role": "user", "content": "<rubric + extracted content>"}]},
+    }
+    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+    raw_text = grading_raw
     try:
-        raw_text = response_text(response, attempts)
-    except EmptyLlamaVisionResponseError as first_error:
-        # _request_with_retry has already used the one allowed retry when a
-        # transport failure occurred. Do not create a third request merely
-        # because that successful retry has no completion choices.
-        if transport_debug.get("retry_attempted"):
-            raise first_error
-        time.sleep(5)
-        retry_started_at = time.monotonic()
-        try:
-            retry_response = request_grade(client, prompt, image_base64)
-        except Exception as retry_error:
-            setattr(
-                retry_error,
-                "attempts",
-                {
-                    "first_attempt": attempts["first_attempt"],
-                    "retry_attempt_error": repr(retry_error),
-                    "retry_attempt_response": getattr(retry_error, "attempts", None),
-                },
-            )
-            raise
-        attempts["retry_attempt"] = _response_debug_value(retry_response)
-        debug_payload["empty_response_retry_attempt_number"] = 2
-        debug_payload["empty_response_retry_duration_seconds"] = round(
-            time.monotonic() - retry_started_at, 3
+        cleaned_text, parsed_grading = _parse_json_object(
+            raw_text,
+            "Nemotron 3 Nano Omni 30B returned malformed grading JSON.",
+            attempts,
         )
-        try:
-            raw_text = response_text(retry_response, attempts)
-        except EmptyLlamaVisionResponseError as retry_error:
-            raise EmptyLlamaVisionResponseError(str(retry_error), retry_response, attempts) from first_error
-        response = retry_response
-    cleaned_text = clean_json_output(raw_text)
-    try:
-        json.loads(cleaned_text)
-    except json.JSONDecodeError:
+    except RuntimeError:
         repair_response = request_json_repair(client, raw_text, map_file)
         repair_text = response_text(repair_response, attempts)
         attempts["repair_attempt"] = repair_text
+        grading_raw_path.write_text(
+            grading_raw + "\n\n--- repair_attempt ---\n" + repair_text,
+            encoding="utf-8",
+        )
         raw_text = repair_text
-        cleaned_text = clean_json_output(raw_text)
         try:
-            json.loads(cleaned_text)
-        except json.JSONDecodeError:
-            raise MalformedLlamaVisionJsonError(attempts)
-    raw_path = Path(f"{debug_prefix}_raw.txt")
-    raw_path.write_text(raw_text, encoding="utf-8")
-    debug_payload["raw_path"] = str(raw_path)
-    debug_payload["first_attempt"] = attempts["first_attempt"]
-    debug_payload["retry_attempt"] = attempts.get("retry_attempt")
-    debug_payload["empty_response_retry_attempted"] = "retry_attempt" in attempts
-    debug_payload["repair_attempt"] = attempts.get("repair_attempt")
+            cleaned_text, parsed_grading = _parse_json_object(
+                raw_text,
+                "Nemotron 3 Nano Omni 30B returned malformed grading JSON after one repair attempt.",
+                attempts,
+            )
+        except RuntimeError as exc:
+            raise MalformedLlamaVisionJsonError(attempts) from exc
+    grading_parsed_path = Path(f"{debug_prefix}_grading_parsed.json")
+    grading_parsed_path.write_text(json.dumps(parsed_grading, indent=2), encoding="utf-8")
+    debug_payload["stage_2_grading"].update({
+        "duration_seconds": round(time.monotonic() - grading_started, 3),
+        "parsed_path": str(grading_parsed_path),
+        "repair_attempt": attempts.get("repair_attempt"),
+    })
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
     return {
@@ -551,10 +735,10 @@ def grade_pdf(
         "prompt": prompt,
         "prompt_path": prompt_path,
         "image_path": image_path,
-        "raw_path": raw_path,
+        "raw_path": grading_raw_path,
         "debug": {
             **debug_payload,
             "debug_path": str(debug_path),
-            "raw_path": str(raw_path),
+            "raw_path": str(grading_raw_path),
         },
     }
