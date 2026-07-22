@@ -313,6 +313,30 @@ def build_stage_two_prompt(
         "content. Do not count them as map evidence or require every reference detail; focus on key "
         "content relevant to the rubric. When none are supplied, grade normally from the extracted map "
         "content and rubric.\n"
+        "\nCALIBRATION EXAMPLES\n"
+        "Strong-map illustration: Representative extracted evidence includes substantial relevant "
+        "knowledge, patient-specific information, accurate connections among diagnoses, patient data, "
+        "and scientific concepts, plus meaningful pathophysiologic reasoning. A representative score "
+        "pattern is mostly 3s and 4s with some 2s. Domain decisions can be Yes, and "
+        "overall_meets_expectations can be Yes. A strong map does not need every criterion to be 4 and "
+        "does not automatically fail because one criterion is 2, one domain is weaker, or Transfer is "
+        "less developed than Integration or Application.\n\n"
+        "Weak-map illustration: Representative extracted evidence consists mostly of isolated facts, "
+        "weak or missing relationships, inadequate pathophysiology, a narrow or absent differential, "
+        "limited patient-specific synthesis, and little meaningful integration across domains. A "
+        "representative score pattern is predominantly 1s and 2s. Domain decisions can be No, and "
+        "overall_meets_expectations should be No when these deficiencies are broad.\n\n"
+        "These examples illustrate rubric interpretation only. Do not copy their numeric scores. Grade "
+        "the current map independently using the exact Spring 2025 rubric.\n\n"
+        "For the live map, follow this order: STEP A: assign all 15 criterion scores from the exact "
+        "rubric. STEP B: answer each domain overall question directly. STEP C: review the complete score "
+        "profile and extracted evidence. STEP D: answer 'This map meets expectations' as Yes or No. The "
+        "final decision must reflect whether deficiencies are isolated or pervasive. Isolated weakness: "
+        "a limited number of lower-scoring criteria within an otherwise well-synthesized and integrated "
+        "map does not necessarily mean the map fails overall. Pervasive weakness: low scores across "
+        "multiple domains, missing connections, weak synthesis, or absent pathophysiologic explanation "
+        "support an overall No. Do not use fixed averages, numeric pass thresholds, or any-domain-No "
+        "rules.\n"
         + "\nSTAGE 1 EXTRACTED CONCEPT MAP CONTENT\n"
         + json.dumps(extracted_content, separators=(",", ":"))
         + "\n\nGrade only the extracted content above. The concept-map image is not available "
@@ -763,10 +787,32 @@ def grade_pdf(
             raise MalformedLlamaVisionJsonError(attempts) from exc
     grading_parsed_path = Path(f"{debug_prefix}_grading_parsed.json")
     grading_parsed_path.write_text(json.dumps(parsed_grading, indent=2), encoding="utf-8")
+    def _parsed_section(group: str) -> dict[str, Any]:
+        section = parsed_grading.get(group)
+        return section if isinstance(section, dict) else {}
+
+    pre_normalization_scores = {
+        group: {
+            field: _parsed_section(group).get(field, {}).get("score")
+            if isinstance(_parsed_section(group).get(field), dict)
+            else None
+            for field in fields
+        }
+        for group, fields in CATEGORY_FIELDS.items()
+    }
+    pre_normalization_decisions = {
+        group: _parsed_section(group).get("overall_decision")
+        for group in CATEGORY_FIELDS
+    }
     debug_payload["stage_2_grading"].update({
         "duration_seconds": round(time.monotonic() - grading_started, 3),
         "parsed_path": str(grading_parsed_path),
         "repair_attempt": attempts.get("repair_attempt"),
+        "pre_normalization_criterion_scores": pre_normalization_scores,
+        "pre_normalization_domain_decisions": pre_normalization_decisions,
+        "pre_normalization_overall_meets_expectations": parsed_grading.get(
+            "overall_meets_expectations"
+        ),
     })
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
