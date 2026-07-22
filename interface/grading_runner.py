@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,11 +98,14 @@ EvaluationOutcome = EvaluationResult | EvaluationFailure
 def selected_model_names(selection: str) -> list[str]:
     """Translate the UI selection into active model names."""
     normalized = (
-        selection.strip()
+        unicodedata.normalize("NFKC", str(selection))
+        .replace("\u00a0", " ")
+        .strip()
         .replace("‑", "-")
         .replace("–", "-")
         .replace("—", "-")
     )
+    normalized = re.sub(r"\s+", " ", normalized)
     routes = {
         "Gemma": ["Gemma"],
         "Nemotron 3 Nano Omni 30B": ["Nemotron 3 Nano Omni 30B"],
