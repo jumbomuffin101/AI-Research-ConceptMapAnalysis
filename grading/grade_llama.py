@@ -555,6 +555,59 @@ def _validate_extraction(value: dict[str, Any], attempts: dict[str, Any]) -> dic
     return value
 
 
+def _normalize_nemotron_scores(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert only unambiguous 1–4 score representations before validation."""
+    normalizations: list[dict[str, Any]] = []
+
+    def as_score(value: Any) -> int | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, int):
+            return value if 1 <= value <= 4 else None
+        if isinstance(value, float):
+            if value.is_integer() and 1 <= int(value) <= 4:
+                return int(value)
+            return None
+        if not isinstance(value, str):
+            return None
+
+        text = value.strip()
+        if re.fullmatch(r"[1-4]", text):
+            return int(text)
+        score_match = re.fullmatch(r"score\s*[:\-]?\s*([1-4])", text, re.IGNORECASE)
+        if score_match:
+            return int(score_match.group(1))
+        fraction_match = re.fullmatch(r"([1-4])\s*/\s*4", text)
+        if fraction_match:
+            return int(fraction_match.group(1))
+        descriptor_match = re.fullmatch(r"([1-4])\s*[-–—:]\s*\D.+", text)
+        if descriptor_match:
+            return int(descriptor_match.group(1))
+        return None
+
+    for group, fields in CATEGORY_FIELDS.items():
+        section = result.get(group)
+        if not isinstance(section, dict):
+            continue
+        for field in fields:
+            criterion = section.get(field)
+            if not isinstance(criterion, dict) or "score" not in criterion:
+                continue
+            original = criterion["score"]
+            normalized = as_score(original)
+            if normalized is None or (isinstance(original, int) and not isinstance(original, bool)):
+                continue
+            criterion["score"] = normalized
+            normalizations.append(
+                {
+                    "field": f"{group}.{field}.score",
+                    "original": original,
+                    "normalized": normalized,
+                }
+            )
+    return normalizations
+
+
 def _read_response_with_one_empty_retry(
     request: Any, stage_name: str
 ) -> tuple[str, Any, dict[str, Any], dict[str, Any]]:
@@ -804,6 +857,10 @@ def grade_pdf(
         group: _parsed_section(group).get("overall_decision")
         for group in CATEGORY_FIELDS
     }
+    score_normalizations = _normalize_nemotron_scores(parsed_grading)
+    # The runner validates this normalized serialization; raw and parsed debug
+    # artifacts above retain the model's original response for auditability.
+    cleaned_text = json.dumps(parsed_grading, separators=(",", ":"))
     debug_payload["stage_2_grading"].update({
         "duration_seconds": round(time.monotonic() - grading_started, 3),
         "parsed_path": str(grading_parsed_path),
@@ -813,6 +870,7 @@ def grade_pdf(
         "pre_normalization_overall_meets_expectations": parsed_grading.get(
             "overall_meets_expectations"
         ),
+        "score_normalizations": score_normalizations,
     })
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
