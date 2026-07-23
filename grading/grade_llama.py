@@ -145,19 +145,57 @@ def _is_retryable_transport_error(error: Exception) -> bool:
     return (isinstance(status_code, int) and 500 <= status_code <= 599) or "timeout" in error.__class__.__name__.lower()
 
 
-def _groq_rate_limit_delay(error: Exception) -> float | None:
-    """Return Groq's requested retry delay only for rate_limit_exceeded."""
+def _groq_rate_limit_details(error: Exception) -> tuple[float, str] | None:
+    """Return Groq's rate-limit delay and its source for a 429 response."""
     if getattr(error, "status_code", None) != 429:
         return None
+
     details = getattr(error, "raw_response", {})
-    body = str(details.get("response_text", "")) if isinstance(details, dict) else ""
-    parsed = details.get("response_json") if isinstance(details, dict) else None
-    error_data = parsed.get("error") if isinstance(parsed, dict) else None
-    code = error_data.get("code") if isinstance(error_data, dict) else None
-    if code != "rate_limit_exceeded" and "rate_limit_exceeded" not in body:
+    if not isinstance(details, dict):
         return None
-    match = re.search(r"try again in\s*([0-9]+(?:\.[0-9]+)?)s", body, re.IGNORECASE)
-    return float(match.group(1)) if match else 20.0
+    headers = details.get("response_headers") or {}
+    retry_after = next(
+        (
+            value
+            for key, value in headers.items()
+            if str(key).lower() == "retry-after"
+        ),
+        None,
+    )
+    if retry_after is not None:
+        try:
+            return max(float(retry_after), 0.0), "Retry-After header"
+        except (TypeError, ValueError):
+            pass
+
+    body = str(details.get("response_text", ""))
+    parsed = details.get("response_json")
+    error_data = parsed.get("error") if isinstance(parsed, dict) else None
+    error_code = ""
+    error_message = body
+    if isinstance(error_data, dict):
+        error_code = str(error_data.get("code") or error_data.get("type") or "")
+        error_message = str(error_data.get("message") or body)
+
+    rate_limit_markers = (
+        "rate_limit_exceeded",
+        "rate limit",
+        "tokens per minute",
+        "tpm",
+        "please try again",
+    )
+    combined_error = f"{error_code} {error_message} {body}".lower()
+    if not any(marker in combined_error for marker in rate_limit_markers):
+        return None
+
+    match = re.search(
+        r"(?:please\s+)?try again in\s*([0-9]+(?:\.[0-9]+)?)\s*s(?:econds?)?",
+        combined_error,
+        re.IGNORECASE,
+    )
+    if match:
+        return float(match.group(1)), "Groq error message"
+    return 20.0, "rate-limit fallback"
 
 
 def _request_with_retry(
@@ -170,23 +208,23 @@ def _request_with_retry(
         response = request()
         return response, {"attempt_number": 1, "http_status": getattr(getattr(response, "http_response", None), "status_code", 200), "request_duration_seconds": round(time.monotonic() - started_at, 3), "retry_attempted": False}
     except Exception as first_error:
-        rate_limit_delay = _groq_rate_limit_delay(first_error)
-        if rate_limit_delay is None and not _is_retryable_transport_error(first_error):
+        rate_limit = _groq_rate_limit_details(first_error)
+        if rate_limit is None and not _is_retryable_transport_error(first_error):
             raise
-        retry_delay = rate_limit_delay + 2 if rate_limit_delay is not None else 5
-        if rate_limit_delay is not None and progress_callback:
+        retry_after_seconds, retry_after_source = rate_limit if rate_limit else (None, None)
+        retry_delay = retry_after_seconds + 2 if retry_after_seconds is not None else 5
+        if retry_after_seconds is not None and progress_callback:
             progress_callback(
-                "Qwen rate limit reached. Waiting approximately "
-                f"{round(retry_delay)} seconds before continuing..."
+                f"Qwen rate limit reached. Waiting {round(retry_delay)} seconds before retrying..."
             )
         time.sleep(retry_delay)
-        if rate_limit_delay is not None and progress_callback:
+        if retry_after_seconds is not None and progress_callback:
             progress_callback("Retrying Qwen grading...")
         retry_started_at = time.monotonic()
         try:
             response = request()
         except Exception as retry_error:
-            setattr(retry_error, "attempts", {
+            retry_metadata = {
                 "attempt_number": 2,
                 "first_attempt_error": repr(first_error),
                 "first_attempt_response": getattr(first_error, "attempts", None),
@@ -195,11 +233,21 @@ def _request_with_retry(
                 "http_status": getattr(retry_error, "status_code", None),
                 "retry_attempted": True,
                 "stage": stage_name,
-                "retry_reason": "rate_limit_exceeded" if rate_limit_delay is not None else "transport_error",
+                "retry_reason": "rate_limit_exceeded" if retry_after_seconds is not None else "transport_error",
                 "retry_delay_seconds": retry_delay,
-            })
+            }
+            if retry_after_seconds is not None:
+                retry_metadata.update({
+                    "rate_limit_stage": stage_name,
+                    "first_attempt_status": 429,
+                    "retry_after_seconds": retry_after_seconds,
+                    "retry_after_source": retry_after_source,
+                    "waited_seconds": retry_delay,
+                    "retry_status": getattr(retry_error, "status_code", None),
+                })
+            setattr(retry_error, "attempts", retry_metadata)
             raise
-        return response, {
+        transport_debug = {
             "attempt_number": 2,
             "http_status": getattr(getattr(response, "http_response", None), "status_code", 200),
             "request_duration_seconds": round(time.monotonic() - retry_started_at, 3),
@@ -207,9 +255,19 @@ def _request_with_retry(
             "first_attempt_error": repr(first_error),
             "first_attempt_response": getattr(first_error, "attempts", None),
             "stage": stage_name,
-            "retry_reason": "rate_limit_exceeded" if rate_limit_delay is not None else "transport_error",
+            "retry_reason": "rate_limit_exceeded" if retry_after_seconds is not None else "transport_error",
             "retry_delay_seconds": retry_delay,
         }
+        if retry_after_seconds is not None:
+            transport_debug.update({
+                "rate_limit_stage": stage_name,
+                "first_attempt_status": 429,
+                "retry_after_seconds": retry_after_seconds,
+                "retry_after_source": retry_after_source,
+                "waited_seconds": retry_delay,
+                "retry_status": transport_debug["http_status"],
+            })
+        return response, transport_debug
 
 
 def render_pdf_first_page(pdf_path: Path, output_path: Path) -> dict[str, Any]:
