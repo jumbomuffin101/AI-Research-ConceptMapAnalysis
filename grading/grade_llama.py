@@ -1,4 +1,4 @@
-"""Direct NVIDIA NIM Nemotron 3 Nano Omni grader for Spring 2025 evaluation."""
+"""Groq Qwen 3.6 27B two-stage grader for Spring 2025 evaluation."""
 
 from __future__ import annotations
 
@@ -11,15 +11,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from grading.spring_2025_prompt import build_grading_prompt
+from grading.spring_2025_prompt import SPRING_2025_RUBRIC
+from interface.reference_materials import format_reference_context
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
-PROVIDER = "NVIDIA NIM"
-BASE_URL = "https://integrate.api.nvidia.com/v1"
-API_KEY_ENV = "NVIDIA_API_KEY"
-# NVIDIA's Nemotron Omni image example uses non-streaming instruct mode.
-MAX_TOKENS = 1800
+MODEL = "qwen/qwen3.6-27b"
+PROVIDER = "Groq"
+BASE_URL = "https://api.groq.com/openai/v1"
+API_KEY_ENV = "GROQ_API_KEY"
+MAX_TOKENS = 1600
 TIMEOUT_SECONDS = 180
 IMAGE_MIME_TYPE = "image/jpeg"
 CATEGORY_FIELDS = {
@@ -50,7 +50,7 @@ CATEGORY_FIELDS = {
 
 
 class EmptyLlamaVisionResponseError(RuntimeError):
-    """Nemotron 3 Nano Omni returned no usable completion content."""
+    """Qwen 3.6 27B returned no usable completion content."""
 
     def __init__(self, message: str, raw_response: Any, attempts: dict[str, Any]) -> None:
         super().__init__(message)
@@ -60,22 +60,22 @@ class EmptyLlamaVisionResponseError(RuntimeError):
 
 class MalformedLlamaVisionJsonError(RuntimeError):
     def __init__(self, attempts: dict[str, Any]) -> None:
-        super().__init__("Nemotron 3 Nano Omni 30B returned malformed JSON after one repair attempt.")
+        super().__init__("Qwen 3.6 27B returned malformed JSON after one repair attempt.")
         self.attempts = attempts
 
 
-class NvidiaNemotronHttpError(RuntimeError):
-    """NVIDIA returned an HTTP response that must remain visible to the user."""
+class GroqQwenHttpError(RuntimeError):
+    """Groq returned an HTTP response that must remain visible to the user."""
 
     def __init__(self, message: str, response_details: dict[str, Any]) -> None:
         super().__init__(message)
         self.raw_response = response_details
         self.status_code = response_details.get("http_status")
-        self.attempts = {"nvidia_http_response": response_details}
+        self.attempts = {"groq_http_response": response_details}
 
 
 @dataclass
-class NvidiaChatCompletion:
+class GroqChatCompletion:
     """Small adapter preserving the response interface used by this module."""
 
     data: dict[str, Any]
@@ -114,10 +114,10 @@ def _secret(name: str) -> str | None:
 
 
 def create_client() -> Any:
-    return create_nvidia_client()
+    return create_groq_client()
 
 
-def create_nvidia_client() -> Any:
+def create_groq_client() -> Any:
     try:
         import requests
     except ImportError as exc:
@@ -127,9 +127,7 @@ def create_nvidia_client() -> Any:
 
     api_key = _secret(API_KEY_ENV)
     if not api_key:
-        raise RuntimeError("NVIDIA_API_KEY is not configured.")
-    # Match NVIDIA Build's generated requests example: explicit Bearer auth and
-    # non-streaming JSON responses. requests adds Content-Type for json=payload.
+        raise RuntimeError("GROQ_API_KEY is not configured.")
     return {
         "requests": requests,
         "headers": {
@@ -221,7 +219,7 @@ def schema(map_file: str) -> dict[str, Any]:
 def build_prompt(
     map_file: str, reference_materials: list[dict[str, str]] | None = None
 ) -> str:
-    return build_grading_prompt(map_file, schema(map_file), reference_materials)
+    return build_stage_two_prompt(map_file, {}, reference_materials)
 
 
 EXTRACTION_FIELDS = (
@@ -266,13 +264,51 @@ def build_extraction_prompt() -> str:
     )
 
 
-def output_schema_for_prompt(map_file: str) -> dict[str, Any]:
-    """Describe the grading structure without anchoring scores to a value."""
-    structure = schema(map_file)
+def _compress_reference_materials(
+    materials: list[dict[str, str]] | None, max_characters: int = 4200
+) -> str:
+    """Keep only case, objective, unit-concept, and DDx context for Stage 2."""
+    selected: list[dict[str, str]] = []
+    keywords = re.compile(
+        r"patient|case|history|chief|symptom|finding|diagnos|differential|ddx|"
+        r"objective|outcome|learn|pathophys|physiology|anatom|histolog|biochem|"
+        r"genetic|pharmacol|clinical|health system|determinant|social",
+        re.IGNORECASE,
+    )
+    discard = re.compile(
+        r"copyright|all rights reserved|poll|clicker|audience response|slide \d+|"
+        r"www\.|http[s]?://|page \d+ of \d+",
+        re.IGNORECASE,
+    )
+    remaining = max_characters
+    for material in materials or []:
+        filename = str(material.get("filename", "")).strip()
+        seen: set[str] = set()
+        kept: list[str] = []
+        for raw_line in str(material.get("text", "")).splitlines():
+            line = re.sub(r"\s+", " ", raw_line).strip()
+            key = line.casefold()
+            if not line or key in seen or discard.search(line) or not keywords.search(line):
+                continue
+            seen.add(key)
+            kept.append(line[:350])
+        text = "\n".join(kept)
+        if filename and text and remaining > 0:
+            clipped = text[:remaining]
+            selected.append({"filename": filename, "text": clipped})
+            remaining -= len(clipped)
+    return format_reference_context(selected)
+
+
+def _output_contract() -> str:
+    domain_lines = []
     for group, fields in CATEGORY_FIELDS.items():
-        for field in fields:
-            structure[group][field]["score"] = "<integer 1-4>"
-    return structure
+        domain_lines.append(
+            f"- {group}: criterion objects for {', '.join(fields)}; each criterion has "
+            "score (required integer 1-4) and explanation (brief string); also "
+            "overall_decision (Yes/No) and if_no_explanation (string)."
+        )
+    return "\n".join(domain_lines)
 
 
 def build_stage_two_prompt(
@@ -280,88 +316,45 @@ def build_stage_two_prompt(
     extracted_content: dict[str, Any],
     reference_materials: list[dict[str, str]] | None,
 ) -> str:
+    reference_context = _compress_reference_materials(reference_materials)
+    reference_section = (
+        "\nREFERENCE SUMMARY (comparison standard only; not student-map evidence)\n"
+        + reference_context
+        + "\n"
+        if reference_context
+        else ""
+    )
     return (
-        build_grading_prompt(
-            map_file, output_schema_for_prompt(map_file), reference_materials
-        )
-        + "\nSTAGE 2 DECISION GUIDANCE\n"
-        "For each numeric criterion, compare the extracted concept-map content against all four "
-        "exact Spring 2025 descriptors and assign the single score from 1 through 4 that best "
-        "matches the evidence. Do not average criteria, use hidden thresholds, inflate scores to "
-        "make a map pass, or lower scores solely to justify a No decision. Criterion scores and "
-        "Yes/No decisions are separate judgments.\n\n"
-        "Answer each domain overall question directly and holistically. Knowledge Acquisition is Yes "
-        "when the map as a whole includes the key knowledge expected for the domain; one score of 1 "
-        "or 2, one weaker category, or an imperfect domain does not automatically require No. Use No "
-        "when a major portion of the key knowledge is meaningfully absent or inadequate.\n\n"
-        "Integration is Yes when the map overall demonstrates meaningful, accurate integration across "
-        "patient data, diagnoses, and scientific concepts; one weaker connection criterion alone does "
-        "not automatically require No. Application is Yes when the map demonstrates meaningful "
-        "pathophysiologic explanation of the working diagnosis and/or key patient findings; it need "
-        "not be perfect in every subcriterion. Transfer is Yes when prior basic or clinical knowledge "
-        "meaningfully deepens understanding; do not require every Transfer subcriterion to be strong.\n\n"
-        "Answer 'This map meets expectations' holistically from the rubric as a whole. Do not "
-        "automatically set overall_meets_expectations to No because one domain is No, and do not set it "
-        "to Yes from an average-score threshold. A map can meet expectations when most areas are "
-        "adequately addressed with clear synthesis and meaningful integration, even if one domain or a "
-        "small number of criteria is weaker. Use No when deficiencies are substantial enough that the "
-        "map overall does not meet the intended learning expectations.\n\n"
-        "Before returning JSON, internally review whether scores match the exact descriptors, domain "
-        "decisions answer their domain questions rather than one low score, and the final decision "
-        "reflects the map as a whole. Do not output this review.\n\n"
-        "When reference materials are supplied, use them only to understand expected case and unit "
-        "content. Do not count them as map evidence or require every reference detail; focus on key "
-        "content relevant to the rubric. When none are supplied, grade normally from the extracted map "
-        "content and rubric.\n"
-        "\nCALIBRATION EXAMPLES\n"
-        "Strong-map illustration: Representative extracted evidence includes substantial relevant "
-        "knowledge, patient-specific information, accurate connections among diagnoses, patient data, "
-        "and scientific concepts, plus meaningful pathophysiologic reasoning. A representative score "
-        "pattern is mostly 3s and 4s with some 2s. Domain decisions can be Yes, and "
-        "overall_meets_expectations can be Yes. A strong map does not need every criterion to be 4 and "
-        "does not automatically fail because one criterion is 2, one domain is weaker, or Transfer is "
-        "less developed than Integration or Application.\n\n"
-        "Weak-map illustration: Representative extracted evidence consists mostly of isolated facts, "
-        "weak or missing relationships, inadequate pathophysiology, a narrow or absent differential, "
-        "limited patient-specific synthesis, and little meaningful integration across domains. A "
-        "representative score pattern is predominantly 1s and 2s. Domain decisions can be No, and "
-        "overall_meets_expectations should be No when these deficiencies are broad.\n\n"
-        "These examples illustrate rubric interpretation only. Do not copy their numeric scores. Grade "
-        "the current map independently using the exact Spring 2025 rubric.\n\n"
-        "For the live map, follow this order: STEP A: assign all 15 criterion scores from the exact "
-        "rubric. STEP B: answer each domain overall question directly. STEP C: review the complete score "
-        "profile and extracted evidence. STEP D: answer 'This map meets expectations' as Yes or No. The "
-        "final decision must reflect whether deficiencies are isolated or pervasive. Isolated weakness: "
-        "a limited number of lower-scoring criteria within an otherwise well-synthesized and integrated "
-        "map does not necessarily mean the map fails overall. Pervasive weakness: low scores across "
-        "multiple domains, missing connections, weak synthesis, or absent pathophysiologic explanation "
-        "support an overall No. Do not use fixed averages, numeric pass thresholds, or any-domain-No "
-        "rules.\n"
-        + "\nSTAGE 1 EXTRACTED CONCEPT MAP CONTENT\n"
+        "You are grading a medical student concept map using the Spring 2025 Concept Map Feedback "
+        "Tool for SUMMATIVE Activities. Use this exact rubric as the sole scoring authority.\n\n"
+        + SPRING_2025_RUBRIC
+        + reference_section
+        + "\nEXTRACTED STUDENT CONCEPT MAP CONTENT (the only student-map evidence)\n"
         + json.dumps(extracted_content, separators=(",", ":"))
-        + "\n\nGrade only the extracted content above. The concept-map image is not available "
-        "in this stage. Use reference material only as a comparison standard; it is not "
-        "student-map evidence. For every rubric criterion, `score` must be an integer from "
-        "1 through 4 selected by applying the corresponding Spring 2025 rubric descriptor. "
-        "Do not copy placeholder values from the output structure. Independently determine every "
-        "numeric score by comparing the extracted concept-map evidence against all four descriptors "
-        "for that specific criterion. Return only the required grading JSON."
+        + "\n\nGrade only the extracted content. For each criterion, select the exact 1-4 descriptor "
+        "that best matches it; do not use hidden thresholds or averages. Domain and final Yes/No "
+        "decisions answer the rubric questions holistically.\n"
+        "Return only valid JSON. Required fields: map_file, model, knowledge_acquisition, integration, "
+        "application, transfer, overall_meets_expectations (Yes/No), strengths (list), "
+        "areas_for_improvement (list), and grading_notes (string).\n"
+        + _output_contract()
     )
 
 
-def _nvidia_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """Use NVIDIA's documented Nemotron Omni image/instruct request fields."""
+def _groq_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Use Groq's Qwen chat-completions request fields without JSON mode."""
     return {
         "messages": messages,
         "model": MODEL,
-        "max_tokens": MAX_TOKENS,
+        "max_completion_tokens": MAX_TOKENS,
         "stream": False,
-        "temperature": 1,
-        "chat_template_kwargs": {"enable_thinking": False},
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "reasoning_format": "hidden",
     }
 
 
-def _post_nvidia(client: dict[str, Any], payload: dict[str, Any]) -> NvidiaChatCompletion:
+def _post_groq(client: dict[str, Any], payload: dict[str, Any]) -> GroqChatCompletion:
     endpoint = f"{BASE_URL}/chat/completions"
     started_at = time.monotonic()
     response = client["requests"].post(
@@ -396,23 +389,16 @@ def _post_nvidia(client: dict[str, Any], payload: dict[str, Any]) -> NvidiaChatC
         body_detail = response_text.strip()
         if isinstance(data, dict):
             body_detail = str(data.get("detail") or data.get("error") or data.get("message") or body_detail)
-        if "function" in body_detail.lower() and "not found for account" in body_detail.lower():
-            message = (
-                "Nemotron 3 Nano Omni 30B endpoint is not available to the NVIDIA account "
-                "associated with the configured NVIDIA_API_KEY."
-            )
-        else:
-            message = f"NVIDIA NIM HTTP {response_details['http_status']}: {body_detail or 'No error detail returned.'}"
-        raise NvidiaNemotronHttpError(message, response_details)
+        message = f"Groq HTTP {response_details['http_status']}: {body_detail or 'No error detail returned.'}"
+        raise GroqQwenHttpError(message, response_details)
 
     if not isinstance(data, dict):
-        raise NvidiaNemotronHttpError("NVIDIA NIM returned a non-JSON API response.", response_details)
-    return NvidiaChatCompletion(data=data, http_response=response, transport=response_details)
+        raise GroqQwenHttpError("Groq returned a non-JSON API response.", response_details)
+    return GroqChatCompletion(data=data, http_response=response, transport=response_details)
 
 
 def _vision_messages(prompt: str, image_base64: str) -> list[dict[str, Any]]:
-    # NVIDIA's Nemotron Omni PDF/image example uses an OpenAI-compatible list
-    # with a text part followed by an image_url data URI.
+    # Groq's Qwen vision endpoint accepts OpenAI-compatible image_url content.
     return [
         {
             "role": "user",
@@ -431,14 +417,14 @@ def _vision_messages(prompt: str, image_base64: str) -> list[dict[str, Any]]:
 
 def request_extraction(client: Any, image_base64: str) -> Any:
     """Stage 1: extract only visible map content from the production JPEG."""
-    return _post_nvidia(
-        client, _nvidia_payload(_vision_messages(build_extraction_prompt(), image_base64))
+    return _post_groq(
+        client, _groq_payload(_vision_messages(build_extraction_prompt(), image_base64))
     )
 
 
 def request_grade(client: Any, prompt: str) -> Any:
     """Stage 2: grade the Stage 1 JSON without resending the concept-map image."""
-    return _post_nvidia(client, _nvidia_payload([{"role": "user", "content": prompt}]))
+    return _post_groq(client, _groq_payload([{"role": "user", "content": prompt}]))
 
 
 def _response_debug_value(response: Any) -> Any:
@@ -470,10 +456,10 @@ def _response_shape(response: Any) -> dict[str, Any]:
 
 def response_text(response: Any, attempts: dict[str, Any]) -> str:
     if response is None:
-        raise EmptyLlamaVisionResponseError("Nemotron 3 Nano Omni 30B returned no response.", response, attempts)
+        raise EmptyLlamaVisionResponseError("Qwen 3.6 27B returned no response.", response, attempts)
     choices = getattr(response, "choices", None)
     if not choices:
-        raise EmptyLlamaVisionResponseError("Nemotron 3 Nano Omni 30B returned no response choices.", response, attempts)
+        raise EmptyLlamaVisionResponseError("Qwen 3.6 27B returned no response choices.", response, attempts)
     first = choices[0]
     message = first.get("message", {}) if isinstance(first, dict) else getattr(first, "message", None)
     candidates = [
@@ -484,19 +470,20 @@ def response_text(response: Any, attempts: dict[str, Any]) -> str:
     ]
     text = next((value for value in candidates if isinstance(value, str) and value.strip()), None)
     if text is None:
-        raise EmptyLlamaVisionResponseError("Nemotron 3 Nano Omni 30B returned empty content.", response, attempts)
+        raise EmptyLlamaVisionResponseError("Qwen 3.6 27B returned empty content.", response, attempts)
     return text
 
 
 def request_json_repair(client: Any, malformed_output: str, map_file: str) -> Any:
     repair_prompt = (
         "Return the same evaluation as valid JSON only. Do not regrade or change scores.\n"
-        "Required schema:\n"
-        + json.dumps(output_schema_for_prompt(map_file), separators=(",", ":"))
+        "Required fields: map_file, model, knowledge_acquisition, integration, application, transfer, "
+        "overall_meets_expectations, strengths, areas_for_improvement, grading_notes.\n"
+        + _output_contract()
         + "\nMalformed output:\n"
         + malformed_output
     )
-    return _post_nvidia(client, _nvidia_payload([{"role": "user", "content": repair_prompt}]))
+    return _post_groq(client, _groq_payload([{"role": "user", "content": repair_prompt}]))
 
 
 def request_extraction_repair(client: Any, malformed_output: str) -> Any:
@@ -507,7 +494,7 @@ def request_extraction_repair(client: Any, malformed_output: str) -> Any:
         + "\nMalformed output:\n"
         + malformed_output
     )
-    return _post_nvidia(client, _nvidia_payload([{"role": "user", "content": repair_prompt}]))
+    return _post_groq(client, _groq_payload([{"role": "user", "content": repair_prompt}]))
 
 
 def clean_json_output(text: str) -> str:
@@ -544,7 +531,7 @@ def _validate_extraction(value: dict[str, Any], attempts: dict[str, Any]) -> dic
         for item in value.get("relationships", [])
     )
     if missing or invalid_lists or not isinstance(value.get("main_topic"), str) or not relationships_valid:
-        error = RuntimeError("Nemotron 3 Nano Omni 30B returned an invalid extraction response.")
+        error = RuntimeError("Qwen 3.6 27B returned an invalid extraction response.")
         error.attempts = {
             **attempts,
             "missing_extraction_fields": missing,
@@ -555,7 +542,7 @@ def _validate_extraction(value: dict[str, Any], attempts: dict[str, Any]) -> dic
     return value
 
 
-def _normalize_nemotron_scores(result: dict[str, Any]) -> list[dict[str, Any]]:
+def _normalize_qwen_scores(result: dict[str, Any]) -> list[dict[str, Any]]:
     """Convert only unambiguous 1–4 score representations before validation."""
     normalizations: list[dict[str, Any]] = []
 
@@ -645,7 +632,7 @@ def _read_response_with_one_empty_retry(
 
 
 def _vision_diagnostic_enabled() -> bool:
-    return os.getenv("NEMOTRON3_OMNI_VISION_DIAGNOSTIC", "").strip() == "1"
+    return os.getenv("QWEN36_VISION_DIAGNOSTIC", "").strip() == "1"
 
 
 def request_vision_diagnostic(client: Any, image_base64: str) -> Any:
@@ -661,7 +648,7 @@ def request_vision_diagnostic(client: Any, image_base64: str) -> Any:
         "   - Partially readable\n"
         "   - Mostly unreadable"
     )
-    return _post_nvidia(client, _nvidia_payload(_vision_messages(diagnostic_prompt, image_base64)))
+    return _post_groq(client, _groq_payload(_vision_messages(diagnostic_prompt, image_base64)))
 
 
 def grade_pdf(
@@ -673,7 +660,7 @@ def grade_pdf(
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_info = render_pdf_first_page(pdf_path, image_path)
     image_base64 = str(image_info["base64"])
-    actual_input_path = image_path.parent / "nemotron3_omni_30b_actual_input.jpg"
+    actual_input_path = image_path.parent / "qwen36_actual_input.jpg"
     actual_input_path.write_bytes(image_path.read_bytes())
     diagnostic_enabled = _vision_diagnostic_enabled()
     if diagnostic_enabled:
@@ -682,7 +669,7 @@ def grade_pdf(
             lambda: request_vision_diagnostic(client, image_base64)
         )
         raw_text = response_text(response, {"diagnostic_attempt": _response_debug_value(response)})
-        diagnostic_path = image_path.parent / "nemotron3_omni_30b_vision_diagnostic.txt"
+        diagnostic_path = image_path.parent / "qwen36_vision_diagnostic.txt"
         diagnostic_path.write_text(raw_text, encoding="utf-8")
         return {
             "model": MODEL,
@@ -703,9 +690,9 @@ def grade_pdf(
                 "render_matrix": image_info["render_matrix"],
                 "jpeg_quality": image_info["jpeg_quality"],
                 "diagnostic_path": str(diagnostic_path),
-                "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}], "stream": False, "chat_template_kwargs": {"enable_thinking": False}},
+                "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}], "stream": False, "reasoning_format": "hidden"},
                 "raw_response": _response_debug_value(response),
-                "nvidia_http_response": response.transport,
+                "groq_http_response": response.transport,
                 **transport_debug,
             },
         }
@@ -745,7 +732,7 @@ def grade_pdf(
         "duration_seconds": round(time.monotonic() - extraction_started, 3),
         "raw_path": str(extraction_raw_path),
         "raw_response": _response_debug_value(extraction_response),
-        "nvidia_http_response": extraction_response.transport,
+        "groq_http_response": extraction_response.transport,
         "response_shape": _response_shape(extraction_response),
         "attempts": extraction_attempts,
         "transport": extraction_transport,
@@ -755,7 +742,7 @@ def grade_pdf(
     try:
         _, extracted_content = _parse_json_object(
             extraction_raw,
-            "Nemotron 3 Nano Omni 30B extraction response was not valid JSON.",
+            "Qwen 3.6 27B extraction response was not valid JSON.",
             extraction_attempts,
         )
         extracted_content = _validate_extraction(extracted_content, extraction_attempts)
@@ -769,7 +756,7 @@ def grade_pdf(
         )
         _, extracted_content = _parse_json_object(
             extraction_repair_text,
-            "Nemotron 3 Nano Omni 30B extraction response was not valid JSON after repair.",
+            "Qwen 3.6 27B extraction response was not valid JSON after repair.",
             extraction_attempts,
         )
         extracted_content = _validate_extraction(extracted_content, extraction_attempts)
@@ -807,7 +794,7 @@ def grade_pdf(
         "prompt_characters": len(prompt),
         "raw_path": str(grading_raw_path),
         "raw_response": _response_debug_value(response),
-        "nvidia_http_response": response.transport,
+        "groq_http_response": response.transport,
         "response_shape": _response_shape(response),
         "attempts": attempts,
         "transport": grading_transport,
@@ -818,7 +805,7 @@ def grade_pdf(
     try:
         cleaned_text, parsed_grading = _parse_json_object(
             raw_text,
-            "Nemotron 3 Nano Omni 30B returned malformed grading JSON.",
+            "Qwen 3.6 27B returned malformed grading JSON.",
             attempts,
         )
     except RuntimeError:
@@ -833,7 +820,7 @@ def grade_pdf(
         try:
             cleaned_text, parsed_grading = _parse_json_object(
                 raw_text,
-                "Nemotron 3 Nano Omni 30B returned malformed grading JSON after one repair attempt.",
+                "Qwen 3.6 27B returned malformed grading JSON after one repair attempt.",
                 attempts,
             )
         except RuntimeError as exc:
@@ -857,7 +844,7 @@ def grade_pdf(
         group: _parsed_section(group).get("overall_decision")
         for group in CATEGORY_FIELDS
     }
-    score_normalizations = _normalize_nemotron_scores(parsed_grading)
+    score_normalizations = _normalize_qwen_scores(parsed_grading)
     # The runner validates this normalized serialization; raw and parsed debug
     # artifacts above retain the model's original response for auditability.
     cleaned_text = json.dumps(parsed_grading, separators=(",", ":"))

@@ -17,8 +17,8 @@ REPORT_PATH = SUMMARY_DIR / "concept_map_evaluation_report.md"
 CSV_PATH = SUMMARY_DIR / "concept_map_evaluation_summary.csv"
 JSON_PATH = SUMMARY_DIR / "concept_map_evaluation_summary.json"
 
-MODEL_KEYS = {"Gemma": "gemma", "Nemotron 3 Nano Omni 30B": "nemotron3_omni_30b"}
-MODEL_TITLES = {"gemma": "Gemma", "nemotron3_omni_30b": "Nemotron 3 Nano Omni 30B"}
+MODEL_KEYS = {"Gemma": "gemma", "Qwen 3.6 27B": "qwen36"}
+MODEL_TITLES = {"gemma": "Gemma", "qwen36": "Qwen 3.6 27B"}
 DOMAIN_FIELDS = {
     "knowledge_acquisition": [
         "basic_science", "health_system_science", "clinical_science",
@@ -167,18 +167,18 @@ def render_report(maps: dict[str, dict[str, Any]]) -> str:
         lines += ["No successful evaluation results were found in `outputs/evaluation_summary/raw/`.", ""]
 
     for number, entry in enumerate(entries, start=1):
-        gemma, llama = _result(entry, "gemma"), _result(entry, "nemotron3_omni_30b")
+        gemma, llama = _result(entry, "gemma"), _result(entry, "qwen36")
         lines += [f"## Map {number}: {entry['map_file']}", "", "### Overall", "",
-                  f"Gemma: {_overall(gemma)}", f"Nemotron: {_overall(llama)}", ""]
+                  f"Gemma: {_overall(gemma)}", f"Qwen 3.6 27B: {_overall(llama)}", ""]
         for domain, criteria in DOMAIN_FIELDS.items():
-            lines += [f"### {DOMAIN_TITLES[domain]}", "", "| Criterion | Gemma | Nemotron |", "|---|---:|---:|"]
+            lines += [f"### {DOMAIN_TITLES[domain]}", "", "| Criterion | Gemma | Qwen 3.6 27B |", "|---|---:|---:|"]
             for criterion in criteria:
                 lines.append(f"| {criterion.replace('_', ' ').title()} | {_score(gemma, domain, criterion)} | {_score(llama, domain, criterion)} |")
-            lines += ["", f"Domain decision — Gemma: {_domain_decision(gemma, domain)}; Nemotron: {_domain_decision(llama, domain)}", ""]
+            lines += ["", f"Domain decision — Gemma: {_domain_decision(gemma, domain)}; Qwen 3.6 27B: {_domain_decision(llama, domain)}", ""]
         for heading, field in [("Strengths", "strengths"), ("Areas for Improvement", "areas_for_improvement"), ("Grading Notes", "grading_notes")]:
             lines += [f"### {heading}", "", "Gemma:"]
             _bullets(lines, _items(gemma, field))
-            lines += ["", "Nemotron:"]
+            lines += ["", "Qwen 3.6 27B:"]
             _bullets(lines, _items(llama, field))
             lines.append("")
         if entry["failures"]:
@@ -187,11 +187,11 @@ def render_report(maps: dict[str, dict[str, Any]]) -> str:
                 lines.append(f"- {MODEL_TITLES[model_key]}: {message}")
             lines.append("")
 
-    comparable = [entry for entry in entries if _result(entry, "gemma") and _result(entry, "nemotron3_omni_30b")]
-    agreed = sum(_overall(_result(entry, "gemma")) == _overall(_result(entry, "nemotron3_omni_30b")) for entry in comparable)
-    lines += ["## Cross-Model Summary", "", "| Map | Gemma Overall | Nemotron Overall | Agreed | Gemma Avg Score | Nemotron Avg Score |", "|---|---|---|---|---:|---:|"]
+    comparable = [entry for entry in entries if _result(entry, "gemma") and _result(entry, "qwen36")]
+    agreed = sum(_overall(_result(entry, "gemma")) == _overall(_result(entry, "qwen36")) for entry in comparable)
+    lines += ["## Cross-Model Summary", "", "| Map | Gemma Overall | Qwen 3.6 27B Overall | Agreed | Gemma Avg Score | Qwen 3.6 27B Avg Score |", "|---|---|---|---|---:|---:|"]
     for index, entry in enumerate(entries, start=1):
-        gemma, llama = _result(entry, "gemma"), _result(entry, "nemotron3_omni_30b")
+        gemma, llama = _result(entry, "gemma"), _result(entry, "qwen36")
         agreement = "Yes" if gemma and llama and _overall(gemma) == _overall(llama) else "No"
         g_avg, l_avg = _average(gemma), _average(llama)
         lines.append(f"| Map {index} | {_overall(gemma)} | {_overall(llama)} | {agreement} | {g_avg:.2f} | {l_avg:.2f} |" if g_avg is not None and l_avg is not None else f"| Map {index} | {_overall(gemma)} | {_overall(llama)} | {agreement} | {f'{g_avg:.2f}' if g_avg is not None else 'N/A'} | {f'{l_avg:.2f}' if l_avg is not None else 'N/A'} |")
@@ -237,7 +237,7 @@ def write_machine_summaries(maps: dict[str, dict[str, Any]]) -> None:
                     row[f"{prefix}_{domain}_{criterion}_score"] = _score(
                         result, domain, criterion
                     )
-        row["overall_agreement"] = bool(_result(entry, "gemma") and _result(entry, "nemotron3_omni_30b") and _overall(_result(entry, "gemma")) == _overall(_result(entry, "nemotron3_omni_30b")))
+        row["overall_agreement"] = bool(_result(entry, "gemma") and _result(entry, "qwen36") and _overall(_result(entry, "gemma")) == _overall(_result(entry, "qwen36")))
         rows.append(row)
     fieldnames = sorted({field for row in rows for field in row}) or ["map_file"]
     with CSV_PATH.open("w", newline="", encoding="utf-8") as handle:

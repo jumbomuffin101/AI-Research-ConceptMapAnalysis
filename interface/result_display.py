@@ -187,13 +187,7 @@ def display_failure(result: Any) -> None:
     error_message = _failure_reason(result)
     debug_path = get_result_field(result, "debug_path", None)
 
-    if error_message == "NVIDIA text endpoint failed":
-        st.warning("NVIDIA text endpoint failed")
-    elif error_message == "NVIDIA image input failed":
-        st.warning("NVIDIA image input failed")
-    elif error_message.startswith("NVIDIA grading request failed"):
-        st.warning(error_message)
-    elif error_message == "Nemotron 3 Nano Omni 30B returned empty content.":
+    if error_message == "Qwen 3.6 27B returned empty content.":
         st.warning(f"{model_name} returned empty content.")
     elif "implausible all-4 evaluation" in error_message:
         st.warning(
