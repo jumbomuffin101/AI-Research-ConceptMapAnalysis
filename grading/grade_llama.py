@@ -20,6 +20,7 @@ PROVIDER = "Groq"
 BASE_URL = "https://api.groq.com/openai/v1"
 API_KEY_ENV = "GROQ_API_KEY"
 MAX_TOKENS = 1600
+EXTRACTION_MAX_TOKENS = 900
 TIMEOUT_SECONDS = 180
 IMAGE_MIME_TYPE = "image/jpeg"
 CATEGORY_FIELDS = {
@@ -144,15 +145,43 @@ def _is_retryable_transport_error(error: Exception) -> bool:
     return (isinstance(status_code, int) and 500 <= status_code <= 599) or "timeout" in error.__class__.__name__.lower()
 
 
-def _request_with_retry(request: Any) -> tuple[Any, dict[str, Any]]:
+def _groq_rate_limit_delay(error: Exception) -> float | None:
+    """Return Groq's requested retry delay only for rate_limit_exceeded."""
+    if getattr(error, "status_code", None) != 429:
+        return None
+    details = getattr(error, "raw_response", {})
+    body = str(details.get("response_text", "")) if isinstance(details, dict) else ""
+    parsed = details.get("response_json") if isinstance(details, dict) else None
+    error_data = parsed.get("error") if isinstance(parsed, dict) else None
+    code = error_data.get("code") if isinstance(error_data, dict) else None
+    if code != "rate_limit_exceeded" and "rate_limit_exceeded" not in body:
+        return None
+    match = re.search(r"try again in\s*([0-9]+(?:\.[0-9]+)?)s", body, re.IGNORECASE)
+    return float(match.group(1)) if match else 20.0
+
+
+def _request_with_retry(
+    request: Any,
+    stage_name: str = "request",
+    progress_callback: Any | None = None,
+) -> tuple[Any, dict[str, Any]]:
     started_at = time.monotonic()
     try:
         response = request()
         return response, {"attempt_number": 1, "http_status": getattr(getattr(response, "http_response", None), "status_code", 200), "request_duration_seconds": round(time.monotonic() - started_at, 3), "retry_attempted": False}
     except Exception as first_error:
-        if not _is_retryable_transport_error(first_error):
+        rate_limit_delay = _groq_rate_limit_delay(first_error)
+        if rate_limit_delay is None and not _is_retryable_transport_error(first_error):
             raise
-        time.sleep(5)
+        retry_delay = rate_limit_delay + 2 if rate_limit_delay is not None else 5
+        if rate_limit_delay is not None and progress_callback:
+            progress_callback(
+                "Qwen rate limit reached. Waiting approximately "
+                f"{round(retry_delay)} seconds before continuing..."
+            )
+        time.sleep(retry_delay)
+        if rate_limit_delay is not None and progress_callback:
+            progress_callback("Retrying Qwen grading...")
         retry_started_at = time.monotonic()
         try:
             response = request()
@@ -165,9 +194,22 @@ def _request_with_retry(request: Any) -> tuple[Any, dict[str, Any]]:
                 "retry_attempt_response": getattr(retry_error, "attempts", None),
                 "http_status": getattr(retry_error, "status_code", None),
                 "retry_attempted": True,
+                "stage": stage_name,
+                "retry_reason": "rate_limit_exceeded" if rate_limit_delay is not None else "transport_error",
+                "retry_delay_seconds": retry_delay,
             })
             raise
-        return response, {"attempt_number": 2, "http_status": getattr(getattr(response, "http_response", None), "status_code", 200), "request_duration_seconds": round(time.monotonic() - retry_started_at, 3), "retry_attempted": True, "first_attempt_error": repr(first_error), "first_attempt_response": getattr(first_error, "attempts", None)}
+        return response, {
+            "attempt_number": 2,
+            "http_status": getattr(getattr(response, "http_response", None), "status_code", 200),
+            "request_duration_seconds": round(time.monotonic() - retry_started_at, 3),
+            "retry_attempted": True,
+            "first_attempt_error": repr(first_error),
+            "first_attempt_response": getattr(first_error, "attempts", None),
+            "stage": stage_name,
+            "retry_reason": "rate_limit_exceeded" if rate_limit_delay is not None else "transport_error",
+            "retry_delay_seconds": retry_delay,
+        }
 
 
 def render_pdf_first_page(pdf_path: Path, output_path: Path) -> dict[str, Any]:
@@ -258,7 +300,11 @@ def build_extraction_prompt() -> str:
     return (
         "Extract only visibly present content from this medical concept map. Do not grade it. "
         "Do not infer missing content. Preserve specific patient facts when readable and "
-        "write every visible arrow or relationship explicitly. Return only valid JSON with "
+        "write every visible arrow or relationship explicitly. Use concise phrases, not paragraphs. "
+        "Limit patient_data to 12 items; basic_science_concepts and clinical_science_concepts to 15 "
+        "each; health_system_science_concepts, determinants_of_health, differential_diagnoses, and "
+        "pathophysiology_flows to 8 each; relationships to 15; and prior_or_transfer_knowledge to 10. "
+        "Do not omit important visible evidence solely to meet these limits. Return only valid JSON with "
         "this exact structure:\n"
         + json.dumps(extraction_schema(), separators=(",", ":"))
     )
@@ -333,7 +379,8 @@ def build_stage_two_prompt(
         + json.dumps(extracted_content, separators=(",", ":"))
         + "\n\nGrade only the extracted content. For each criterion, select the exact 1-4 descriptor "
         "that best matches it; do not use hidden thresholds or averages. Domain and final Yes/No "
-        "decisions answer the rubric questions holistically.\n"
+        "decisions answer the rubric questions holistically. Keep each criterion explanation to one "
+        "short sentence. Do not include chain-of-thought or extended reasoning.\n"
         "Return only valid JSON. Required fields: map_file, model, knowledge_acquisition, integration, "
         "application, transfer, overall_meets_expectations (Yes/No), strengths (list), "
         "areas_for_improvement (list), and grading_notes (string).\n"
@@ -341,12 +388,14 @@ def build_stage_two_prompt(
     )
 
 
-def _groq_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
+def _groq_payload(
+    messages: list[dict[str, Any]], max_completion_tokens: int = MAX_TOKENS
+) -> dict[str, Any]:
     """Use Groq's Qwen chat-completions request fields without JSON mode."""
     return {
         "messages": messages,
         "model": MODEL,
-        "max_completion_tokens": MAX_TOKENS,
+        "max_completion_tokens": max_completion_tokens,
         "stream": False,
         "temperature": 0.7,
         "top_p": 0.8,
@@ -418,7 +467,11 @@ def _vision_messages(prompt: str, image_base64: str) -> list[dict[str, Any]]:
 def request_extraction(client: Any, image_base64: str) -> Any:
     """Stage 1: extract only visible map content from the production JPEG."""
     return _post_groq(
-        client, _groq_payload(_vision_messages(build_extraction_prompt(), image_base64))
+        client,
+        _groq_payload(
+            _vision_messages(build_extraction_prompt(), image_base64),
+            max_completion_tokens=EXTRACTION_MAX_TOKENS,
+        ),
     )
 
 
@@ -596,10 +649,12 @@ def _normalize_qwen_scores(result: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _read_response_with_one_empty_retry(
-    request: Any, stage_name: str
+    request: Any, stage_name: str, progress_callback: Any | None = None
 ) -> tuple[str, Any, dict[str, Any], dict[str, Any]]:
     """Bound each stage to at most two calls, including empty-choice retries."""
-    response, transport_debug = _request_with_retry(request)
+    response, transport_debug = _request_with_retry(
+        request, stage_name=stage_name, progress_callback=progress_callback
+    )
     attempts: dict[str, Any] = {"first_attempt": _response_debug_value(response)}
     try:
         return response_text(response, attempts), response, transport_debug, attempts
@@ -656,6 +711,7 @@ def grade_pdf(
     map_file: str,
     debug_prefix: Path,
     reference_materials: list[dict[str, str]] | None = None,
+    progress_callback: Any | None = None,
 ) -> dict[str, Any]:
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_info = render_pdf_first_page(pdf_path, image_path)
@@ -720,10 +776,12 @@ def grade_pdf(
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
     client = create_client()
+    if progress_callback:
+        progress_callback("Extracting Qwen evidence...")
     extraction_started = time.monotonic()
     extraction_raw, extraction_response, extraction_transport, extraction_attempts = (
         _read_response_with_one_empty_retry(
-            lambda: request_extraction(client, image_base64), "extraction"
+            lambda: request_extraction(client, image_base64), "extraction", progress_callback
         )
     )
     extraction_raw_path = Path(f"{debug_prefix}_extraction_raw.txt")
@@ -736,6 +794,7 @@ def grade_pdf(
         "response_shape": _response_shape(extraction_response),
         "attempts": extraction_attempts,
         "transport": extraction_transport,
+        "max_completion_tokens": EXTRACTION_MAX_TOKENS,
         "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}]},
     }
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
@@ -782,9 +841,11 @@ def grade_pdf(
     else:
         prompt_path.write_text(prompt, encoding="utf-8")
 
+    if progress_callback:
+        progress_callback("Grading extracted evidence with Qwen...")
     grading_started = time.monotonic()
     grading_raw, response, grading_transport, attempts = _read_response_with_one_empty_retry(
-        lambda: request_grade(client, prompt), "grading"
+        lambda: request_grade(client, prompt), "grading", progress_callback
     )
     grading_raw_path = Path(f"{debug_prefix}_grading_raw.txt")
     grading_raw_path.write_text(grading_raw, encoding="utf-8")
@@ -792,12 +853,14 @@ def grade_pdf(
         "duration_seconds": round(time.monotonic() - grading_started, 3),
         "prompt_path": str(prompt_path),
         "prompt_characters": len(prompt),
+        "max_completion_tokens": MAX_TOKENS,
         "raw_path": str(grading_raw_path),
         "raw_response": _response_debug_value(response),
         "groq_http_response": response.transport,
         "response_shape": _response_shape(response),
         "attempts": attempts,
         "transport": grading_transport,
+        "stage_1_reused": True,
         "payload_shape": {"messages": [{"role": "user", "content": "<rubric + extracted content>"}]},
     }
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")

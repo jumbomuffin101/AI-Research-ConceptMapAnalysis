@@ -563,11 +563,14 @@ def run_evaluation(
         try:
             if progress_callback:
                 progress_callback(f"Running {model_name} grading")
+            grade_kwargs = {"reference_materials": reference_materials}
+            if model_name == "Qwen 3.6 27B":
+                grade_kwargs["progress_callback"] = progress_callback
             grade = module.grade_pdf(
                 pdf_path,
                 map_file,
                 debug_prefix,
-                reference_materials=reference_materials,
+                **grade_kwargs,
             )
             raw_response = grade.get("response")
             if grade.get("diagnostic"):
