@@ -22,9 +22,12 @@ BASE_URL = "https://api.groq.com/openai/v1"
 API_KEY_ENV = "GROQ_API_KEY"
 MAX_TOKENS = 1600
 EXTRACTION_MAX_TOKENS = 900
+STAGE_TWO_MAX_TOKENS = 700
 TIMEOUT_SECONDS = 180
 IMAGE_MIME_TYPE = "image/jpeg"
 PROACTIVE_STAGE2_WAIT_SECONDS = 25
+# Calibrated against Groq's reported Qwen prompt reservation for this rubric-heavy text.
+GROQ_QWEN_ESTIMATED_CHARACTERS_PER_TOKEN = 5.4
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
         "basic_science",
@@ -226,8 +229,8 @@ def _request_with_retry(
         if rate_limit is None and not _is_retryable_transport_error(first_error):
             raise
         retry_after_seconds, retry_after_source = rate_limit if rate_limit else (None, None)
-        # Groq's Stage 2 request needs a slightly larger buffer after a TPM 429.
-        rate_limit_buffer = 3 if stage_name == "grading" else 2
+        # Keep the retry bounded while honoring Groq's requested recovery delay.
+        rate_limit_buffer = 2
         retry_delay = (
             retry_after_seconds + rate_limit_buffer
             if retry_after_seconds is not None
@@ -456,9 +459,10 @@ def build_stage_two_prompt(
         + "\nEXTRACTED STUDENT CONCEPT MAP CONTENT (the only student-map evidence)\n"
         + json.dumps(extracted_content, separators=(",", ":"))
         + "\n\nGrade only the extracted content. For each criterion, select the exact 1-4 descriptor "
-        "that best matches it; do not use hidden thresholds or averages. Domain and final Yes/No "
-        "decisions answer the rubric questions holistically. Keep each criterion explanation to one "
-        "short sentence. Do not include chain-of-thought or extended reasoning.\n"
+        "that best matches it. Domain and final Yes/No decisions answer the rubric questions "
+        "holistically. Each existing explanation field must be one concise 12-20-word sentence. "
+        "Use at most 3 concise strengths, 3 concise areas_for_improvement, and 2 grading_notes "
+        "sentences. Do not include chain-of-thought, extended reasoning, markdown, or text outside JSON.\n"
         "Return only valid JSON. Required fields: map_file, model, knowledge_acquisition, integration, "
         "application, transfer, overall_meets_expectations (Yes/No), strengths (list), "
         "areas_for_improvement (list), and grading_notes (string).\n"
@@ -481,9 +485,33 @@ def _groq_payload(
     }
 
 
-def _post_groq(client: dict[str, Any], payload: dict[str, Any]) -> GroqChatCompletion:
+def _estimate_prompt_tokens(messages: list[dict[str, Any]]) -> tuple[int, int]:
+    """Estimate text prompt tokens without counting opaque image bytes."""
+    text_parts: list[str] = []
+    for message in messages:
+        content = message.get("content", "")
+        if isinstance(content, str):
+            text_parts.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text_parts.append(str(item.get("text", "")))
+    prompt_characters = sum(len(part) for part in text_parts)
+    return prompt_characters, int(
+        (prompt_characters + GROQ_QWEN_ESTIMATED_CHARACTERS_PER_TOKEN - 1)
+        // GROQ_QWEN_ESTIMATED_CHARACTERS_PER_TOKEN
+    )
+
+
+def _post_groq(
+    client: dict[str, Any], payload: dict[str, Any], stage: str = "unknown"
+) -> GroqChatCompletion:
     endpoint = f"{BASE_URL}/chat/completions"
     started_at = time.monotonic()
+    prompt_characters, estimated_prompt_tokens = _estimate_prompt_tokens(
+        payload.get("messages", [])
+    )
+    max_completion_tokens = int(payload.get("max_completion_tokens", 0))
     response = client["requests"].post(
         endpoint,
         headers=client["headers"],
@@ -510,6 +538,22 @@ def _post_groq(client: dict[str, Any], payload: dict[str, Any]) -> GroqChatCompl
         "request_id_headers": request_headers,
         "response_headers": headers,
         "elapsed_request_seconds": round(time.monotonic() - started_at, 3),
+        "request_token_settings": {
+            "stage": stage,
+            "max_completion_tokens": max_completion_tokens,
+            "estimated_prompt_tokens": estimated_prompt_tokens,
+            "estimated_total_requested_tokens": estimated_prompt_tokens
+            + max_completion_tokens,
+            "prompt_characters": prompt_characters,
+            "image_tokens_not_estimated": any(
+                isinstance(message.get("content"), list)
+                and any(
+                    isinstance(item, dict) and item.get("type") == "image_url"
+                    for item in message["content"]
+                )
+                for message in payload.get("messages", [])
+            ),
+        },
     }
 
     if not (200 <= int(getattr(response, "status_code", 0)) < 300):
@@ -550,12 +594,20 @@ def request_extraction(client: Any, image_base64: str) -> Any:
             _vision_messages(build_extraction_prompt(), image_base64),
             max_completion_tokens=EXTRACTION_MAX_TOKENS,
         ),
+        stage="extraction",
     )
 
 
 def request_grade(client: Any, prompt: str) -> Any:
     """Stage 2: grade the Stage 1 JSON without resending the concept-map image."""
-    return _post_groq(client, _groq_payload([{"role": "user", "content": prompt}]))
+    return _post_groq(
+        client,
+        _groq_payload(
+            [{"role": "user", "content": prompt}],
+            max_completion_tokens=STAGE_TWO_MAX_TOKENS,
+        ),
+        stage="grading",
+    )
 
 
 def _response_debug_value(response: Any) -> Any:
@@ -614,7 +666,14 @@ def request_json_repair(client: Any, malformed_output: str, map_file: str) -> An
         + "\nMalformed output:\n"
         + malformed_output
     )
-    return _post_groq(client, _groq_payload([{"role": "user", "content": repair_prompt}]))
+    return _post_groq(
+        client,
+        _groq_payload(
+            [{"role": "user", "content": repair_prompt}],
+            max_completion_tokens=STAGE_TWO_MAX_TOKENS,
+        ),
+        stage="grading_repair",
+    )
 
 
 def request_extraction_repair(client: Any, malformed_output: str) -> Any:
@@ -625,7 +684,11 @@ def request_extraction_repair(client: Any, malformed_output: str) -> Any:
         + "\nMalformed output:\n"
         + malformed_output
     )
-    return _post_groq(client, _groq_payload([{"role": "user", "content": repair_prompt}]))
+    return _post_groq(
+        client,
+        _groq_payload([{"role": "user", "content": repair_prompt}]),
+        stage="extraction_repair",
+    )
 
 
 def clean_json_output(text: str) -> str:
@@ -752,6 +815,7 @@ def _read_response_with_one_empty_retry(
             }
             raise
         attempts["retry_attempt"] = _response_debug_value(retry_response)
+        attempts["retry_attempt_transport"] = getattr(retry_response, "transport", None)
         transport_debug.update(
             {
                 "empty_response_retry_attempted": True,
@@ -781,7 +845,11 @@ def request_vision_diagnostic(client: Any, image_base64: str) -> Any:
         "   - Partially readable\n"
         "   - Mostly unreadable"
     )
-    return _post_groq(client, _groq_payload(_vision_messages(diagnostic_prompt, image_base64)))
+    return _post_groq(
+        client,
+        _groq_payload(_vision_messages(diagnostic_prompt, image_base64)),
+        stage="vision_diagnostic",
+    )
 
 
 def grade_pdf(
@@ -849,7 +917,8 @@ def grade_pdf(
         "jpeg_quality": image_info["jpeg_quality"],
         "reference_materials_used": bool(reference_files),
         "reference_files": reference_files,
-        "max_tokens": MAX_TOKENS,
+        "stage_1_max_completion_tokens": EXTRACTION_MAX_TOKENS,
+        "stage_2_max_completion_tokens": STAGE_TWO_MAX_TOKENS,
         "timeout_seconds": TIMEOUT_SECONDS,
         "pipeline": "stage_1_image_extraction_then_stage_2_text_grading",
         "timing_events": timing_events,
@@ -883,6 +952,7 @@ def grade_pdf(
         "attempts": extraction_attempts,
         "transport": extraction_transport,
         "max_completion_tokens": EXTRACTION_MAX_TOKENS,
+        "token_budget": extraction_response.transport.get("request_token_settings"),
         "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}]},
     }
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
@@ -897,6 +967,7 @@ def grade_pdf(
         extraction_repair = request_extraction_repair(client, extraction_raw)
         extraction_repair_text = response_text(extraction_repair, extraction_attempts)
         extraction_attempts["repair_attempt"] = extraction_repair_text
+        extraction_attempts["repair_transport"] = extraction_repair.transport
         extraction_raw_path.write_text(
             extraction_raw + "\n\n--- repair_attempt ---\n" + extraction_repair_text,
             encoding="utf-8",
@@ -1014,7 +1085,8 @@ def grade_pdf(
         "duration_seconds": round(time.monotonic() - grading_started, 3),
         "prompt_path": str(prompt_path),
         "prompt_characters": len(prompt),
-        "max_completion_tokens": MAX_TOKENS,
+        "max_completion_tokens": STAGE_TWO_MAX_TOKENS,
+        "token_budget": response.transport.get("request_token_settings"),
         "raw_path": str(grading_raw_path),
         "raw_response": _response_debug_value(response),
         "groq_http_response": response.transport,
@@ -1036,6 +1108,7 @@ def grade_pdf(
         repair_response = request_json_repair(client, raw_text, map_file)
         repair_text = response_text(repair_response, attempts)
         attempts["repair_attempt"] = repair_text
+        attempts["repair_transport"] = repair_response.transport
         grading_raw_path.write_text(
             grading_raw + "\n\n--- repair_attempt ---\n" + repair_text,
             encoding="utf-8",
