@@ -23,6 +23,7 @@ MAX_TOKENS = 1600
 EXTRACTION_MAX_TOKENS = 900
 TIMEOUT_SECONDS = 180
 IMAGE_MIME_TYPE = "image/jpeg"
+PROACTIVE_STAGE2_WAIT_SECONDS = 15
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
         "basic_science",
@@ -884,7 +885,23 @@ def grade_pdf(
         "parsed_path": str(extraction_parsed_path),
         "repair_attempt": extraction_attempts.get("repair_attempt"),
     })
+    # Keep this validated object in memory; Stage 2 must not regenerate Stage 1 after waiting.
+    stage_2_rate_limit_control = {
+        "proactive_wait_seconds": PROACTIVE_STAGE2_WAIT_SECONDS,
+        "stage_1_completed": True,
+        "stage_1_reused": True,
+        "stage_2_first_status": None,
+        "additional_rate_limit_wait": None,
+        "stage_2_retry_status": None,
+    }
+    debug_payload["stage_2_rate_limit_control"] = stage_2_rate_limit_control
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+
+    if progress_callback:
+        progress_callback(
+            "Preparing Qwen grading. Waiting briefly for API rate limit reset..."
+        )
+    time.sleep(PROACTIVE_STAGE2_WAIT_SECONDS)
 
     prompt = build_stage_two_prompt(map_file, extracted_content, reference_materials)
     prompt_path = Path(f"{debug_prefix}_prompt.txt")
@@ -902,11 +919,36 @@ def grade_pdf(
     if progress_callback:
         progress_callback("Grading extracted evidence with Qwen...")
     grading_started = time.monotonic()
-    grading_raw, response, grading_transport, attempts = _read_response_with_one_empty_retry(
-        lambda: request_grade(client, prompt), "grading", progress_callback
-    )
+    try:
+        grading_raw, response, grading_transport, attempts = _read_response_with_one_empty_retry(
+            lambda: request_grade(client, prompt), "grading", progress_callback
+        )
+    except Exception as exc:
+        retry_metadata = getattr(exc, "attempts", {})
+        if isinstance(retry_metadata, dict):
+            stage_2_rate_limit_control.update({
+                "stage_2_first_status": retry_metadata.get("first_attempt_status")
+                or retry_metadata.get("http_status"),
+                "additional_rate_limit_wait": retry_metadata.get("waited_seconds"),
+                "stage_2_retry_status": retry_metadata.get("retry_status"),
+            })
+        debug_payload["stage_2_grading"] = {
+            "failed": True,
+            "duration_seconds": round(time.monotonic() - grading_started, 3),
+            "stage_1_reused": True,
+            "error": repr(exc),
+            "attempts": retry_metadata,
+        }
+        debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+        raise
     grading_raw_path = Path(f"{debug_prefix}_grading_raw.txt")
     grading_raw_path.write_text(grading_raw, encoding="utf-8")
+    stage_2_rate_limit_control.update({
+        "stage_2_first_status": grading_transport.get("first_attempt_status")
+        or grading_transport.get("http_status"),
+        "additional_rate_limit_wait": grading_transport.get("waited_seconds"),
+        "stage_2_retry_status": grading_transport.get("retry_status"),
+    })
     debug_payload["stage_2_grading"] = {
         "duration_seconds": round(time.monotonic() - grading_started, 3),
         "prompt_path": str(prompt_path),
