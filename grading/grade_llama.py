@@ -8,6 +8,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,7 @@ MAX_TOKENS = 1600
 EXTRACTION_MAX_TOKENS = 900
 TIMEOUT_SECONDS = 180
 IMAGE_MIME_TYPE = "image/jpeg"
-PROACTIVE_STAGE2_WAIT_SECONDS = 15
+PROACTIVE_STAGE2_WAIT_SECONDS = 25
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
         "basic_science",
@@ -146,6 +147,18 @@ def _is_retryable_transport_error(error: Exception) -> bool:
     return (isinstance(status_code, int) and 500 <= status_code <= 599) or "timeout" in error.__class__.__name__.lower()
 
 
+def _utc_debug_event(started_at: float) -> tuple[dict[str, Any], float]:
+    """Capture a UTC event and its elapsed runtime for the Qwen debug trace."""
+    event_monotonic = time.monotonic()
+    return (
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "elapsed_seconds": round(event_monotonic - started_at, 3),
+        },
+        event_monotonic,
+    )
+
+
 def _groq_rate_limit_details(error: Exception) -> tuple[float, str] | None:
     """Return Groq's rate-limit delay and its source for a 429 response."""
     if getattr(error, "status_code", None) != 429:
@@ -213,7 +226,13 @@ def _request_with_retry(
         if rate_limit is None and not _is_retryable_transport_error(first_error):
             raise
         retry_after_seconds, retry_after_source = rate_limit if rate_limit else (None, None)
-        retry_delay = retry_after_seconds + 2 if retry_after_seconds is not None else 5
+        # Groq's Stage 2 request needs a slightly larger buffer after a TPM 429.
+        rate_limit_buffer = 3 if stage_name == "grading" else 2
+        retry_delay = (
+            retry_after_seconds + rate_limit_buffer
+            if retry_after_seconds is not None
+            else 5
+        )
         if retry_after_seconds is not None and progress_callback:
             progress_callback(
                 f"Qwen rate limit reached. Waiting {round(retry_delay)} seconds before retrying..."
@@ -772,6 +791,8 @@ def grade_pdf(
     reference_materials: list[dict[str, str]] | None = None,
     progress_callback: Any | None = None,
 ) -> dict[str, Any]:
+    run_started_at = time.monotonic()
+    timing_events: dict[str, dict[str, Any]] = {}
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_info = render_pdf_first_page(pdf_path, image_path)
     image_base64 = str(image_info["base64"])
@@ -831,6 +852,7 @@ def grade_pdf(
         "max_tokens": MAX_TOKENS,
         "timeout_seconds": TIMEOUT_SECONDS,
         "pipeline": "stage_1_image_extraction_then_stage_2_text_grading",
+        "timing_events": timing_events,
     }
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
@@ -838,11 +860,18 @@ def grade_pdf(
     if progress_callback:
         progress_callback("Extracting Qwen evidence...")
     extraction_started = time.monotonic()
+    timing_events["stage_1_request_started"], _ = _utc_debug_event(run_started_at)
+    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
     extraction_raw, extraction_response, extraction_transport, extraction_attempts = (
         _read_response_with_one_empty_retry(
             lambda: request_extraction(client, image_base64), "extraction", progress_callback
         )
     )
+    (
+        timing_events["stage_1_response_received"],
+        stage_1_response_monotonic,
+    ) = _utc_debug_event(run_started_at)
+    debug_payload["stage_1_response_time"] = timing_events["stage_1_response_received"]["timestamp"]
     extraction_raw_path = Path(f"{debug_prefix}_extraction_raw.txt")
     extraction_raw_path.write_text(extraction_raw, encoding="utf-8")
     debug_payload["stage_1_extraction"] = {
@@ -895,13 +924,24 @@ def grade_pdf(
         "stage_2_retry_status": None,
     }
     debug_payload["stage_2_rate_limit_control"] = stage_2_rate_limit_control
+    timing_events["cooldown_started"], _ = _utc_debug_event(run_started_at)
+    debug_payload["cooldown_started"] = timing_events["cooldown_started"]["timestamp"]
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
     if progress_callback:
         progress_callback(
-            "Preparing Qwen grading. Waiting briefly for API rate limit reset..."
+            "Qwen extraction completed. Waiting 25 seconds before rubric grading to stay within Groq's token limit..."
         )
-    time.sleep(PROACTIVE_STAGE2_WAIT_SECONDS)
+    # The minimum is measured from the completed Stage 1 response, not from an
+    # earlier progress event. This loop also handles an unusually early wake-up.
+    while True:
+        elapsed_since_stage_1_response = time.monotonic() - stage_1_response_monotonic
+        remaining_cooldown = PROACTIVE_STAGE2_WAIT_SECONDS - elapsed_since_stage_1_response
+        if remaining_cooldown <= 0:
+            break
+        time.sleep(remaining_cooldown)
+    timing_events["cooldown_finished"], _ = _utc_debug_event(run_started_at)
+    debug_payload["cooldown_finished"] = timing_events["cooldown_finished"]["timestamp"]
 
     prompt = build_stage_two_prompt(map_file, extracted_content, reference_materials)
     prompt_path = Path(f"{debug_prefix}_prompt.txt")
@@ -919,11 +959,31 @@ def grade_pdf(
     if progress_callback:
         progress_callback("Grading extracted evidence with Qwen...")
     grading_started = time.monotonic()
+    timing_events["stage_2_request_started"], stage_2_request_monotonic = _utc_debug_event(
+        run_started_at
+    )
+    actual_cooldown_seconds = stage_2_request_monotonic - stage_1_response_monotonic
+    # Keep the invariant explicit in the debug trace and block any premature call.
+    if actual_cooldown_seconds < PROACTIVE_STAGE2_WAIT_SECONDS:
+        time.sleep(PROACTIVE_STAGE2_WAIT_SECONDS - actual_cooldown_seconds)
+        timing_events["stage_2_request_started"], stage_2_request_monotonic = _utc_debug_event(
+            run_started_at
+        )
+        actual_cooldown_seconds = stage_2_request_monotonic - stage_1_response_monotonic
+    stage_2_rate_limit_control["actual_cooldown_seconds"] = round(
+        actual_cooldown_seconds, 3
+    )
+    debug_payload["stage_2_request_time"] = timing_events["stage_2_request_started"]["timestamp"]
+    debug_payload["actual_cooldown_seconds"] = stage_2_rate_limit_control[
+        "actual_cooldown_seconds"
+    ]
+    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
     try:
         grading_raw, response, grading_transport, attempts = _read_response_with_one_empty_retry(
             lambda: request_grade(client, prompt), "grading", progress_callback
         )
     except Exception as exc:
+        timing_events["stage_2_response_received"], _ = _utc_debug_event(run_started_at)
         retry_metadata = getattr(exc, "attempts", {})
         if isinstance(retry_metadata, dict):
             stage_2_rate_limit_control.update({
@@ -941,6 +1001,7 @@ def grade_pdf(
         }
         debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
         raise
+    timing_events["stage_2_response_received"], _ = _utc_debug_event(run_started_at)
     grading_raw_path = Path(f"{debug_prefix}_grading_raw.txt")
     grading_raw_path.write_text(grading_raw, encoding="utf-8")
     stage_2_rate_limit_control.update({
