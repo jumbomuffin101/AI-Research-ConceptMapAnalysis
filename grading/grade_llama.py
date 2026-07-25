@@ -20,12 +20,9 @@ MODEL = "qwen/qwen3.6-27b"
 PROVIDER = "Groq"
 BASE_URL = "https://api.groq.com/openai/v1"
 API_KEY_ENV = "GROQ_API_KEY"
-MAX_TOKENS = 1600
-EXTRACTION_MAX_TOKENS = 900
-STAGE_TWO_MAX_TOKENS = 700
+MAX_TOKENS = 1200
 TIMEOUT_SECONDS = 180
 IMAGE_MIME_TYPE = "image/jpeg"
-PROACTIVE_STAGE2_WAIT_SECONDS = 25
 # Calibrated against Groq's reported Qwen prompt reservation for this rubric-heavy text.
 GROQ_QWEN_ESTIMATED_CHARACTERS_PER_TOKEN = 5.4
 CATEGORY_FIELDS = {
@@ -226,7 +223,7 @@ def _request_with_retry(
         return response, {"attempt_number": 1, "http_status": getattr(getattr(response, "http_response", None), "status_code", 200), "request_duration_seconds": round(time.monotonic() - started_at, 3), "retry_attempted": False}
     except Exception as first_error:
         rate_limit = _groq_rate_limit_details(first_error)
-        if rate_limit is None and not _is_retryable_transport_error(first_error):
+        if rate_limit is None:
             raise
         retry_after_seconds, retry_after_source = rate_limit if rate_limit else (None, None)
         # Keep the retry bounded while honoring Groq's requested recovery delay.
@@ -342,7 +339,29 @@ def schema(map_file: str) -> dict[str, Any]:
 def build_prompt(
     map_file: str, reference_materials: list[dict[str, str]] | None = None
 ) -> str:
-    return build_stage_two_prompt(map_file, {}, reference_materials)
+    reference_context = _compress_reference_materials(reference_materials)
+    reference_section = (
+        "\nREFERENCE SUMMARY (comparison standard only; not student-map evidence)\n"
+        + reference_context
+        + "\n"
+        if reference_context
+        else ""
+    )
+    return (
+        "You are grading a medical student concept map using the Spring 2025 Concept Map Feedback "
+        "Tool for SUMMATIVE Activities. Inspect all visible text, nodes, arrows, and relationships in "
+        "the submitted concept-map image. Generate every score directly from that image.\n\n"
+        + SPRING_2025_RUBRIC
+        + reference_section
+        + "\nEvaluate only content visible in the student map. References, when provided, are comparison "
+        "standards only and are not student-map evidence. For every criterion, choose the exact 1-4 "
+        "rubric descriptor that best matches the visible map. Answer domain and final questions with "
+        "Yes or No only.\n"
+        "Return only valid JSON matching the required schema. Each existing explanation field is one "
+        "concise sentence; strengths and areas_for_improvement contain at most 3 concise items each; "
+        "grading_notes is at most 2 sentences. Do not include chain-of-thought, markdown, or outside text.\n"
+        + _output_contract()
+    )
 
 
 EXTRACTION_FIELDS = (
@@ -443,31 +462,8 @@ def build_stage_two_prompt(
     extracted_content: dict[str, Any],
     reference_materials: list[dict[str, str]] | None,
 ) -> str:
-    reference_context = _compress_reference_materials(reference_materials)
-    reference_section = (
-        "\nREFERENCE SUMMARY (comparison standard only; not student-map evidence)\n"
-        + reference_context
-        + "\n"
-        if reference_context
-        else ""
-    )
-    return (
-        "You are grading a medical student concept map using the Spring 2025 Concept Map Feedback "
-        "Tool for SUMMATIVE Activities. Use this exact rubric as the sole scoring authority.\n\n"
-        + SPRING_2025_RUBRIC
-        + reference_section
-        + "\nEXTRACTED STUDENT CONCEPT MAP CONTENT (the only student-map evidence)\n"
-        + json.dumps(extracted_content, separators=(",", ":"))
-        + "\n\nGrade only the extracted content. For each criterion, select the exact 1-4 descriptor "
-        "that best matches it. Domain and final Yes/No decisions answer the rubric questions "
-        "holistically. Each existing explanation field must be one concise 12-20-word sentence. "
-        "Use at most 3 concise strengths, 3 concise areas_for_improvement, and 2 grading_notes "
-        "sentences. Do not include chain-of-thought, extended reasoning, markdown, or text outside JSON.\n"
-        "Return only valid JSON. Required fields: map_file, model, knowledge_acquisition, integration, "
-        "application, transfer, overall_meets_expectations (Yes/No), strengths (list), "
-        "areas_for_improvement (list), and grading_notes (string).\n"
-        + _output_contract()
-    )
+    """Compatibility wrapper; production uses build_prompt() directly."""
+    return build_prompt(map_file, reference_materials)
 
 
 def _groq_payload(
@@ -598,15 +594,15 @@ def request_extraction(client: Any, image_base64: str) -> Any:
     )
 
 
-def request_grade(client: Any, prompt: str) -> Any:
-    """Stage 2: grade the Stage 1 JSON without resending the concept-map image."""
+def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
+    """Single-pass multimodal Qwen grading request."""
     return _post_groq(
         client,
         _groq_payload(
-            [{"role": "user", "content": prompt}],
-            max_completion_tokens=STAGE_TWO_MAX_TOKENS,
+            _vision_messages(prompt, image_base64),
+            max_completion_tokens=MAX_TOKENS,
         ),
-        stage="grading",
+        stage="single_pass_grading",
     )
 
 
@@ -666,14 +662,7 @@ def request_json_repair(client: Any, malformed_output: str, map_file: str) -> An
         + "\nMalformed output:\n"
         + malformed_output
     )
-    return _post_groq(
-        client,
-        _groq_payload(
-            [{"role": "user", "content": repair_prompt}],
-            max_completion_tokens=STAGE_TWO_MAX_TOKENS,
-        ),
-        stage="grading_repair",
-    )
+    return _post_groq(client, _groq_payload([{"role": "user", "content": repair_prompt}]))
 
 
 def request_extraction_repair(client: Any, malformed_output: str) -> Any:
@@ -852,7 +841,7 @@ def request_vision_diagnostic(client: Any, image_base64: str) -> Any:
     )
 
 
-def grade_pdf(
+def _legacy_two_stage_grade_pdf(
     pdf_path: Path,
     map_file: str,
     debug_prefix: Path,
@@ -1172,5 +1161,188 @@ def grade_pdf(
             **debug_payload,
             "debug_path": str(debug_path),
             "raw_path": str(grading_raw_path),
+        },
+    }
+
+
+def grade_pdf(
+    pdf_path: Path,
+    map_file: str,
+    debug_prefix: Path,
+    reference_materials: list[dict[str, str]] | None = None,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    """Grade a concept map in one Qwen multimodal request.
+
+    This is the production Qwen entry point. It intentionally does not call the
+    legacy extraction helpers or send a second rubric-grading request.
+    """
+    started_at = time.monotonic()
+    image_path = Path(f"{debug_prefix}_request.jpg")
+    image_info = render_pdf_first_page(pdf_path, image_path)
+    image_base64 = str(image_info["base64"])
+    actual_input_path = image_path.parent / "qwen36_actual_input.jpg"
+    actual_input_path.write_bytes(image_path.read_bytes())
+
+    reference_files = [item["filename"] for item in reference_materials or []]
+    prompt = build_prompt(map_file, reference_materials)
+    prompt_path = Path(f"{debug_prefix}_prompt.txt")
+    if reference_files:
+        prompt_path.write_text(
+            "Reference text omitted from debug output. Files used: "
+            + ", ".join(reference_files)
+            + "\n\n"
+            + build_prompt(map_file, None),
+            encoding="utf-8",
+        )
+    else:
+        prompt_path.write_text(prompt, encoding="utf-8")
+
+    debug_path = Path(f"{debug_prefix}_debug.json")
+    debug_payload: dict[str, Any] = {
+        "provider": PROVIDER.lower(),
+        "base_url": BASE_URL,
+        "model": MODEL,
+        "pipeline": "single_pass_multimodal",
+        "qwen_request_count": 1,
+        "actual_qwen_request_count": 1,
+        "image_path": str(image_path),
+        "actual_input_path": str(actual_input_path),
+        "image_mime_type": IMAGE_MIME_TYPE,
+        "image_width": image_info["width"],
+        "image_height": image_info["height"],
+        "image_bytes": image_info["bytes"],
+        "render_matrix": image_info["render_matrix"],
+        "max_width_px": image_info["max_width_px"],
+        "jpeg_quality": image_info["jpeg_quality"],
+        "reference_materials_used": bool(reference_files),
+        "reference_files": reference_files,
+        "prompt_path": str(prompt_path),
+        "prompt_character_count": len(prompt),
+        "max_completion_tokens": MAX_TOKENS,
+        "response_status": None,
+        "retry_attempted": False,
+    }
+    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+
+    if progress_callback:
+        progress_callback("Grading concept map with Qwen...")
+    client = create_client()
+    try:
+        response, transport_debug = _request_with_retry(
+            lambda: request_grade(client, prompt, image_base64),
+            stage_name="single_pass_grading",
+            progress_callback=progress_callback,
+        )
+        attempts: dict[str, Any] = {"first_attempt": _response_debug_value(response)}
+        raw_text = response_text(response, attempts)
+    except Exception as exc:
+        retry_metadata = getattr(exc, "attempts", {})
+        if isinstance(retry_metadata, dict):
+            debug_payload.update(
+                {
+                    "response_status": retry_metadata.get("http_status"),
+                    "retry_attempted": bool(retry_metadata.get("retry_attempted")),
+                    "actual_qwen_request_count": 1
+                    + int(bool(retry_metadata.get("retry_attempted"))),
+                    "transport": retry_metadata,
+                }
+            )
+        debug_payload["duration_seconds"] = round(time.monotonic() - started_at, 3)
+        debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+        raise
+
+    raw_path = Path(f"{debug_prefix}_grading_raw.txt")
+    raw_path.write_text(raw_text, encoding="utf-8")
+    debug_payload.update(
+        {
+            "response_status": response.transport.get("http_status"),
+            "retry_attempted": bool(transport_debug.get("retry_attempted")),
+            "actual_qwen_request_count": 1
+            + int(bool(transport_debug.get("retry_attempted"))),
+            "single_pass_request_count_check": {
+                "normal_evaluation_request_count": 1,
+                "passes": not bool(transport_debug.get("retry_attempted")),
+            },
+            "response_time_seconds": round(time.monotonic() - started_at, 3),
+            "raw_path": str(raw_path),
+            "raw_response": _response_debug_value(response),
+            "response_shape": _response_shape(response),
+            "transport": transport_debug,
+            "groq_http_response": response.transport,
+            "token_budget": response.transport.get("request_token_settings"),
+            "payload_shape": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text"},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/jpeg;base64,<image-bytes>"
+                                },
+                            },
+                        ],
+                    }
+                ]
+            },
+        }
+    )
+
+    try:
+        cleaned_text, parsed_grading = _parse_json_object(
+            raw_text,
+            "Qwen 3.6 27B returned malformed grading JSON.",
+            attempts,
+        )
+    except RuntimeError as exc:
+        debug_payload["json_error"] = str(exc)
+        debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+        raise MalformedLlamaVisionJsonError(attempts) from exc
+
+    parsed_path = Path(f"{debug_prefix}_grading_parsed.json")
+    parsed_path.write_text(json.dumps(parsed_grading, indent=2), encoding="utf-8")
+
+    def _parsed_section(group: str) -> dict[str, Any]:
+        section = parsed_grading.get(group)
+        return section if isinstance(section, dict) else {}
+
+    pre_normalization_scores = {
+        group: {
+            field: _parsed_section(group).get(field, {}).get("score")
+            if isinstance(_parsed_section(group).get(field), dict)
+            else None
+            for field in fields
+        }
+        for group, fields in CATEGORY_FIELDS.items()
+    }
+    score_normalizations = _normalize_qwen_scores(parsed_grading)
+    # The runner performs full schema validation; this only serializes valid score forms.
+    cleaned_text = json.dumps(parsed_grading, separators=(",", ":"))
+    debug_payload.update(
+        {
+            "parsed_path": str(parsed_path),
+            "pre_normalization_criterion_scores": pre_normalization_scores,
+            "score_normalizations": score_normalizations,
+            "duration_seconds": round(time.monotonic() - started_at, 3),
+        }
+    )
+    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+
+    return {
+        "model": MODEL,
+        "provider": PROVIDER,
+        "raw_text": raw_text,
+        "cleaned_text": cleaned_text,
+        "response": response,
+        "prompt": prompt,
+        "prompt_path": prompt_path,
+        "image_path": image_path,
+        "raw_path": raw_path,
+        "debug": {
+            **debug_payload,
+            "debug_path": str(debug_path),
+            "raw_path": str(raw_path),
         },
     }

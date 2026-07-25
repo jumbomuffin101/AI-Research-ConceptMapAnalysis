@@ -24,7 +24,7 @@ from scripts.generate_evaluation_report import generate_report
 st.set_page_config(page_title="AI Concept Map Grading Demo", layout="wide")
 
 st.title("AI Concept Map Grading Demo")
-st.caption("Build: qwen-stage2-token700-cooldown25s")
+st.caption("Build: qwen-singlepass-multimodal-1200")
 st.write(
     "Upload a medical concept map PDF and generate evidence-grounded "
     "rubric-based evaluations using multimodal AI models."
