@@ -120,6 +120,50 @@ class QwenSinglePassTests(unittest.TestCase):
             content[1]["image_url"]["url"], "data:image/jpeg;base64,encoded-image"
         )
 
+    def test_response_extractor_supports_content_blocks(self) -> None:
+        response = grade_llama.GroqChatCompletion(
+            data={
+                "id": "response-id",
+                "model": grade_llama.MODEL,
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": "first"},
+                                {"type": "output_text", "text": "second"},
+                            ]
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+            http_response=_HttpResponse(),
+            transport={},
+        )
+        attempts: dict = {}
+        self.assertEqual(grade_llama.response_text(response, attempts), "first\nsecond")
+        self.assertEqual(attempts["qwen_response_diagnostics"]["completion_tokens"], 2)
+
+    def test_reasoning_without_complete_schema_is_not_used_as_a_grade(self) -> None:
+        response = grade_llama.GroqChatCompletion(
+            data={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": None, "reasoning": "I can see the map."},
+                    }
+                ]
+            },
+            http_response=_HttpResponse(),
+            transport={},
+        )
+        with self.assertRaisesRegex(
+            grade_llama.EmptyLlamaVisionResponseError,
+            "reasoning text but no complete grading JSON",
+        ):
+            grade_llama.response_text(response, {})
+
     def test_missing_or_invalid_scores_are_not_defaulted(self) -> None:
         missing_score = _valid_grading_payload()
         del missing_score["knowledge_acquisition"]["basic_science"]["score"]

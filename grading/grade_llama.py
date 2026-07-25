@@ -21,6 +21,8 @@ PROVIDER = "Groq"
 BASE_URL = "https://api.groq.com/openai/v1"
 API_KEY_ENV = "GROQ_API_KEY"
 MAX_TOKENS = 1200
+LENGTH_RETRY_MAX_TOKENS = 1800
+GROQ_TPM_LIMIT = 8000
 TIMEOUT_SECONDS = 180
 IMAGE_MIME_TYPE = "image/jpeg"
 # Calibrated against Groq's reported Qwen prompt reservation for this rubric-heavy text.
@@ -95,6 +97,10 @@ class GroqChatCompletion:
 
     def model_dump(self, **_: Any) -> dict[str, Any]:
         return self.data
+
+    def model_dump_json(self, **_: Any) -> str:
+        """Allow the runner's failure writer to retain the complete Groq payload."""
+        return json.dumps(self.data)
 
 
 def _secret(name: str) -> str | None:
@@ -594,13 +600,18 @@ def request_extraction(client: Any, image_base64: str) -> Any:
     )
 
 
-def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
+def request_grade(
+    client: Any,
+    prompt: str,
+    image_base64: str,
+    max_completion_tokens: int = MAX_TOKENS,
+) -> Any:
     """Single-pass multimodal Qwen grading request."""
     return _post_groq(
         client,
         _groq_payload(
             _vision_messages(prompt, image_base64),
-            max_completion_tokens=MAX_TOKENS,
+            max_completion_tokens=max_completion_tokens,
         ),
         stage="single_pass_grading",
     )
@@ -633,6 +644,74 @@ def _response_shape(response: Any) -> dict[str, Any]:
     }
 
 
+def _message_field(message: Any, field: str) -> Any:
+    return message.get(field) if isinstance(message, dict) else getattr(message, field, None)
+
+
+def _content_block_text(value: Any) -> str:
+    if not isinstance(value, list):
+        return ""
+    parts: list[str] = []
+    for block in value:
+        if not isinstance(block, dict) or block.get("type") not in {"text", "output_text"}:
+            continue
+        text = block.get("text") or block.get("content")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return "\n".join(parts)
+
+
+def _complete_grading_json_from_text(text: str) -> str | None:
+    """Return a complete grading object only; never treat arbitrary reasoning as a grade."""
+    candidate = clean_json_output(text)
+    try:
+        result = json.loads(candidate)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(result, dict):
+        return None
+    required = {"knowledge_acquisition", "integration", "application", "transfer", "overall_meets_expectations", "strengths", "areas_for_improvement", "grading_notes"}
+    if not required.issubset(result):
+        return None
+    for group, fields in CATEGORY_FIELDS.items():
+        section = result.get(group)
+        if not isinstance(section, dict) or "overall_decision" not in section:
+            return None
+        for field in fields:
+            item = section.get(field)
+            if not isinstance(item, dict) or "score" not in item or "explanation" not in item:
+                return None
+    return candidate
+
+
+def _qwen_response_diagnostics(response: Any) -> dict[str, Any]:
+    """Expose all Groq response fields that can explain an empty final content value."""
+    response_data = _response_debug_value(response)
+    choices = getattr(response, "choices", None) or []
+    first = choices[0] if choices else None
+    message = first.get("message", {}) if isinstance(first, dict) else getattr(first, "message", None)
+    usage = response_data.get("usage") if isinstance(response_data, dict) else None
+    finish_reason = first.get("finish_reason") if isinstance(first, dict) else getattr(first, "finish_reason", None)
+    return {
+        "complete_sanitized_response": response_data,
+        "response_id": response_data.get("id") if isinstance(response_data, dict) else None,
+        "response_model": response_data.get("model") if isinstance(response_data, dict) else None,
+        "choices": choices,
+        "finish_reason": finish_reason,
+        "message_content": _message_field(message, "content"),
+        "message_reasoning": _message_field(message, "reasoning"),
+        "message_reasoning_content": _message_field(message, "reasoning_content"),
+        "choice_text": first.get("text") if isinstance(first, dict) else getattr(first, "text", None),
+        "response_output_text": getattr(response, "output_text", None),
+        "tool_calls": _message_field(message, "tool_calls"),
+        "usage": usage,
+        "prompt_tokens": usage.get("prompt_tokens") if isinstance(usage, dict) else None,
+        "completion_tokens": usage.get("completion_tokens") if isinstance(usage, dict) else None,
+        "total_tokens": usage.get("total_tokens") if isinstance(usage, dict) else None,
+        "http_status": getattr(getattr(response, "http_response", None), "status_code", None),
+    }
+
+
 def response_text(response: Any, attempts: dict[str, Any]) -> str:
     if response is None:
         raise EmptyLlamaVisionResponseError("Qwen 3.6 27B returned no response.", response, attempts)
@@ -641,16 +720,60 @@ def response_text(response: Any, attempts: dict[str, Any]) -> str:
         raise EmptyLlamaVisionResponseError("Qwen 3.6 27B returned no response choices.", response, attempts)
     first = choices[0]
     message = first.get("message", {}) if isinstance(first, dict) else getattr(first, "message", None)
-    candidates = [
-        message.get("content") if isinstance(message, dict) else getattr(message, "content", None),
-        first.get("text") if isinstance(first, dict) else getattr(first, "text", None),
-        message.get("reasoning_content") if isinstance(message, dict) else getattr(message, "reasoning_content", None),
-        getattr(response, "output_text", None),
+    diagnostics = _qwen_response_diagnostics(response)
+    attempts["qwen_response_diagnostics"] = diagnostics
+
+    content = _message_field(message, "content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+
+    reasoning_candidates = [
+        _message_field(message, "reasoning"),
+        _message_field(message, "reasoning_content"),
     ]
-    text = next((value for value in candidates if isinstance(value, str) and value.strip()), None)
-    if text is None:
-        raise EmptyLlamaVisionResponseError("Qwen 3.6 27B returned empty content.", response, attempts)
-    return text
+    reasoning_text = next(
+        (value.strip() for value in reasoning_candidates if isinstance(value, str) and value.strip()),
+        "",
+    )
+    if reasoning_text:
+        grading_json = _complete_grading_json_from_text(reasoning_text)
+        if grading_json:
+            attempts["grading_json_recovered_from_reasoning"] = True
+            return grading_json
+
+    choice_text = first.get("text") if isinstance(first, dict) else getattr(first, "text", None)
+    output_text = getattr(response, "output_text", None)
+    for text in [choice_text, output_text]:
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+    block_text = _content_block_text(content)
+    if block_text:
+        return block_text
+
+    if reasoning_text:
+        finish_reason = diagnostics.get("finish_reason")
+        raise EmptyLlamaVisionResponseError(
+            "Qwen returned reasoning text but no complete grading JSON "
+            f"(finish_reason={finish_reason!r}, completion_tokens={diagnostics.get('completion_tokens')!r}).",
+            response,
+            attempts,
+        )
+
+    finish_reason = diagnostics.get("finish_reason")
+    completion_tokens = diagnostics.get("completion_tokens")
+    if finish_reason == "length":
+        detail = "Qwen exhausted its completion budget before returning final grading content."
+    elif finish_reason == "content_filter":
+        detail = "Groq filtered the Qwen result before final grading content was returned."
+    else:
+        detail = "Qwen returned no usable final content."
+    raise EmptyLlamaVisionResponseError(
+        f"{detail} finish_reason={finish_reason!r}, completion_tokens={completion_tokens!r}, "
+        "reasoning_returned=False.",
+        response,
+        attempts,
+    )
 
 
 def request_json_repair(client: Any, malformed_output: str, map_file: str) -> Any:
@@ -838,6 +961,56 @@ def request_vision_diagnostic(client: Any, image_base64: str) -> Any:
         client,
         _groq_payload(_vision_messages(diagnostic_prompt, image_base64)),
         stage="vision_diagnostic",
+    )
+
+
+def _qwen_multimodal_diagnostic_enabled() -> bool:
+    return os.getenv("QWEN36_MULTIMODAL_DIAGNOSTIC", "").strip() == "1"
+
+
+def request_multimodal_diagnostic(client: Any, image_base64: str) -> Any:
+    """Use the production image payload without the rubric to isolate vision transport issues."""
+    prompt = (
+        'Return only this JSON object after inspecting the image:\n'
+        '{"image_received":true,"visible_text_sample":"<five visible words>"}'
+    )
+    return _post_groq(
+        client,
+        _groq_payload(_vision_messages(prompt, image_base64), max_completion_tokens=120),
+        stage="multimodal_diagnostic",
+    )
+
+
+def _length_retry_is_safe(response: GroqChatCompletion) -> tuple[bool, dict[str, Any]]:
+    diagnostics = _qwen_response_diagnostics(response)
+    prompt_tokens = diagnostics.get("prompt_tokens")
+    completion_tokens = diagnostics.get("completion_tokens")
+    finish_reason = diagnostics.get("finish_reason")
+    analysis = {
+        "finish_reason": finish_reason,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "max_completion_tokens": MAX_TOKENS,
+        "retry_max_completion_tokens": LENGTH_RETRY_MAX_TOKENS,
+        "estimated_total_with_retry": (
+            prompt_tokens + LENGTH_RETRY_MAX_TOKENS
+            if isinstance(prompt_tokens, int)
+            else None
+        ),
+    }
+    analysis["near_completion_limit"] = (
+        isinstance(completion_tokens, int)
+        and completion_tokens >= int(MAX_TOKENS * 0.9)
+    )
+    analysis["retry_below_tpm_limit"] = (
+        isinstance(analysis["estimated_total_with_retry"], int)
+        and analysis["estimated_total_with_retry"] < GROQ_TPM_LIMIT
+    )
+    return (
+        finish_reason == "length"
+        and bool(analysis["near_completion_limit"])
+        and bool(analysis["retry_below_tpm_limit"]),
+        analysis,
     )
 
 
@@ -1184,6 +1357,60 @@ def grade_pdf(
     actual_input_path = image_path.parent / "qwen36_actual_input.jpg"
     actual_input_path.write_bytes(image_path.read_bytes())
 
+    if _qwen_multimodal_diagnostic_enabled():
+        client = create_client()
+        diagnostic_path = Path(f"{debug_prefix}_multimodal_diagnostic.json")
+        diagnostic_debug: dict[str, Any] = {
+            "provider": PROVIDER.lower(),
+            "model": MODEL,
+            "pipeline": "multimodal_diagnostic",
+            "image_mime_type": IMAGE_MIME_TYPE,
+            "image_format": "JPEG",
+            "image_width": image_info["width"],
+            "image_height": image_info["height"],
+            "image_bytes": image_info["bytes"],
+            "image_base64_characters": len(image_base64),
+            "image_count": 1,
+            "image_content_block_included": True,
+        }
+        try:
+            response, transport_debug = _request_with_retry(
+                lambda: request_multimodal_diagnostic(client, image_base64),
+                stage_name="multimodal_diagnostic",
+                progress_callback=progress_callback,
+            )
+            diagnostic_debug.update(
+                {
+                    "complete_response": _qwen_response_diagnostics(response),
+                    "response_status": response.transport.get("http_status"),
+                    "retry_attempted": bool(transport_debug.get("retry_attempted")),
+                    "transport": transport_debug,
+                    "groq_http_response": response.transport,
+                }
+            )
+            raw_text = response_text(response, diagnostic_debug)
+        except Exception as exc:
+            diagnostic_debug.update(
+                {
+                    "error": str(exc),
+                    "response": _qwen_response_diagnostics(exc.raw_response)
+                    if isinstance(getattr(exc, "raw_response", None), GroqChatCompletion)
+                    else getattr(exc, "raw_response", None),
+                    "attempts": getattr(exc, "attempts", None),
+                }
+            )
+            diagnostic_path.write_text(json.dumps(diagnostic_debug, indent=2), encoding="utf-8")
+            raise
+        diagnostic_path.write_text(json.dumps(diagnostic_debug, indent=2), encoding="utf-8")
+        return {
+            "model": MODEL,
+            "provider": PROVIDER,
+            "raw_text": raw_text,
+            "response": response,
+            "diagnostic": True,
+            "debug": {**diagnostic_debug, "diagnostic_path": str(diagnostic_path)},
+        }
+
     reference_files = [item["filename"] for item in reference_materials or []]
     prompt = build_prompt(map_file, reference_materials)
     prompt_path = Path(f"{debug_prefix}_prompt.txt")
@@ -1209,9 +1436,13 @@ def grade_pdf(
         "image_path": str(image_path),
         "actual_input_path": str(actual_input_path),
         "image_mime_type": IMAGE_MIME_TYPE,
+        "image_format": "JPEG",
         "image_width": image_info["width"],
         "image_height": image_info["height"],
         "image_bytes": image_info["bytes"],
+        "image_base64_characters": len(image_base64),
+        "image_count": 1,
+        "image_content_block_included": True,
         "render_matrix": image_info["render_matrix"],
         "max_width_px": image_info["max_width_px"],
         "jpeg_quality": image_info["jpeg_quality"],
@@ -1234,10 +1465,39 @@ def grade_pdf(
             stage_name="single_pass_grading",
             progress_callback=progress_callback,
         )
+        should_retry_for_length, length_retry_analysis = _length_retry_is_safe(response)
+        if should_retry_for_length:
+            first_length_response = _qwen_response_diagnostics(response)
+            if progress_callback:
+                progress_callback(
+                    "Qwen exhausted its completion budget. Retrying once with a larger safe limit..."
+                )
+            response, transport_debug = _request_with_retry(
+                lambda: request_grade(
+                    client,
+                    prompt,
+                    image_base64,
+                    max_completion_tokens=LENGTH_RETRY_MAX_TOKENS,
+                ),
+                stage_name="single_pass_length_retry",
+                progress_callback=progress_callback,
+            )
+            transport_debug = {
+                **transport_debug,
+                "length_retry_attempted": True,
+                "length_retry_analysis": length_retry_analysis,
+                "length_retry_first_response": first_length_response,
+            }
         attempts: dict[str, Any] = {"first_attempt": _response_debug_value(response)}
         raw_text = response_text(response, attempts)
     except Exception as exc:
         retry_metadata = getattr(exc, "attempts", {})
+        failed_response = getattr(exc, "raw_response", None)
+        response_diagnostics = (
+            _qwen_response_diagnostics(failed_response)
+            if isinstance(failed_response, GroqChatCompletion)
+            else None
+        )
         if isinstance(retry_metadata, dict):
             debug_payload.update(
                 {
@@ -1248,6 +1508,22 @@ def grade_pdf(
                     "transport": retry_metadata,
                 }
             )
+        if response_diagnostics:
+            debug_payload.update(
+                {
+                    "complete_response": response_diagnostics,
+                    "response_status": response_diagnostics.get("http_status"),
+                    "finish_reason": response_diagnostics.get("finish_reason"),
+                    "prompt_tokens": response_diagnostics.get("prompt_tokens"),
+                    "completion_tokens": response_diagnostics.get("completion_tokens"),
+                    "total_tokens": response_diagnostics.get("total_tokens"),
+                }
+            )
+        if isinstance(exc, EmptyLlamaVisionResponseError):
+            message = (
+                f"{exc} image_block_sent=True. Raw response saved to {debug_path}."
+            )
+            exc.args = (message,)
         debug_payload["duration_seconds"] = round(time.monotonic() - started_at, 3)
         debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
         raise
@@ -1259,7 +1535,8 @@ def grade_pdf(
             "response_status": response.transport.get("http_status"),
             "retry_attempted": bool(transport_debug.get("retry_attempted")),
             "actual_qwen_request_count": 1
-            + int(bool(transport_debug.get("retry_attempted"))),
+            + int(bool(transport_debug.get("retry_attempted")))
+            + int(bool(transport_debug.get("length_retry_attempted"))),
             "single_pass_request_count_check": {
                 "normal_evaluation_request_count": 1,
                 "passes": not bool(transport_debug.get("retry_attempted")),
@@ -1267,10 +1544,14 @@ def grade_pdf(
             "response_time_seconds": round(time.monotonic() - started_at, 3),
             "raw_path": str(raw_path),
             "raw_response": _response_debug_value(response),
+            "complete_response": _qwen_response_diagnostics(response),
             "response_shape": _response_shape(response),
             "transport": transport_debug,
             "groq_http_response": response.transport,
             "token_budget": response.transport.get("request_token_settings"),
+            "effective_max_completion_tokens": response.transport.get(
+                "request_token_settings", {}
+            ).get("max_completion_tokens"),
             "payload_shape": {
                 "messages": [
                     {
@@ -1289,6 +1570,28 @@ def grade_pdf(
             },
         }
     )
+    response_json = response.transport.get("response_json")
+    response_usage = response_json.get("usage", {}) if isinstance(response_json, dict) else {}
+    completion_tokens = response_usage.get("completion_tokens")
+    finish_reason = _qwen_response_diagnostics(response).get("finish_reason")
+    token_budget = response.transport.get("request_token_settings", {})
+    if finish_reason == "length" and isinstance(completion_tokens, int):
+        effective_max_completion_tokens = token_budget.get(
+            "max_completion_tokens", MAX_TOKENS
+        )
+        debug_payload["completion_budget_analysis"] = {
+            "finish_reason": finish_reason,
+            "completion_tokens": completion_tokens,
+            "max_completion_tokens": effective_max_completion_tokens,
+            "near_completion_limit": completion_tokens
+            >= int(effective_max_completion_tokens * 0.9),
+            "estimated_total_if_1800": token_budget.get("estimated_prompt_tokens", 0) + 1800,
+            "increase_to_1800_estimated_below_tpm_limit": token_budget.get(
+                "estimated_prompt_tokens", 0
+            )
+            + 1800
+            < 8000,
+        }
 
     try:
         cleaned_text, parsed_grading = _parse_json_object(
