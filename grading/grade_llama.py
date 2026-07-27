@@ -1,4 +1,4 @@
-"""Groq Qwen 3.6 27B two-stage grader for Spring 2025 evaluation."""
+"""NVIDIA NIM Llama 3.2 90B Vision single-pass Spring 2025 grader."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,47 +15,32 @@ from grading.spring_2025_prompt import SPRING_2025_RUBRIC
 from interface.reference_materials import format_reference_context
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODEL = "qwen/qwen3.6-27b"
-PROVIDER = "Groq"
-BASE_URL = "https://api.groq.com/openai/v1"
-API_KEY_ENV = "GROQ_API_KEY"
-MAX_TOKENS = 1200
-LENGTH_RETRY_MAX_TOKENS = 1800
-GROQ_TPM_LIMIT = 8000
-TIMEOUT_SECONDS = 180
+MODEL = "meta/llama-3.2-90b-vision-instruct"
+PROVIDER = "NVIDIA NIM"
+BASE_URL = "https://integrate.api.nvidia.com/v1"
+API_KEY_ENV = "NVIDIA_API_KEY"
+MAX_TOKENS = 1800
+TEMPERATURE = 0.2
+TOP_P = 0.9
+TIMEOUT_SECONDS = 120
 IMAGE_MIME_TYPE = "image/jpeg"
-# Calibrated against Groq's reported Qwen prompt reservation for this rubric-heavy text.
-GROQ_QWEN_ESTIMATED_CHARACTERS_PER_TOKEN = 5.4
+
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
-        "basic_science",
-        "health_system_science",
-        "clinical_science",
-        "patient_case_information",
-        "determinants_of_health",
+        "basic_science", "health_system_science", "clinical_science",
+        "patient_case_information", "determinants_of_health",
     ],
     "integration": [
-        "prioritized_differential_diagnosis",
-        "illness_scripts",
-        "basic_to_foundational_science",
-        "patient_data_to_clinical_information",
+        "prioritized_differential_diagnosis", "illness_scripts",
+        "basic_to_foundational_science", "patient_data_to_clinical_information",
         "patient_data_to_basic_science",
     ],
-    "application": [
-        "working_diagnosis_pathophysiology",
-        "patient_data_pathophysiology",
-    ],
-    "transfer": [
-        "prior_basic_science",
-        "prior_clinical_concepts",
-        "deepens_understanding",
-    ],
+    "application": ["working_diagnosis_pathophysiology", "patient_data_pathophysiology"],
+    "transfer": ["prior_basic_science", "prior_clinical_concepts", "deepens_understanding"],
 }
 
 
 class EmptyLlamaVisionResponseError(RuntimeError):
-    """Qwen 3.6 27B returned no usable completion content."""
-
     def __init__(self, message: str, raw_response: Any, attempts: dict[str, Any]) -> None:
         super().__init__(message)
         self.raw_response = raw_response
@@ -65,24 +49,20 @@ class EmptyLlamaVisionResponseError(RuntimeError):
 
 class MalformedLlamaVisionJsonError(RuntimeError):
     def __init__(self, attempts: dict[str, Any]) -> None:
-        super().__init__("Qwen 3.6 27B returned malformed JSON after one repair attempt.")
+        super().__init__("Llama 3.2 90B Vision returned malformed or incomplete grading JSON.")
         self.attempts = attempts
 
 
-class GroqQwenHttpError(RuntimeError):
-    """Groq returned an HTTP response that must remain visible to the user."""
-
-    def __init__(self, message: str, response_details: dict[str, Any]) -> None:
+class NvidiaHttpError(RuntimeError):
+    def __init__(self, message: str, details: dict[str, Any]) -> None:
         super().__init__(message)
-        self.raw_response = response_details
-        self.status_code = response_details.get("http_status")
-        self.attempts = {"groq_http_response": response_details}
+        self.raw_response = details
+        self.status_code = details.get("http_status")
+        self.attempts = {"nvidia_http_response": details}
 
 
 @dataclass
-class GroqChatCompletion:
-    """Small adapter preserving the response interface used by this module."""
-
+class NvidiaChatCompletion:
     data: dict[str, Any]
     http_response: Any
     transport: dict[str, Any]
@@ -99,7 +79,6 @@ class GroqChatCompletion:
         return self.data
 
     def model_dump_json(self, **_: Any) -> str:
-        """Allow the runner's failure writer to retain the complete Groq payload."""
         return json.dumps(self.data)
 
 
@@ -122,182 +101,30 @@ def _secret(name: str) -> str | None:
     return str(secret_value) if secret_value else None
 
 
-def create_client() -> Any:
-    return create_groq_client()
-
-
-def create_groq_client() -> Any:
+def create_nvidia_client() -> dict[str, Any]:
     try:
         import requests
     except ImportError as exc:
-        raise RuntimeError(
-            "The requests package is not installed. Install dependencies with `pip install -r requirements.txt`."
-        ) from exc
-
+        raise RuntimeError("The requests package is not installed.") from exc
     api_key = _secret(API_KEY_ENV)
     if not api_key:
-        raise RuntimeError("GROQ_API_KEY is not configured.")
+        raise RuntimeError("NVIDIA_API_KEY is not configured.")
     return {
         "requests": requests,
         "headers": {
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json",
+            "Content-Type": "application/json",
         },
     }
 
 
-def _is_retryable_transport_error(error: Exception) -> bool:
-    status_code = getattr(error, "status_code", None)
-    if status_code is None:
-        status_code = getattr(getattr(error, "response", None), "status_code", None)
-    return (isinstance(status_code, int) and 500 <= status_code <= 599) or "timeout" in error.__class__.__name__.lower()
-
-
-def _utc_debug_event(started_at: float) -> tuple[dict[str, Any], float]:
-    """Capture a UTC event and its elapsed runtime for the Qwen debug trace."""
-    event_monotonic = time.monotonic()
-    return (
-        {
-            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "elapsed_seconds": round(event_monotonic - started_at, 3),
-        },
-        event_monotonic,
-    )
-
-
-def _groq_rate_limit_details(error: Exception) -> tuple[float, str] | None:
-    """Return Groq's rate-limit delay and its source for a 429 response."""
-    if getattr(error, "status_code", None) != 429:
-        return None
-
-    details = getattr(error, "raw_response", {})
-    if not isinstance(details, dict):
-        return None
-    headers = details.get("response_headers") or {}
-    retry_after = next(
-        (
-            value
-            for key, value in headers.items()
-            if str(key).lower() == "retry-after"
-        ),
-        None,
-    )
-    if retry_after is not None:
-        try:
-            return max(float(retry_after), 0.0), "Retry-After header"
-        except (TypeError, ValueError):
-            pass
-
-    body = str(details.get("response_text", ""))
-    parsed = details.get("response_json")
-    error_data = parsed.get("error") if isinstance(parsed, dict) else None
-    error_code = ""
-    error_message = body
-    if isinstance(error_data, dict):
-        error_code = str(error_data.get("code") or error_data.get("type") or "")
-        error_message = str(error_data.get("message") or body)
-
-    rate_limit_markers = (
-        "rate_limit_exceeded",
-        "rate limit",
-        "tokens per minute",
-        "tpm",
-        "please try again",
-    )
-    combined_error = f"{error_code} {error_message} {body}".lower()
-    if not any(marker in combined_error for marker in rate_limit_markers):
-        return None
-
-    match = re.search(
-        r"(?:please\s+)?try again in\s*([0-9]+(?:\.[0-9]+)?)\s*s(?:econds?)?",
-        combined_error,
-        re.IGNORECASE,
-    )
-    if match:
-        return float(match.group(1)), "Groq error message"
-    return 20.0, "rate-limit fallback"
-
-
-def _request_with_retry(
-    request: Any,
-    stage_name: str = "request",
-    progress_callback: Any | None = None,
-) -> tuple[Any, dict[str, Any]]:
-    started_at = time.monotonic()
-    try:
-        response = request()
-        return response, {"attempt_number": 1, "http_status": getattr(getattr(response, "http_response", None), "status_code", 200), "request_duration_seconds": round(time.monotonic() - started_at, 3), "retry_attempted": False}
-    except Exception as first_error:
-        rate_limit = _groq_rate_limit_details(first_error)
-        if rate_limit is None:
-            raise
-        retry_after_seconds, retry_after_source = rate_limit if rate_limit else (None, None)
-        # Keep the retry bounded while honoring Groq's requested recovery delay.
-        rate_limit_buffer = 2
-        retry_delay = (
-            retry_after_seconds + rate_limit_buffer
-            if retry_after_seconds is not None
-            else 5
-        )
-        if retry_after_seconds is not None and progress_callback:
-            progress_callback(
-                f"Qwen rate limit reached. Waiting {round(retry_delay)} seconds before retrying..."
-            )
-        time.sleep(retry_delay)
-        if retry_after_seconds is not None and progress_callback:
-            progress_callback("Retrying Qwen grading...")
-        retry_started_at = time.monotonic()
-        try:
-            response = request()
-        except Exception as retry_error:
-            retry_metadata = {
-                "attempt_number": 2,
-                "first_attempt_error": repr(first_error),
-                "first_attempt_response": getattr(first_error, "attempts", None),
-                "retry_attempt_error": repr(retry_error),
-                "retry_attempt_response": getattr(retry_error, "attempts", None),
-                "http_status": getattr(retry_error, "status_code", None),
-                "retry_attempted": True,
-                "stage": stage_name,
-                "retry_reason": "rate_limit_exceeded" if retry_after_seconds is not None else "transport_error",
-                "retry_delay_seconds": retry_delay,
-            }
-            if retry_after_seconds is not None:
-                retry_metadata.update({
-                    "rate_limit_stage": stage_name,
-                    "first_attempt_status": 429,
-                    "retry_after_seconds": retry_after_seconds,
-                    "retry_after_source": retry_after_source,
-                    "waited_seconds": retry_delay,
-                    "retry_status": getattr(retry_error, "status_code", None),
-                })
-            setattr(retry_error, "attempts", retry_metadata)
-            raise
-        transport_debug = {
-            "attempt_number": 2,
-            "http_status": getattr(getattr(response, "http_response", None), "status_code", 200),
-            "request_duration_seconds": round(time.monotonic() - retry_started_at, 3),
-            "retry_attempted": True,
-            "first_attempt_error": repr(first_error),
-            "first_attempt_response": getattr(first_error, "attempts", None),
-            "stage": stage_name,
-            "retry_reason": "rate_limit_exceeded" if retry_after_seconds is not None else "transport_error",
-            "retry_delay_seconds": retry_delay,
-        }
-        if retry_after_seconds is not None:
-            transport_debug.update({
-                "rate_limit_stage": stage_name,
-                "first_attempt_status": 429,
-                "retry_after_seconds": retry_after_seconds,
-                "retry_after_source": retry_after_source,
-                "waited_seconds": retry_delay,
-                "retry_status": transport_debug["http_status"],
-            })
-        return response, transport_debug
+def create_client() -> dict[str, Any]:
+    return create_nvidia_client()
 
 
 def render_pdf_first_page(pdf_path: Path, output_path: Path) -> dict[str, Any]:
-    """Render first PDF page to a small compressed JPEG."""
+    """Render the first page as the production JPEG sent to NVIDIA."""
     import fitz
 
     with fitz.open(pdf_path) as document:
@@ -307,120 +134,27 @@ def render_pdf_first_page(pdf_path: Path, output_path: Path) -> dict[str, Any]:
         max_width_px = 1400
         scale = max_width_px / max(page.rect.width, 1)
         pixmap = page.get_pixmap(
-            matrix=fitz.Matrix(scale, scale),
-            colorspace=fitz.csRGB,
-            alpha=False,
+            matrix=fitz.Matrix(scale, scale), colorspace=fitz.csRGB, alpha=False
         )
         image_bytes = pixmap.tobytes("jpeg", jpg_quality=80)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(image_bytes)
     return {
-        "base64": base64.b64encode(image_bytes).decode("utf-8"),
         "path": output_path,
+        "base64": base64.b64encode(image_bytes).decode("ascii"),
         "width": pixmap.width,
         "height": pixmap.height,
         "bytes": len(image_bytes),
-        "render_matrix": f"fitz.Matrix({scale:.4f}, {scale:.4f})",
+        "render_matrix": [scale, scale],
         "max_width_px": max_width_px,
         "jpeg_quality": 80,
     }
 
 
-def schema(map_file: str) -> dict[str, Any]:
-    result: dict[str, Any] = {"map_file": map_file, "model": MODEL}
-    for group, fields in CATEGORY_FIELDS.items():
-        result[group] = {
-            field: {"score": 1, "explanation": ""}
-            for field in fields
-        }
-        result[group]["overall_decision"] = "No"
-        result[group]["if_no_explanation"] = ""
-    result["overall_meets_expectations"] = "No"
-    result["strengths"] = ["", ""]
-    result["areas_for_improvement"] = ["", ""]
-    result["grading_notes"] = ""
-    return result
-
-
-def build_prompt(
-    map_file: str, reference_materials: list[dict[str, str]] | None = None
-) -> str:
-    reference_context = _compress_reference_materials(reference_materials)
-    reference_section = (
-        "\nREFERENCE SUMMARY (comparison standard only; not student-map evidence)\n"
-        + reference_context
-        + "\n"
-        if reference_context
-        else ""
-    )
-    return (
-        "You are grading a medical student concept map using the Spring 2025 Concept Map Feedback "
-        "Tool for SUMMATIVE Activities. Inspect all visible text, nodes, arrows, and relationships in "
-        "the submitted concept-map image. Generate every score directly from that image.\n\n"
-        + SPRING_2025_RUBRIC
-        + reference_section
-        + "\nEvaluate only content visible in the student map. References, when provided, are comparison "
-        "standards only and are not student-map evidence. For every criterion, choose the exact 1-4 "
-        "rubric descriptor that best matches the visible map. Answer domain and final questions with "
-        "Yes or No only.\n"
-        "Return only valid JSON matching the required schema. Each existing explanation field is one "
-        "concise sentence; strengths and areas_for_improvement contain at most 3 concise items each; "
-        "grading_notes is at most 2 sentences. Do not include chain-of-thought, markdown, or outside text.\n"
-        + _output_contract()
-    )
-
-
-EXTRACTION_FIELDS = (
-    "main_topic",
-    "patient_data",
-    "basic_science_concepts",
-    "clinical_science_concepts",
-    "health_system_science_concepts",
-    "determinants_of_health",
-    "differential_diagnoses",
-    "relationships",
-    "pathophysiology_flows",
-    "prior_or_transfer_knowledge",
-    "unclear_or_unreadable_content",
-)
-
-
-def extraction_schema() -> dict[str, Any]:
-    """The non-grading, visible-content-only Stage 1 response shape."""
-    return {
-        "main_topic": "",
-        "patient_data": [],
-        "basic_science_concepts": [],
-        "clinical_science_concepts": [],
-        "health_system_science_concepts": [],
-        "determinants_of_health": [],
-        "differential_diagnoses": [],
-        "relationships": [{"from": "", "to": "", "relationship": ""}],
-        "pathophysiology_flows": [],
-        "prior_or_transfer_knowledge": [],
-        "unclear_or_unreadable_content": [],
-    }
-
-
-def build_extraction_prompt() -> str:
-    return (
-        "Extract only visibly present content from this medical concept map. Do not grade it. "
-        "Do not infer missing content. Preserve specific patient facts when readable and "
-        "write every visible arrow or relationship explicitly. Use concise phrases, not paragraphs. "
-        "Limit patient_data to 12 items; basic_science_concepts and clinical_science_concepts to 15 "
-        "each; health_system_science_concepts, determinants_of_health, differential_diagnoses, and "
-        "pathophysiology_flows to 8 each; relationships to 15; and prior_or_transfer_knowledge to 10. "
-        "Do not omit important visible evidence solely to meet these limits. Return only valid JSON with "
-        "this exact structure:\n"
-        + json.dumps(extraction_schema(), separators=(",", ":"))
-    )
-
-
 def _compress_reference_materials(
     materials: list[dict[str, str]] | None, max_characters: int = 4200
 ) -> str:
-    """Keep only case, objective, unit-concept, and DDx context for Stage 2."""
-    selected: list[dict[str, str]] = []
+    """Keep only compact case, objective, concept, and DDx reference context."""
     keywords = re.compile(
         r"patient|case|history|chief|symptom|finding|diagnos|differential|ddx|"
         r"objective|outcome|learn|pathophys|physiology|anatom|histolog|biochem|"
@@ -432,6 +166,7 @@ def _compress_reference_materials(
         r"www\.|http[s]?://|page \d+ of \d+",
         re.IGNORECASE,
     )
+    selected: list[dict[str, str]] = []
     remaining = max_characters
     for material in materials or []:
         filename = str(material.get("filename", "")).strip()
@@ -446,896 +181,248 @@ def _compress_reference_materials(
             kept.append(line[:350])
         text = "\n".join(kept)
         if filename and text and remaining > 0:
-            clipped = text[:remaining]
-            selected.append({"filename": filename, "text": clipped})
-            remaining -= len(clipped)
+            selected.append({"filename": filename, "text": text[:remaining]})
+            remaining -= len(text[:remaining])
     return format_reference_context(selected)
 
 
 def _output_contract() -> str:
-    domain_lines = []
+    lines = []
     for group, fields in CATEGORY_FIELDS.items():
-        domain_lines.append(
-            f"- {group}: criterion objects for {', '.join(fields)}; each criterion has "
-            "score (required integer 1-4) and explanation (brief string); also "
-            "overall_decision (Yes/No) and if_no_explanation (string)."
+        lines.append(
+            f"- {group}: include {', '.join(fields)}. Each criterion needs "
+            '"score": <integer from 1 through 4> and "explanation": <one concise sentence>; '
+            'also include "overall_decision": "Yes" or "No" and "if_no_explanation".'
         )
-    return "\n".join(domain_lines)
+    return "\n".join(lines)
 
 
-def build_stage_two_prompt(
-    map_file: str,
-    extracted_content: dict[str, Any],
-    reference_materials: list[dict[str, str]] | None,
+def build_prompt(
+    map_file: str, reference_materials: list[dict[str, str]] | None = None
 ) -> str:
-    """Compatibility wrapper; production uses build_prompt() directly."""
-    return build_prompt(map_file, reference_materials)
+    reference_context = _compress_reference_materials(reference_materials)
+    reference_section = (
+        "\nREFERENCE SUMMARY (comparison standard only; not student-map evidence)\n"
+        f"{reference_context}\n"
+        if reference_context
+        else ""
+    )
+    return (
+        "You are grading a medical student concept map using the Spring 2025 Concept Map Feedback "
+        "Tool for SUMMATIVE Activities. Inspect all visible concepts, labels, groupings, arrows, and "
+        "relationships in the submitted image. Generate every score and written feedback yourself.\n\n"
+        + SPRING_2025_RUBRIC
+        + reference_section
+        + "\nEvaluate only student content visible in the map. Reference material is a comparison "
+        "standard only, never student-map evidence. Select the exact rubric score from 1 through 4 "
+        "for every criterion. Domain and final decisions must be Yes or No only.\n"
+        "Return JSON only using the existing schema. Each explanation is one concise sentence; include "
+        "at most 3 strengths and 3 areas_for_improvement; grading_notes is at most 2 sentences. "
+        "No markdown, chain-of-thought, or text outside JSON.\n"
+        + _output_contract()
+    )
 
 
-def _groq_payload(
-    messages: list[dict[str, Any]], max_completion_tokens: int = MAX_TOKENS
-) -> dict[str, Any]:
-    """Use Groq's Qwen chat-completions request fields without JSON mode."""
+def _vision_messages(prompt: str, image_base64: str) -> list[dict[str, Any]]:
+    """NVIDIA NIM OpenAI-compatible multimodal message: text plus a JPEG data URL."""
+    return [{"role": "user", "content": [
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": f"data:{IMAGE_MIME_TYPE};base64,{image_base64}"}},
+    ]}]
+
+
+def _nvidia_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "messages": messages,
         "model": MODEL,
-        "max_completion_tokens": max_completion_tokens,
+        "max_tokens": MAX_TOKENS,
+        "temperature": TEMPERATURE,
+        "top_p": TOP_P,
         "stream": False,
-        "temperature": 0.7,
-        "top_p": 0.8,
-        "reasoning_format": "hidden",
     }
 
 
-def _estimate_prompt_tokens(messages: list[dict[str, Any]]) -> tuple[int, int]:
-    """Estimate text prompt tokens without counting opaque image bytes."""
-    text_parts: list[str] = []
-    for message in messages:
-        content = message.get("content", "")
-        if isinstance(content, str):
-            text_parts.append(content)
-        elif isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    text_parts.append(str(item.get("text", "")))
-    prompt_characters = sum(len(part) for part in text_parts)
-    return prompt_characters, int(
-        (prompt_characters + GROQ_QWEN_ESTIMATED_CHARACTERS_PER_TOKEN - 1)
-        // GROQ_QWEN_ESTIMATED_CHARACTERS_PER_TOKEN
-    )
-
-
-def _post_groq(
-    client: dict[str, Any], payload: dict[str, Any], stage: str = "unknown"
-) -> GroqChatCompletion:
+def _post_nvidia(client: dict[str, Any], payload: dict[str, Any]) -> NvidiaChatCompletion:
     endpoint = f"{BASE_URL}/chat/completions"
     started_at = time.monotonic()
-    prompt_characters, estimated_prompt_tokens = _estimate_prompt_tokens(
-        payload.get("messages", [])
-    )
-    max_completion_tokens = int(payload.get("max_completion_tokens", 0))
     response = client["requests"].post(
-        endpoint,
-        headers=client["headers"],
-        json=payload,
-        stream=False,
-        timeout=TIMEOUT_SECONDS,
+        endpoint, headers=client["headers"], json=payload, stream=False, timeout=TIMEOUT_SECONDS
     )
     response_text = response.text
     try:
         data = response.json()
-    except (ValueError, TypeError):
+    except (TypeError, ValueError):
         data = None
-
     headers = dict(getattr(response, "headers", {}) or {})
-    request_headers = {
-        key: value
-        for key, value in headers.items()
-        if key.lower() in {"x-request-id", "request-id", "x-correlation-id", "nvcf-request-id", "nvcf-requestid"}
-    }
-    response_details = {
+    details = {
+        "provider": "nvidia",
         "http_status": getattr(response, "status_code", None),
         "response_text": response_text,
         "response_json": data,
-        "request_id_headers": request_headers,
         "response_headers": headers,
-        "elapsed_request_seconds": round(time.monotonic() - started_at, 3),
-        "request_token_settings": {
-            "stage": stage,
-            "max_completion_tokens": max_completion_tokens,
-            "estimated_prompt_tokens": estimated_prompt_tokens,
-            "estimated_total_requested_tokens": estimated_prompt_tokens
-            + max_completion_tokens,
-            "prompt_characters": prompt_characters,
-            "image_tokens_not_estimated": any(
-                isinstance(message.get("content"), list)
-                and any(
-                    isinstance(item, dict) and item.get("type") == "image_url"
-                    for item in message["content"]
-                )
-                for message in payload.get("messages", [])
-            ),
+        "request_id_headers": {
+            key: value for key, value in headers.items()
+            if key.lower() in {"x-request-id", "request-id", "nvcf-request-id", "nvcf-requestid"}
         },
+        "elapsed_request_seconds": round(time.monotonic() - started_at, 3),
     }
-
     if not (200 <= int(getattr(response, "status_code", 0)) < 300):
-        body_detail = response_text.strip()
+        body = response_text.strip()
         if isinstance(data, dict):
-            body_detail = str(data.get("detail") or data.get("error") or data.get("message") or body_detail)
-        message = f"Groq HTTP {response_details['http_status']}: {body_detail or 'No error detail returned.'}"
-        raise GroqQwenHttpError(message, response_details)
-
+            body = str(data.get("detail") or data.get("error") or data.get("message") or body)
+        raise NvidiaHttpError(f"NVIDIA NIM HTTP {details['http_status']}: {body or 'No error detail returned.'}", details)
     if not isinstance(data, dict):
-        raise GroqQwenHttpError("Groq returned a non-JSON API response.", response_details)
-    return GroqChatCompletion(data=data, http_response=response, transport=response_details)
+        raise NvidiaHttpError("NVIDIA NIM returned a non-JSON API response.", details)
+    return NvidiaChatCompletion(data=data, http_response=response, transport=details)
 
 
-def _vision_messages(prompt: str, image_base64: str) -> list[dict[str, Any]]:
-    # Groq's Qwen vision endpoint accepts OpenAI-compatible image_url content.
-    return [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{IMAGE_MIME_TYPE};base64,{image_base64}"
-                    },
-                },
-            ],
+def request_grade(client: Any, prompt: str, image_base64: str) -> NvidiaChatCompletion:
+    return _post_nvidia(client, _nvidia_payload(_vision_messages(prompt, image_base64)))
+
+
+def _is_transient(error: Exception) -> bool:
+    status = getattr(error, "status_code", None)
+    return status in {429, 502, 503, 504} or "timeout" in error.__class__.__name__.lower()
+
+
+def _request_with_retry(request: Any, progress_callback: Any | None = None) -> tuple[Any, dict[str, Any]]:
+    try:
+        response = request()
+        return response, {"request_count": 1, "retry_attempted": False, "http_status": response.transport.get("http_status")}
+    except Exception as first_error:
+        if not _is_transient(first_error):
+            raise
+        if progress_callback:
+            progress_callback("Llama 3.2 90B Vision request failed transiently. Retrying once...")
+        time.sleep(2)
+        try:
+            response = request()
+        except Exception as retry_error:
+            retry_error.attempts = {
+                "request_count": 2, "retry_attempted": True,
+                "first_attempt_error": repr(first_error),
+                "retry_attempt_error": repr(retry_error),
+                "http_status": getattr(retry_error, "status_code", None),
+            }
+            raise
+        return response, {
+            "request_count": 2, "retry_attempted": True,
+            "first_attempt_error": repr(first_error),
+            "http_status": response.transport.get("http_status"),
         }
-    ]
 
 
-def request_extraction(client: Any, image_base64: str) -> Any:
-    """Stage 1: extract only visible map content from the production JPEG."""
-    return _post_groq(
-        client,
-        _groq_payload(
-            _vision_messages(build_extraction_prompt(), image_base64),
-            max_completion_tokens=EXTRACTION_MAX_TOKENS,
-        ),
-        stage="extraction",
-    )
-
-
-def request_grade(
-    client: Any,
-    prompt: str,
-    image_base64: str,
-    max_completion_tokens: int = MAX_TOKENS,
-) -> Any:
-    """Single-pass multimodal Qwen grading request."""
-    return _post_groq(
-        client,
-        _groq_payload(
-            _vision_messages(prompt, image_base64),
-            max_completion_tokens=max_completion_tokens,
-        ),
-        stage="single_pass_grading",
-    )
-
-
-def _response_debug_value(response: Any) -> Any:
+def _response_dump(response: Any) -> Any:
     dump = getattr(response, "model_dump", None)
     if callable(dump):
-        try:
-            return dump(mode="json")
-        except Exception:
-            pass
+        return dump(mode="json")
     return repr(response)
 
 
-def _response_shape(response: Any) -> dict[str, Any]:
-    choices = getattr(response, "choices", None)
-    first = choices[0] if isinstance(choices, list) and choices else None
-    message = first.get("message", {}) if isinstance(first, dict) else getattr(first, "message", None)
-    response_dump = _response_debug_value(response)
-    return {
-        "http_status": getattr(getattr(response, "http_response", None), "status_code", 200),
-        "response_headers": dict(getattr(getattr(response, "http_response", None), "headers", {}) or {}),
-        "top_level_keys": list(response_dump.keys()) if isinstance(response_dump, dict) else [],
-        "choices_length": len(choices) if isinstance(choices, list) else 0,
-        "message_content": message.get("content") if isinstance(message, dict) else getattr(message, "content", None),
-        "choice_text": first.get("text") if isinstance(first, dict) else getattr(first, "text", None),
-        "reasoning_content": message.get("reasoning_content") if isinstance(message, dict) else getattr(message, "reasoning_content", None),
-        "finish_reason": first.get("finish_reason") if isinstance(first, dict) else getattr(first, "finish_reason", None),
-    }
-
-
-def _message_field(message: Any, field: str) -> Any:
+def _message_value(message: Any, field: str) -> Any:
     return message.get(field) if isinstance(message, dict) else getattr(message, field, None)
 
 
-def _content_block_text(value: Any) -> str:
-    if not isinstance(value, list):
+def _content_block_text(content: Any) -> str:
+    if not isinstance(content, list):
         return ""
-    parts: list[str] = []
-    for block in value:
-        if not isinstance(block, dict) or block.get("type") not in {"text", "output_text"}:
-            continue
-        text = block.get("text") or block.get("content")
-        if isinstance(text, str) and text.strip():
-            parts.append(text.strip())
-    return "\n".join(parts)
+    texts = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
+            value = block.get("text") or block.get("content")
+            if isinstance(value, str) and value.strip():
+                texts.append(value.strip())
+    return "\n".join(texts)
 
 
-def _complete_grading_json_from_text(text: str) -> str | None:
-    """Return a complete grading object only; never treat arbitrary reasoning as a grade."""
-    candidate = clean_json_output(text)
-    try:
-        result = json.loads(candidate)
-    except (TypeError, json.JSONDecodeError):
-        return None
-    if not isinstance(result, dict):
-        return None
-    required = {"knowledge_acquisition", "integration", "application", "transfer", "overall_meets_expectations", "strengths", "areas_for_improvement", "grading_notes"}
-    if not required.issubset(result):
-        return None
-    for group, fields in CATEGORY_FIELDS.items():
-        section = result.get(group)
-        if not isinstance(section, dict) or "overall_decision" not in section:
-            return None
-        for field in fields:
-            item = section.get(field)
-            if not isinstance(item, dict) or "score" not in item or "explanation" not in item:
-                return None
-    return candidate
-
-
-def _qwen_response_diagnostics(response: Any) -> dict[str, Any]:
-    """Expose all Groq response fields that can explain an empty final content value."""
-    response_data = _response_debug_value(response)
-    choices = getattr(response, "choices", None) or []
+def _response_diagnostics(response: NvidiaChatCompletion) -> dict[str, Any]:
+    data = _response_dump(response)
+    choices = response.choices
     first = choices[0] if choices else None
     message = first.get("message", {}) if isinstance(first, dict) else getattr(first, "message", None)
-    usage = response_data.get("usage") if isinstance(response_data, dict) else None
-    finish_reason = first.get("finish_reason") if isinstance(first, dict) else getattr(first, "finish_reason", None)
+    usage = data.get("usage") if isinstance(data, dict) else None
     return {
-        "complete_sanitized_response": response_data,
-        "response_id": response_data.get("id") if isinstance(response_data, dict) else None,
-        "response_model": response_data.get("model") if isinstance(response_data, dict) else None,
+        "complete_sanitized_response": data,
+        "response_id": data.get("id") if isinstance(data, dict) else None,
+        "response_model": data.get("model") if isinstance(data, dict) else None,
         "choices": choices,
-        "finish_reason": finish_reason,
-        "message_content": _message_field(message, "content"),
-        "message_reasoning": _message_field(message, "reasoning"),
-        "message_reasoning_content": _message_field(message, "reasoning_content"),
+        "finish_reason": first.get("finish_reason") if isinstance(first, dict) else getattr(first, "finish_reason", None),
+        "message_content": _message_value(message, "content"),
         "choice_text": first.get("text") if isinstance(first, dict) else getattr(first, "text", None),
-        "response_output_text": getattr(response, "output_text", None),
-        "tool_calls": _message_field(message, "tool_calls"),
         "usage": usage,
-        "prompt_tokens": usage.get("prompt_tokens") if isinstance(usage, dict) else None,
-        "completion_tokens": usage.get("completion_tokens") if isinstance(usage, dict) else None,
-        "total_tokens": usage.get("total_tokens") if isinstance(usage, dict) else None,
-        "http_status": getattr(getattr(response, "http_response", None), "status_code", None),
+        "http_status": response.transport.get("http_status"),
     }
 
 
-def response_text(response: Any, attempts: dict[str, Any]) -> str:
-    if response is None:
-        raise EmptyLlamaVisionResponseError("Qwen 3.6 27B returned no response.", response, attempts)
-    choices = getattr(response, "choices", None)
-    if not choices:
-        raise EmptyLlamaVisionResponseError("Qwen 3.6 27B returned no response choices.", response, attempts)
-    first = choices[0]
+def response_text(response: NvidiaChatCompletion, attempts: dict[str, Any]) -> str:
+    if response is None or not response.choices:
+        raise EmptyLlamaVisionResponseError("Llama 3.2 90B Vision returned no response choices.", response, attempts)
+    first = response.choices[0]
     message = first.get("message", {}) if isinstance(first, dict) else getattr(first, "message", None)
-    diagnostics = _qwen_response_diagnostics(response)
-    attempts["qwen_response_diagnostics"] = diagnostics
-
-    content = _message_field(message, "content")
-    if isinstance(content, str) and content.strip():
-        return content.strip()
-
-    reasoning_candidates = [
-        _message_field(message, "reasoning"),
-        _message_field(message, "reasoning_content"),
+    content = _message_value(message, "content")
+    candidates = [
+        content if isinstance(content, str) else None,
+        first.get("text") if isinstance(first, dict) else getattr(first, "text", None),
+        getattr(response, "output_text", None),
+        _content_block_text(content),
     ]
-    reasoning_text = next(
-        (value.strip() for value in reasoning_candidates if isinstance(value, str) and value.strip()),
-        "",
-    )
-    if reasoning_text:
-        grading_json = _complete_grading_json_from_text(reasoning_text)
-        if grading_json:
-            attempts["grading_json_recovered_from_reasoning"] = True
-            return grading_json
-
-    choice_text = first.get("text") if isinstance(first, dict) else getattr(first, "text", None)
-    output_text = getattr(response, "output_text", None)
-    for text in [choice_text, output_text]:
-        if isinstance(text, str) and text.strip():
-            return text.strip()
-
-    block_text = _content_block_text(content)
-    if block_text:
-        return block_text
-
-    if reasoning_text:
-        finish_reason = diagnostics.get("finish_reason")
-        raise EmptyLlamaVisionResponseError(
-            "Qwen returned reasoning text but no complete grading JSON "
-            f"(finish_reason={finish_reason!r}, completion_tokens={diagnostics.get('completion_tokens')!r}).",
-            response,
-            attempts,
-        )
-
-    finish_reason = diagnostics.get("finish_reason")
-    completion_tokens = diagnostics.get("completion_tokens")
-    if finish_reason == "length":
-        detail = "Qwen exhausted its completion budget before returning final grading content."
-    elif finish_reason == "content_filter":
-        detail = "Groq filtered the Qwen result before final grading content was returned."
-    else:
-        detail = "Qwen returned no usable final content."
+    text = next((item.strip() for item in candidates if isinstance(item, str) and item.strip()), None)
+    attempts["response_diagnostics"] = _response_diagnostics(response)
+    if text:
+        return text
+    diagnostics = attempts["response_diagnostics"]
     raise EmptyLlamaVisionResponseError(
-        f"{detail} finish_reason={finish_reason!r}, completion_tokens={completion_tokens!r}, "
-        "reasoning_returned=False.",
+        "Llama 3.2 90B Vision returned empty content "
+        f"(finish_reason={diagnostics.get('finish_reason')!r}, http_status={diagnostics.get('http_status')!r}).",
         response,
         attempts,
     )
 
 
-def request_json_repair(client: Any, malformed_output: str, map_file: str) -> Any:
-    repair_prompt = (
-        "Return the same evaluation as valid JSON only. Do not regrade or change scores.\n"
-        "Required fields: map_file, model, knowledge_acquisition, integration, application, transfer, "
-        "overall_meets_expectations, strengths, areas_for_improvement, grading_notes.\n"
-        + _output_contract()
-        + "\nMalformed output:\n"
-        + malformed_output
-    )
-    return _post_groq(client, _groq_payload([{"role": "user", "content": repair_prompt}]))
-
-
-def request_extraction_repair(client: Any, malformed_output: str) -> Any:
-    repair_prompt = (
-        "Return the same extracted concept-map content as valid JSON only. Do not grade or infer. "
-        "Required extraction structure:\n"
-        + json.dumps(extraction_schema(), separators=(",", ":"))
-        + "\nMalformed output:\n"
-        + malformed_output
-    )
-    return _post_groq(
-        client,
-        _groq_payload([{"role": "user", "content": repair_prompt}]),
-        stage="extraction_repair",
-    )
-
-
 def clean_json_output(text: str) -> str:
-    text = text.strip()
-    text = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*```\s*$", "", text)
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    return match.group(0).strip() if match else text
+    text = re.sub(r"^\s*```(?:json)?\s*", "", text.strip(), flags=re.IGNORECASE)
+    return re.sub(r"\s*```\s*$", "", text).strip()
 
 
-def _parse_json_object(text: str, error_message: str, attempts: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _parse_json_object(text: str, attempts: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     cleaned = clean_json_output(text)
-    try:
-        value = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        error = RuntimeError(error_message)
-        error.attempts = {**attempts, "json_error": str(exc)}
-        raise error from exc
-    if not isinstance(value, dict):
-        error = RuntimeError(error_message)
-        error.attempts = {**attempts, "json_error": "JSON root must be an object."}
-        raise error
-    return cleaned, value
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", cleaned):
+        try:
+            value, _ = decoder.raw_decode(cleaned[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return json.dumps(value, separators=(",", ":")), value
+    error = RuntimeError("Llama 3.2 90B Vision returned malformed grading JSON.")
+    error.attempts = attempts
+    raise error
 
 
-def _validate_extraction(value: dict[str, Any], attempts: dict[str, Any]) -> dict[str, Any]:
-    missing = [field for field in EXTRACTION_FIELDS if field not in value]
-    invalid_lists = [
-        field for field in EXTRACTION_FIELDS
-        if field != "main_topic" and field in value and not isinstance(value[field], list)
-    ]
-    relationships_valid = all(
-        isinstance(item, dict) and all(isinstance(item.get(key, ""), str) for key in ("from", "to", "relationship"))
-        for item in value.get("relationships", [])
-    )
-    if missing or invalid_lists or not isinstance(value.get("main_topic"), str) or not relationships_valid:
-        error = RuntimeError("Qwen 3.6 27B returned an invalid extraction response.")
-        error.attempts = {
-            **attempts,
-            "missing_extraction_fields": missing,
-            "invalid_extraction_list_fields": invalid_lists,
-            "relationships_valid": relationships_valid,
-        }
-        raise error
-    return value
-
-
-def _normalize_qwen_scores(result: dict[str, Any]) -> list[dict[str, Any]]:
-    """Convert only unambiguous 1–4 score representations before validation."""
+def _normalize_scores(result: dict[str, Any]) -> list[dict[str, Any]]:
     normalizations: list[dict[str, Any]] = []
-
-    def as_score(value: Any) -> int | None:
-        if isinstance(value, bool) or value is None:
-            return None
-        if isinstance(value, int):
-            return value if 1 <= value <= 4 else None
-        if isinstance(value, float):
-            if value.is_integer() and 1 <= int(value) <= 4:
-                return int(value)
-            return None
-        if not isinstance(value, str):
-            return None
-
-        text = value.strip()
-        if re.fullmatch(r"[1-4]", text):
-            return int(text)
-        score_match = re.fullmatch(r"score\s*[:\-]?\s*([1-4])", text, re.IGNORECASE)
-        if score_match:
-            return int(score_match.group(1))
-        fraction_match = re.fullmatch(r"([1-4])\s*/\s*4", text)
-        if fraction_match:
-            return int(fraction_match.group(1))
-        descriptor_match = re.fullmatch(r"([1-4])\s*[-–—:]\s*\D.+", text)
-        if descriptor_match:
-            return int(descriptor_match.group(1))
-        return None
-
     for group, fields in CATEGORY_FIELDS.items():
         section = result.get(group)
         if not isinstance(section, dict):
             continue
         for field in fields:
-            criterion = section.get(field)
-            if not isinstance(criterion, dict) or "score" not in criterion:
+            item = section.get(field)
+            if not isinstance(item, dict) or "score" not in item:
                 continue
-            original = criterion["score"]
-            normalized = as_score(original)
-            if normalized is None or (isinstance(original, int) and not isinstance(original, bool)):
+            original = item["score"]
+            normalized: int | None = None
+            if isinstance(original, int) and not isinstance(original, bool) and 1 <= original <= 4:
                 continue
-            criterion["score"] = normalized
-            normalizations.append(
-                {
-                    "field": f"{group}.{field}.score",
-                    "original": original,
-                    "normalized": normalized,
-                }
-            )
+            if isinstance(original, float) and original.is_integer() and 1 <= original <= 4:
+                normalized = int(original)
+            elif isinstance(original, str):
+                match = re.fullmatch(r"\s*(?:score\s*[:\-]?\s*)?([1-4])(?:\s*/\s*4|\s*[-–—:].*)?\s*", original, re.I)
+                if match:
+                    normalized = int(match.group(1))
+            if normalized is not None:
+                item["score"] = normalized
+                normalizations.append({"field": f"{group}.{field}.score", "original": original, "normalized": normalized})
     return normalizations
-
-
-def _read_response_with_one_empty_retry(
-    request: Any, stage_name: str, progress_callback: Any | None = None
-) -> tuple[str, Any, dict[str, Any], dict[str, Any]]:
-    """Bound each stage to at most two calls, including empty-choice retries."""
-    response, transport_debug = _request_with_retry(
-        request, stage_name=stage_name, progress_callback=progress_callback
-    )
-    attempts: dict[str, Any] = {"first_attempt": _response_debug_value(response)}
-    try:
-        return response_text(response, attempts), response, transport_debug, attempts
-    except EmptyLlamaVisionResponseError as first_error:
-        if transport_debug.get("retry_attempted"):
-            raise first_error
-        time.sleep(5)
-        retry_started = time.monotonic()
-        try:
-            retry_response = request()
-        except Exception as retry_error:
-            retry_error.attempts = {
-                "stage": stage_name,
-                "first_attempt": attempts["first_attempt"],
-                "retry_attempt_error": repr(retry_error),
-                "retry_attempt_response": getattr(retry_error, "attempts", None),
-            }
-            raise
-        attempts["retry_attempt"] = _response_debug_value(retry_response)
-        attempts["retry_attempt_transport"] = getattr(retry_response, "transport", None)
-        transport_debug.update(
-            {
-                "empty_response_retry_attempted": True,
-                "empty_response_retry_duration_seconds": round(time.monotonic() - retry_started, 3),
-            }
-        )
-        try:
-            return response_text(retry_response, attempts), retry_response, transport_debug, attempts
-        except EmptyLlamaVisionResponseError as retry_error:
-            raise EmptyLlamaVisionResponseError(str(retry_error), retry_response, attempts) from first_error
-
-
-def _vision_diagnostic_enabled() -> bool:
-    return os.getenv("QWEN36_VISION_DIAGNOSTIC", "").strip() == "1"
-
-
-def request_vision_diagnostic(client: Any, image_base64: str) -> Any:
-    diagnostic_prompt = (
-        "Read this concept map carefully.\n\n"
-        "Return plain text only.\n\n"
-        "1. What is the main medical topic or diagnosis?\n"
-        "2. List up to 20 specific medical concepts or phrases you can clearly read.\n"
-        "3. List any patient-specific information you can read.\n"
-        "4. Describe at least 5 visible relationships or arrows between concepts.\n"
-        "5. State whether the image text is:\n"
-        "   - Clearly readable\n"
-        "   - Partially readable\n"
-        "   - Mostly unreadable"
-    )
-    return _post_groq(
-        client,
-        _groq_payload(_vision_messages(diagnostic_prompt, image_base64)),
-        stage="vision_diagnostic",
-    )
-
-
-def _qwen_multimodal_diagnostic_enabled() -> bool:
-    return os.getenv("QWEN36_MULTIMODAL_DIAGNOSTIC", "").strip() == "1"
-
-
-def request_multimodal_diagnostic(client: Any, image_base64: str) -> Any:
-    """Use the production image payload without the rubric to isolate vision transport issues."""
-    prompt = (
-        'Return only this JSON object after inspecting the image:\n'
-        '{"image_received":true,"visible_text_sample":"<five visible words>"}'
-    )
-    return _post_groq(
-        client,
-        _groq_payload(_vision_messages(prompt, image_base64), max_completion_tokens=120),
-        stage="multimodal_diagnostic",
-    )
-
-
-def _length_retry_is_safe(response: GroqChatCompletion) -> tuple[bool, dict[str, Any]]:
-    diagnostics = _qwen_response_diagnostics(response)
-    prompt_tokens = diagnostics.get("prompt_tokens")
-    completion_tokens = diagnostics.get("completion_tokens")
-    finish_reason = diagnostics.get("finish_reason")
-    analysis = {
-        "finish_reason": finish_reason,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "max_completion_tokens": MAX_TOKENS,
-        "retry_max_completion_tokens": LENGTH_RETRY_MAX_TOKENS,
-        "estimated_total_with_retry": (
-            prompt_tokens + LENGTH_RETRY_MAX_TOKENS
-            if isinstance(prompt_tokens, int)
-            else None
-        ),
-    }
-    analysis["near_completion_limit"] = (
-        isinstance(completion_tokens, int)
-        and completion_tokens >= int(MAX_TOKENS * 0.9)
-    )
-    analysis["retry_below_tpm_limit"] = (
-        isinstance(analysis["estimated_total_with_retry"], int)
-        and analysis["estimated_total_with_retry"] < GROQ_TPM_LIMIT
-    )
-    return (
-        finish_reason == "length"
-        and bool(analysis["near_completion_limit"])
-        and bool(analysis["retry_below_tpm_limit"]),
-        analysis,
-    )
-
-
-def _legacy_two_stage_grade_pdf(
-    pdf_path: Path,
-    map_file: str,
-    debug_prefix: Path,
-    reference_materials: list[dict[str, str]] | None = None,
-    progress_callback: Any | None = None,
-) -> dict[str, Any]:
-    run_started_at = time.monotonic()
-    timing_events: dict[str, dict[str, Any]] = {}
-    image_path = Path(f"{debug_prefix}_request.jpg")
-    image_info = render_pdf_first_page(pdf_path, image_path)
-    image_base64 = str(image_info["base64"])
-    actual_input_path = image_path.parent / "qwen36_actual_input.jpg"
-    actual_input_path.write_bytes(image_path.read_bytes())
-    diagnostic_enabled = _vision_diagnostic_enabled()
-    if diagnostic_enabled:
-        client = create_client()
-        response, transport_debug = _request_with_retry(
-            lambda: request_vision_diagnostic(client, image_base64)
-        )
-        raw_text = response_text(response, {"diagnostic_attempt": _response_debug_value(response)})
-        diagnostic_path = image_path.parent / "qwen36_vision_diagnostic.txt"
-        diagnostic_path.write_text(raw_text, encoding="utf-8")
-        return {
-            "model": MODEL,
-            "provider": PROVIDER,
-            "raw_text": raw_text,
-            "response": response,
-            "diagnostic": True,
-            "debug": {
-                "provider": PROVIDER,
-                "base_url": BASE_URL,
-                "model": MODEL,
-                "image_path": str(image_path),
-                "actual_input_path": str(actual_input_path),
-                "image_mime_type": IMAGE_MIME_TYPE,
-                "image_width": image_info["width"],
-                "image_height": image_info["height"],
-                "image_bytes": image_info["bytes"],
-                "render_matrix": image_info["render_matrix"],
-                "jpeg_quality": image_info["jpeg_quality"],
-                "diagnostic_path": str(diagnostic_path),
-                "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}], "stream": False, "reasoning_format": "hidden"},
-                "raw_response": _response_debug_value(response),
-                "groq_http_response": response.transport,
-                **transport_debug,
-            },
-        }
-    reference_files = [item["filename"] for item in reference_materials or []]
-    debug_path = Path(f"{debug_prefix}_debug.json")
-    debug_payload = {
-        "provider": PROVIDER,
-        "base_url": BASE_URL,
-        "model": MODEL,
-        "image_path": str(image_info["path"]),
-        "actual_input_path": str(actual_input_path),
-        "image_mime_type": IMAGE_MIME_TYPE,
-        "image_width": image_info["width"],
-        "image_height": image_info["height"],
-        "image_bytes": image_info["bytes"],
-        "render_matrix": image_info["render_matrix"],
-        "max_width_px": image_info["max_width_px"],
-        "jpeg_quality": image_info["jpeg_quality"],
-        "reference_materials_used": bool(reference_files),
-        "reference_files": reference_files,
-        "stage_1_max_completion_tokens": EXTRACTION_MAX_TOKENS,
-        "stage_2_max_completion_tokens": STAGE_TWO_MAX_TOKENS,
-        "timeout_seconds": TIMEOUT_SECONDS,
-        "pipeline": "stage_1_image_extraction_then_stage_2_text_grading",
-        "timing_events": timing_events,
-    }
-    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
-
-    client = create_client()
-    if progress_callback:
-        progress_callback("Extracting Qwen evidence...")
-    extraction_started = time.monotonic()
-    timing_events["stage_1_request_started"], _ = _utc_debug_event(run_started_at)
-    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
-    extraction_raw, extraction_response, extraction_transport, extraction_attempts = (
-        _read_response_with_one_empty_retry(
-            lambda: request_extraction(client, image_base64), "extraction", progress_callback
-        )
-    )
-    (
-        timing_events["stage_1_response_received"],
-        stage_1_response_monotonic,
-    ) = _utc_debug_event(run_started_at)
-    debug_payload["stage_1_response_time"] = timing_events["stage_1_response_received"]["timestamp"]
-    extraction_raw_path = Path(f"{debug_prefix}_extraction_raw.txt")
-    extraction_raw_path.write_text(extraction_raw, encoding="utf-8")
-    debug_payload["stage_1_extraction"] = {
-        "duration_seconds": round(time.monotonic() - extraction_started, 3),
-        "raw_path": str(extraction_raw_path),
-        "raw_response": _response_debug_value(extraction_response),
-        "groq_http_response": extraction_response.transport,
-        "response_shape": _response_shape(extraction_response),
-        "attempts": extraction_attempts,
-        "transport": extraction_transport,
-        "max_completion_tokens": EXTRACTION_MAX_TOKENS,
-        "token_budget": extraction_response.transport.get("request_token_settings"),
-        "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}]},
-    }
-    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
-    try:
-        _, extracted_content = _parse_json_object(
-            extraction_raw,
-            "Qwen 3.6 27B extraction response was not valid JSON.",
-            extraction_attempts,
-        )
-        extracted_content = _validate_extraction(extracted_content, extraction_attempts)
-    except RuntimeError:
-        extraction_repair = request_extraction_repair(client, extraction_raw)
-        extraction_repair_text = response_text(extraction_repair, extraction_attempts)
-        extraction_attempts["repair_attempt"] = extraction_repair_text
-        extraction_attempts["repair_transport"] = extraction_repair.transport
-        extraction_raw_path.write_text(
-            extraction_raw + "\n\n--- repair_attempt ---\n" + extraction_repair_text,
-            encoding="utf-8",
-        )
-        _, extracted_content = _parse_json_object(
-            extraction_repair_text,
-            "Qwen 3.6 27B extraction response was not valid JSON after repair.",
-            extraction_attempts,
-        )
-        extracted_content = _validate_extraction(extracted_content, extraction_attempts)
-    extraction_parsed_path = Path(f"{debug_prefix}_extraction_parsed.json")
-    extraction_parsed_path.write_text(json.dumps(extracted_content, indent=2), encoding="utf-8")
-    debug_payload["stage_1_extraction"].update({
-        "duration_seconds": round(time.monotonic() - extraction_started, 3),
-        "parsed_path": str(extraction_parsed_path),
-        "repair_attempt": extraction_attempts.get("repair_attempt"),
-    })
-    # Keep this validated object in memory; Stage 2 must not regenerate Stage 1 after waiting.
-    stage_2_rate_limit_control = {
-        "proactive_wait_seconds": PROACTIVE_STAGE2_WAIT_SECONDS,
-        "stage_1_completed": True,
-        "stage_1_reused": True,
-        "stage_2_first_status": None,
-        "additional_rate_limit_wait": None,
-        "stage_2_retry_status": None,
-    }
-    debug_payload["stage_2_rate_limit_control"] = stage_2_rate_limit_control
-    timing_events["cooldown_started"], _ = _utc_debug_event(run_started_at)
-    debug_payload["cooldown_started"] = timing_events["cooldown_started"]["timestamp"]
-    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
-
-    if progress_callback:
-        progress_callback(
-            "Qwen extraction completed. Waiting 25 seconds before rubric grading to stay within Groq's token limit..."
-        )
-    # The minimum is measured from the completed Stage 1 response, not from an
-    # earlier progress event. This loop also handles an unusually early wake-up.
-    while True:
-        elapsed_since_stage_1_response = time.monotonic() - stage_1_response_monotonic
-        remaining_cooldown = PROACTIVE_STAGE2_WAIT_SECONDS - elapsed_since_stage_1_response
-        if remaining_cooldown <= 0:
-            break
-        time.sleep(remaining_cooldown)
-    timing_events["cooldown_finished"], _ = _utc_debug_event(run_started_at)
-    debug_payload["cooldown_finished"] = timing_events["cooldown_finished"]["timestamp"]
-
-    prompt = build_stage_two_prompt(map_file, extracted_content, reference_materials)
-    prompt_path = Path(f"{debug_prefix}_prompt.txt")
-    if reference_files:
-        prompt_path.write_text(
-            "Reference text omitted from debug output. Files used: "
-            + ", ".join(reference_files)
-            + "\n\n"
-            + build_stage_two_prompt(map_file, extracted_content, None),
-            encoding="utf-8",
-        )
-    else:
-        prompt_path.write_text(prompt, encoding="utf-8")
-
-    if progress_callback:
-        progress_callback("Grading extracted evidence with Qwen...")
-    grading_started = time.monotonic()
-    timing_events["stage_2_request_started"], stage_2_request_monotonic = _utc_debug_event(
-        run_started_at
-    )
-    actual_cooldown_seconds = stage_2_request_monotonic - stage_1_response_monotonic
-    # Keep the invariant explicit in the debug trace and block any premature call.
-    if actual_cooldown_seconds < PROACTIVE_STAGE2_WAIT_SECONDS:
-        time.sleep(PROACTIVE_STAGE2_WAIT_SECONDS - actual_cooldown_seconds)
-        timing_events["stage_2_request_started"], stage_2_request_monotonic = _utc_debug_event(
-            run_started_at
-        )
-        actual_cooldown_seconds = stage_2_request_monotonic - stage_1_response_monotonic
-    stage_2_rate_limit_control["actual_cooldown_seconds"] = round(
-        actual_cooldown_seconds, 3
-    )
-    debug_payload["stage_2_request_time"] = timing_events["stage_2_request_started"]["timestamp"]
-    debug_payload["actual_cooldown_seconds"] = stage_2_rate_limit_control[
-        "actual_cooldown_seconds"
-    ]
-    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
-    try:
-        grading_raw, response, grading_transport, attempts = _read_response_with_one_empty_retry(
-            lambda: request_grade(client, prompt), "grading", progress_callback
-        )
-    except Exception as exc:
-        timing_events["stage_2_response_received"], _ = _utc_debug_event(run_started_at)
-        retry_metadata = getattr(exc, "attempts", {})
-        if isinstance(retry_metadata, dict):
-            stage_2_rate_limit_control.update({
-                "stage_2_first_status": retry_metadata.get("first_attempt_status")
-                or retry_metadata.get("http_status"),
-                "additional_rate_limit_wait": retry_metadata.get("waited_seconds"),
-                "stage_2_retry_status": retry_metadata.get("retry_status"),
-            })
-        debug_payload["stage_2_grading"] = {
-            "failed": True,
-            "duration_seconds": round(time.monotonic() - grading_started, 3),
-            "stage_1_reused": True,
-            "error": repr(exc),
-            "attempts": retry_metadata,
-        }
-        debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
-        raise
-    timing_events["stage_2_response_received"], _ = _utc_debug_event(run_started_at)
-    grading_raw_path = Path(f"{debug_prefix}_grading_raw.txt")
-    grading_raw_path.write_text(grading_raw, encoding="utf-8")
-    stage_2_rate_limit_control.update({
-        "stage_2_first_status": grading_transport.get("first_attempt_status")
-        or grading_transport.get("http_status"),
-        "additional_rate_limit_wait": grading_transport.get("waited_seconds"),
-        "stage_2_retry_status": grading_transport.get("retry_status"),
-    })
-    debug_payload["stage_2_grading"] = {
-        "duration_seconds": round(time.monotonic() - grading_started, 3),
-        "prompt_path": str(prompt_path),
-        "prompt_characters": len(prompt),
-        "max_completion_tokens": STAGE_TWO_MAX_TOKENS,
-        "token_budget": response.transport.get("request_token_settings"),
-        "raw_path": str(grading_raw_path),
-        "raw_response": _response_debug_value(response),
-        "groq_http_response": response.transport,
-        "response_shape": _response_shape(response),
-        "attempts": attempts,
-        "transport": grading_transport,
-        "stage_1_reused": True,
-        "payload_shape": {"messages": [{"role": "user", "content": "<rubric + extracted content>"}]},
-    }
-    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
-    raw_text = grading_raw
-    try:
-        cleaned_text, parsed_grading = _parse_json_object(
-            raw_text,
-            "Qwen 3.6 27B returned malformed grading JSON.",
-            attempts,
-        )
-    except RuntimeError:
-        repair_response = request_json_repair(client, raw_text, map_file)
-        repair_text = response_text(repair_response, attempts)
-        attempts["repair_attempt"] = repair_text
-        attempts["repair_transport"] = repair_response.transport
-        grading_raw_path.write_text(
-            grading_raw + "\n\n--- repair_attempt ---\n" + repair_text,
-            encoding="utf-8",
-        )
-        raw_text = repair_text
-        try:
-            cleaned_text, parsed_grading = _parse_json_object(
-                raw_text,
-                "Qwen 3.6 27B returned malformed grading JSON after one repair attempt.",
-                attempts,
-            )
-        except RuntimeError as exc:
-            raise MalformedLlamaVisionJsonError(attempts) from exc
-    grading_parsed_path = Path(f"{debug_prefix}_grading_parsed.json")
-    grading_parsed_path.write_text(json.dumps(parsed_grading, indent=2), encoding="utf-8")
-    def _parsed_section(group: str) -> dict[str, Any]:
-        section = parsed_grading.get(group)
-        return section if isinstance(section, dict) else {}
-
-    pre_normalization_scores = {
-        group: {
-            field: _parsed_section(group).get(field, {}).get("score")
-            if isinstance(_parsed_section(group).get(field), dict)
-            else None
-            for field in fields
-        }
-        for group, fields in CATEGORY_FIELDS.items()
-    }
-    pre_normalization_decisions = {
-        group: _parsed_section(group).get("overall_decision")
-        for group in CATEGORY_FIELDS
-    }
-    score_normalizations = _normalize_qwen_scores(parsed_grading)
-    # The runner validates this normalized serialization; raw and parsed debug
-    # artifacts above retain the model's original response for auditability.
-    cleaned_text = json.dumps(parsed_grading, separators=(",", ":"))
-    debug_payload["stage_2_grading"].update({
-        "duration_seconds": round(time.monotonic() - grading_started, 3),
-        "parsed_path": str(grading_parsed_path),
-        "repair_attempt": attempts.get("repair_attempt"),
-        "pre_normalization_criterion_scores": pre_normalization_scores,
-        "pre_normalization_domain_decisions": pre_normalization_decisions,
-        "pre_normalization_overall_meets_expectations": parsed_grading.get(
-            "overall_meets_expectations"
-        ),
-        "score_normalizations": score_normalizations,
-    })
-    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
-
-    return {
-        "model": MODEL,
-        "provider": PROVIDER,
-        "raw_text": raw_text,
-        "cleaned_text": cleaned_text,
-        "response": response,
-        "prompt": prompt,
-        "prompt_path": prompt_path,
-        "image_path": image_path,
-        "raw_path": grading_raw_path,
-        "debug": {
-            **debug_payload,
-            "debug_path": str(debug_path),
-            "raw_path": str(grading_raw_path),
-        },
-    }
 
 
 def grade_pdf(
@@ -1345,307 +432,69 @@ def grade_pdf(
     reference_materials: list[dict[str, str]] | None = None,
     progress_callback: Any | None = None,
 ) -> dict[str, Any]:
-    """Grade a concept map in one Qwen multimodal request.
-
-    This is the production Qwen entry point. It intentionally does not call the
-    legacy extraction helpers or send a second rubric-grading request.
-    """
+    """Run exactly one normal single-pass NVIDIA Llama grading request."""
     started_at = time.monotonic()
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_info = render_pdf_first_page(pdf_path, image_path)
-    image_base64 = str(image_info["base64"])
-    actual_input_path = image_path.parent / "qwen36_actual_input.jpg"
+    image_base64 = image_info["base64"]
+    actual_input_path = image_path.parent / "llama32_90b_vision_actual_input.jpg"
     actual_input_path.write_bytes(image_path.read_bytes())
-
-    if _qwen_multimodal_diagnostic_enabled():
-        client = create_client()
-        diagnostic_path = Path(f"{debug_prefix}_multimodal_diagnostic.json")
-        diagnostic_debug: dict[str, Any] = {
-            "provider": PROVIDER.lower(),
-            "model": MODEL,
-            "pipeline": "multimodal_diagnostic",
-            "image_mime_type": IMAGE_MIME_TYPE,
-            "image_format": "JPEG",
-            "image_width": image_info["width"],
-            "image_height": image_info["height"],
-            "image_bytes": image_info["bytes"],
-            "image_base64_characters": len(image_base64),
-            "image_count": 1,
-            "image_content_block_included": True,
-        }
-        try:
-            response, transport_debug = _request_with_retry(
-                lambda: request_multimodal_diagnostic(client, image_base64),
-                stage_name="multimodal_diagnostic",
-                progress_callback=progress_callback,
-            )
-            diagnostic_debug.update(
-                {
-                    "complete_response": _qwen_response_diagnostics(response),
-                    "response_status": response.transport.get("http_status"),
-                    "retry_attempted": bool(transport_debug.get("retry_attempted")),
-                    "transport": transport_debug,
-                    "groq_http_response": response.transport,
-                }
-            )
-            raw_text = response_text(response, diagnostic_debug)
-        except Exception as exc:
-            diagnostic_debug.update(
-                {
-                    "error": str(exc),
-                    "response": _qwen_response_diagnostics(exc.raw_response)
-                    if isinstance(getattr(exc, "raw_response", None), GroqChatCompletion)
-                    else getattr(exc, "raw_response", None),
-                    "attempts": getattr(exc, "attempts", None),
-                }
-            )
-            diagnostic_path.write_text(json.dumps(diagnostic_debug, indent=2), encoding="utf-8")
-            raise
-        diagnostic_path.write_text(json.dumps(diagnostic_debug, indent=2), encoding="utf-8")
-        return {
-            "model": MODEL,
-            "provider": PROVIDER,
-            "raw_text": raw_text,
-            "response": response,
-            "diagnostic": True,
-            "debug": {**diagnostic_debug, "diagnostic_path": str(diagnostic_path)},
-        }
-
     reference_files = [item["filename"] for item in reference_materials or []]
     prompt = build_prompt(map_file, reference_materials)
     prompt_path = Path(f"{debug_prefix}_prompt.txt")
-    if reference_files:
-        prompt_path.write_text(
-            "Reference text omitted from debug output. Files used: "
-            + ", ".join(reference_files)
-            + "\n\n"
-            + build_prompt(map_file, None),
-            encoding="utf-8",
-        )
-    else:
-        prompt_path.write_text(prompt, encoding="utf-8")
-
+    prompt_path.write_text(prompt if not reference_files else build_prompt(map_file), encoding="utf-8")
     debug_path = Path(f"{debug_prefix}_debug.json")
-    debug_payload: dict[str, Any] = {
-        "provider": PROVIDER.lower(),
-        "base_url": BASE_URL,
-        "model": MODEL,
-        "pipeline": "single_pass_multimodal",
-        "qwen_request_count": 1,
-        "actual_qwen_request_count": 1,
-        "image_path": str(image_path),
-        "actual_input_path": str(actual_input_path),
-        "image_mime_type": IMAGE_MIME_TYPE,
-        "image_format": "JPEG",
-        "image_width": image_info["width"],
-        "image_height": image_info["height"],
-        "image_bytes": image_info["bytes"],
-        "image_base64_characters": len(image_base64),
-        "image_count": 1,
-        "image_content_block_included": True,
-        "render_matrix": image_info["render_matrix"],
-        "max_width_px": image_info["max_width_px"],
-        "jpeg_quality": image_info["jpeg_quality"],
-        "reference_materials_used": bool(reference_files),
-        "reference_files": reference_files,
-        "prompt_path": str(prompt_path),
-        "prompt_character_count": len(prompt),
-        "max_completion_tokens": MAX_TOKENS,
-        "response_status": None,
-        "retry_attempted": False,
+    debug: dict[str, Any] = {
+        "provider": "nvidia", "model": MODEL, "base_url": BASE_URL,
+        "pipeline": "single_pass_multimodal", "request_count": 1,
+        "prompt_character_count": len(prompt), "max_tokens": MAX_TOKENS,
+        "temperature": TEMPERATURE, "top_p": TOP_P, "image_mime_type": IMAGE_MIME_TYPE,
+        "image_format": "JPEG", "image_width": image_info["width"],
+        "image_height": image_info["height"], "image_bytes": image_info["bytes"],
+        "image_base64_character_count": len(image_base64), "image_count": 1,
+        "image_content_block_included": True, "reference_materials_used": bool(reference_files),
+        "reference_files": reference_files, "http_status": None, "finish_reason": None,
     }
-    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
-
+    debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
     if progress_callback:
-        progress_callback("Grading concept map with Qwen...")
+        progress_callback("Grading concept map with Llama 3.2 90B Vision...")
     client = create_client()
     try:
-        response, transport_debug = _request_with_retry(
-            lambda: request_grade(client, prompt, image_base64),
-            stage_name="single_pass_grading",
-            progress_callback=progress_callback,
+        response, retry_debug = _request_with_retry(
+            lambda: request_grade(client, prompt, image_base64), progress_callback
         )
-        should_retry_for_length, length_retry_analysis = _length_retry_is_safe(response)
-        if should_retry_for_length:
-            first_length_response = _qwen_response_diagnostics(response)
-            if progress_callback:
-                progress_callback(
-                    "Qwen exhausted its completion budget. Retrying once with a larger safe limit..."
-                )
-            response, transport_debug = _request_with_retry(
-                lambda: request_grade(
-                    client,
-                    prompt,
-                    image_base64,
-                    max_completion_tokens=LENGTH_RETRY_MAX_TOKENS,
-                ),
-                stage_name="single_pass_length_retry",
-                progress_callback=progress_callback,
-            )
-            transport_debug = {
-                **transport_debug,
-                "length_retry_attempted": True,
-                "length_retry_analysis": length_retry_analysis,
-                "length_retry_first_response": first_length_response,
-            }
-        attempts: dict[str, Any] = {"first_attempt": _response_debug_value(response)}
+        attempts = {"first_attempt": _response_dump(response)}
         raw_text = response_text(response, attempts)
     except Exception as exc:
-        retry_metadata = getattr(exc, "attempts", {})
-        failed_response = getattr(exc, "raw_response", None)
-        response_diagnostics = (
-            _qwen_response_diagnostics(failed_response)
-            if isinstance(failed_response, GroqChatCompletion)
-            else None
-        )
-        if isinstance(retry_metadata, dict):
-            debug_payload.update(
-                {
-                    "response_status": retry_metadata.get("http_status"),
-                    "retry_attempted": bool(retry_metadata.get("retry_attempted")),
-                    "actual_qwen_request_count": 1
-                    + int(bool(retry_metadata.get("retry_attempted"))),
-                    "transport": retry_metadata,
-                }
-            )
-        if response_diagnostics:
-            debug_payload.update(
-                {
-                    "complete_response": response_diagnostics,
-                    "response_status": response_diagnostics.get("http_status"),
-                    "finish_reason": response_diagnostics.get("finish_reason"),
-                    "prompt_tokens": response_diagnostics.get("prompt_tokens"),
-                    "completion_tokens": response_diagnostics.get("completion_tokens"),
-                    "total_tokens": response_diagnostics.get("total_tokens"),
-                }
-            )
-        if isinstance(exc, EmptyLlamaVisionResponseError):
-            message = (
-                f"{exc} image_block_sent=True. Raw response saved to {debug_path}."
-            )
-            exc.args = (message,)
-        debug_payload["duration_seconds"] = round(time.monotonic() - started_at, 3)
-        debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+        raw = getattr(exc, "raw_response", None)
+        if isinstance(raw, NvidiaChatCompletion):
+            debug["complete_response"] = _response_diagnostics(raw)
+            debug["http_status"] = raw.transport.get("http_status")
+        debug.update({"error": str(exc), "attempts": getattr(exc, "attempts", None), "duration_seconds": round(time.monotonic() - started_at, 3)})
+        debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
         raise
-
+    diagnostics = _response_diagnostics(response)
     raw_path = Path(f"{debug_prefix}_grading_raw.txt")
     raw_path.write_text(raw_text, encoding="utf-8")
-    debug_payload.update(
-        {
-            "response_status": response.transport.get("http_status"),
-            "retry_attempted": bool(transport_debug.get("retry_attempted")),
-            "actual_qwen_request_count": 1
-            + int(bool(transport_debug.get("retry_attempted")))
-            + int(bool(transport_debug.get("length_retry_attempted"))),
-            "single_pass_request_count_check": {
-                "normal_evaluation_request_count": 1,
-                "passes": not bool(transport_debug.get("retry_attempted")),
-            },
-            "response_time_seconds": round(time.monotonic() - started_at, 3),
-            "raw_path": str(raw_path),
-            "raw_response": _response_debug_value(response),
-            "complete_response": _qwen_response_diagnostics(response),
-            "response_shape": _response_shape(response),
-            "transport": transport_debug,
-            "groq_http_response": response.transport,
-            "token_budget": response.transport.get("request_token_settings"),
-            "effective_max_completion_tokens": response.transport.get(
-                "request_token_settings", {}
-            ).get("max_completion_tokens"),
-            "payload_shape": {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text"},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": "data:image/jpeg;base64,<image-bytes>"
-                                },
-                            },
-                        ],
-                    }
-                ]
-            },
-        }
-    )
-    response_json = response.transport.get("response_json")
-    response_usage = response_json.get("usage", {}) if isinstance(response_json, dict) else {}
-    completion_tokens = response_usage.get("completion_tokens")
-    finish_reason = _qwen_response_diagnostics(response).get("finish_reason")
-    token_budget = response.transport.get("request_token_settings", {})
-    if finish_reason == "length" and isinstance(completion_tokens, int):
-        effective_max_completion_tokens = token_budget.get(
-            "max_completion_tokens", MAX_TOKENS
-        )
-        debug_payload["completion_budget_analysis"] = {
-            "finish_reason": finish_reason,
-            "completion_tokens": completion_tokens,
-            "max_completion_tokens": effective_max_completion_tokens,
-            "near_completion_limit": completion_tokens
-            >= int(effective_max_completion_tokens * 0.9),
-            "estimated_total_if_1800": token_budget.get("estimated_prompt_tokens", 0) + 1800,
-            "increase_to_1800_estimated_below_tpm_limit": token_budget.get(
-                "estimated_prompt_tokens", 0
-            )
-            + 1800
-            < 8000,
-        }
-
     try:
-        cleaned_text, parsed_grading = _parse_json_object(
-            raw_text,
-            "Qwen 3.6 27B returned malformed grading JSON.",
-            attempts,
-        )
+        cleaned_text, parsed = _parse_json_object(raw_text, attempts)
     except RuntimeError as exc:
-        debug_payload["json_error"] = str(exc)
-        debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+        debug.update({"complete_response": diagnostics, "http_status": diagnostics["http_status"], "finish_reason": diagnostics["finish_reason"], "raw_path": str(raw_path), "error": str(exc)})
+        debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
         raise MalformedLlamaVisionJsonError(attempts) from exc
-
     parsed_path = Path(f"{debug_prefix}_grading_parsed.json")
-    parsed_path.write_text(json.dumps(parsed_grading, indent=2), encoding="utf-8")
-
-    def _parsed_section(group: str) -> dict[str, Any]:
-        section = parsed_grading.get(group)
-        return section if isinstance(section, dict) else {}
-
-    pre_normalization_scores = {
-        group: {
-            field: _parsed_section(group).get(field, {}).get("score")
-            if isinstance(_parsed_section(group).get(field), dict)
-            else None
-            for field in fields
-        }
-        for group, fields in CATEGORY_FIELDS.items()
-    }
-    score_normalizations = _normalize_qwen_scores(parsed_grading)
-    # The runner performs full schema validation; this only serializes valid score forms.
-    cleaned_text = json.dumps(parsed_grading, separators=(",", ":"))
-    debug_payload.update(
-        {
-            "parsed_path": str(parsed_path),
-            "pre_normalization_criterion_scores": pre_normalization_scores,
-            "score_normalizations": score_normalizations,
-            "duration_seconds": round(time.monotonic() - started_at, 3),
-        }
-    )
-    debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
-
-    return {
-        "model": MODEL,
-        "provider": PROVIDER,
-        "raw_text": raw_text,
-        "cleaned_text": cleaned_text,
-        "response": response,
-        "prompt": prompt,
-        "prompt_path": prompt_path,
-        "image_path": image_path,
-        "raw_path": raw_path,
-        "debug": {
-            **debug_payload,
-            "debug_path": str(debug_path),
-            "raw_path": str(raw_path),
-        },
-    }
+    parsed_path.write_text(json.dumps(parsed, indent=2), encoding="utf-8")
+    normalizations = _normalize_scores(parsed)
+    cleaned_text = json.dumps(parsed, separators=(",", ":"))
+    debug.update({
+        "request_count": retry_debug["request_count"], "retry_attempted": retry_debug["retry_attempted"],
+        "http_status": diagnostics["http_status"], "finish_reason": diagnostics["finish_reason"],
+        "usage": diagnostics["usage"], "response_content_length": len(raw_text),
+        "complete_response": diagnostics, "raw_path": str(raw_path), "parsed_path": str(parsed_path),
+        "score_normalizations": normalizations, "duration_seconds": round(time.monotonic() - started_at, 3),
+        "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}]},
+    })
+    debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
+    return {"model": MODEL, "provider": PROVIDER, "raw_text": raw_text, "cleaned_text": cleaned_text,
+            "response": response, "prompt": prompt, "prompt_path": prompt_path, "image_path": image_path,
+            "raw_path": raw_path, "debug": {**debug, "debug_path": str(debug_path)}}

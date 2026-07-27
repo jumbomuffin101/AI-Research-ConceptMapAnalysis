@@ -24,7 +24,7 @@ from scripts.generate_evaluation_report import generate_report
 st.set_page_config(page_title="AI Concept Map Grading Demo", layout="wide")
 
 st.title("AI Concept Map Grading Demo")
-st.caption("Build: qwen-singlepass-multimodal-1200")
+st.caption("Build: llama32-90b-nvidia-singlepass")
 st.write(
     "Upload a medical concept map PDF and generate evidence-grounded "
     "rubric-based evaluations using multimodal AI models."
@@ -38,7 +38,7 @@ uploaded_file_fingerprint = (
 )
 model_selection = st.radio(
     "Model",
-    options=["Gemma", "Qwen 3.6 27B", "Both"],
+    options=["Gemma", "Llama 3.2 90B Vision", "Both"],
     horizontal=True,
 )
 

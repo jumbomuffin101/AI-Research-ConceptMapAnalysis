@@ -27,12 +27,12 @@ FAILURE_EVALUATION_DIR = EVALUATION_SUMMARY_DIR / "failures"
 
 MODEL_MODULES = {
     "Gemma": grade_gemma,
-    "Qwen 3.6 27B": grade_llama,
+    "Llama 3.2 90B Vision": grade_llama,
 }
 
 MODEL_IDS = {
     "Gemma": grade_gemma.MODEL,
-    "Qwen 3.6 27B": grade_llama.MODEL,
+    "Llama 3.2 90B Vision": grade_llama.MODEL,
 }
 
 CATEGORY_FIELDS = grade_gemma.CATEGORY_FIELDS
@@ -108,8 +108,8 @@ def selected_model_names(selection: str) -> list[str]:
     normalized = re.sub(r"\s+", " ", normalized)
     routes = {
         "Gemma": ["Gemma"],
-        "Qwen 3.6 27B": ["Qwen 3.6 27B"],
-        "Both": ["Gemma", "Qwen 3.6 27B"],
+        "Llama 3.2 90B Vision": ["Llama 3.2 90B Vision"],
+        "Both": ["Gemma", "Llama 3.2 90B Vision"],
     }
     try:
         return routes[normalized]
@@ -119,7 +119,7 @@ def selected_model_names(selection: str) -> list[str]:
 
 def model_debug_lines(model_names: Iterable[str] | None = None) -> list[str]:
     """Return internal provider/model debug lines; app.py does not render these."""
-    names = list(model_names) if model_names is not None else ["Gemma", "Qwen 3.6 27B"]
+    names = list(model_names) if model_names is not None else ["Gemma", "Llama 3.2 90B Vision"]
     lines: list[str] = []
     for name in names:
         module = MODEL_MODULES.get(name)
@@ -141,15 +141,15 @@ def _model_slug(model_name: str) -> str:
 
 
 def _failure_suffix(model_name: str) -> str:
-    if model_name == "Qwen 3.6 27B":
-        return "qwen36_failure"
+    if model_name == "Llama 3.2 90B Vision":
+        return "llama32_90b_vision_failure"
     return f"{_model_slug(model_name)}_failure"
 
 
 def _result_suffix(model_name: str) -> str:
     """Keep saved result filenames stable and easy to identify."""
-    if model_name == "Qwen 3.6 27B":
-        return "qwen36"
+    if model_name == "Llama 3.2 90B Vision":
+        return "llama32_90b_vision"
     return _model_slug(model_name)
 
 
@@ -564,7 +564,7 @@ def run_evaluation(
             if progress_callback:
                 progress_callback(f"Running {model_name} grading")
             grade_kwargs = {"reference_materials": reference_materials}
-            if model_name == "Qwen 3.6 27B":
+            if model_name == "Llama 3.2 90B Vision":
                 grade_kwargs["progress_callback"] = progress_callback
             grade = module.grade_pdf(
                 pdf_path,
@@ -582,7 +582,7 @@ def run_evaluation(
                     EvaluationFailure(
                         model_name=model_name,
                         model_id=model_id,
-                        error_message="Qwen 3.6 27B diagnostic completed. Download the debug file to review the raw response.",
+                        error_message="Llama 3.2 90B Vision diagnostic completed. Download the debug file to review the raw response.",
                         debug_path=diagnostic_debug_path,
                     )
                 )
