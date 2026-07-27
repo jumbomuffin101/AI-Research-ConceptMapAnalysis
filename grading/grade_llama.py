@@ -38,6 +38,7 @@ CATEGORY_FIELDS = {
     "application": ["working_diagnosis_pathophysiology", "patient_data_pathophysiology"],
     "transfer": ["prior_basic_science", "prior_clinical_concepts", "deepens_understanding"],
 }
+REQUIRED_SCORE_COUNT = sum(len(fields) for fields in CATEGORY_FIELDS.values())
 
 
 class EmptyLlamaVisionResponseError(RuntimeError):
@@ -48,9 +49,10 @@ class EmptyLlamaVisionResponseError(RuntimeError):
 
 
 class MalformedLlamaVisionJsonError(RuntimeError):
-    def __init__(self, attempts: dict[str, Any]) -> None:
-        super().__init__("Llama 3.2 90B Vision returned malformed or incomplete grading JSON.")
+    def __init__(self, attempts: dict[str, Any], message: str | None = None) -> None:
+        super().__init__(message or "Llama completed the grading, but its response could not be converted into the required grading JSON.")
         self.attempts = attempts
+        self.raw_response = attempts
 
 
 class NvidiaHttpError(RuntimeError):
@@ -197,6 +199,24 @@ def _output_contract() -> str:
     return "\n".join(lines)
 
 
+def _schema_template() -> dict[str, Any]:
+    """Exact application field names with non-numeric placeholders to avoid score anchoring."""
+    result: dict[str, Any] = {
+        "map_file": "<map filename>", "model": MODEL,
+        "overall_meets_expectations": "<Yes or No>",
+        "strengths": ["<concise item>"],
+        "areas_for_improvement": ["<concise item>"],
+        "grading_notes": "<up to two concise sentences>",
+    }
+    for group, fields in CATEGORY_FIELDS.items():
+        result[group] = {
+            **{field: {"score": "<integer from 1 through 4>", "explanation": "<one concise evidence-specific sentence>"} for field in fields},
+            "overall_decision": "<Yes or No>",
+            "if_no_explanation": "<required when overall_decision is No>",
+        }
+    return result
+
+
 def build_prompt(
     map_file: str, reference_materials: list[dict[str, str]] | None = None
 ) -> str:
@@ -219,7 +239,20 @@ def build_prompt(
         "Return JSON only using the existing schema. Each explanation is one concise sentence; include "
         "at most 3 strengths and 3 areas_for_improvement; grading_notes is at most 2 sentences. "
         "No markdown, chain-of-thought, or text outside JSON.\n"
-        + _output_contract()
+        "\nSCORING CALIBRATION\n"
+        "Score only visible map evidence. Award 4 only for comprehensive, accurate, clearly integrated, "
+        "specifically supported evidence; use 3 for substantial but limited evidence, 2 for partial or "
+        "weakly connected evidence, and 1 for absent, largely incorrect, or unsupported evidence. When "
+        "between scores, use the lower score. Do not infer missing content from reference material. Each "
+        "criterion explanation must cite specific visible concepts, relationships, patient data, diagnoses, "
+        "pathways, or omissions.\n\n"
+        "OUTPUT CONTRACT\n"
+        "Return exactly one valid JSON object. Do not return Markdown, headings, bullets, code fences, "
+        "introductory text, trailing commentary, single quotes, comments, trailing commas, NaN, or Infinity. "
+        "The first character must be { and the final character must be }. Use double quotes for all keys and "
+        "string values. Every required field must be present; do not abbreviate or rename any schema key.\n"
+        "REQUIRED JSON SCHEMA (placeholders describe types only; replace them with real values):\n"
+        + json.dumps(_schema_template(), separators=(",", ":"))
     )
 
 
@@ -231,15 +264,20 @@ def _vision_messages(prompt: str, image_base64: str) -> list[dict[str, Any]]:
     ]}]
 
 
-def _nvidia_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
+def _nvidia_payload(
+    messages: list[dict[str, Any]], *, response_format: bool = False, temperature: float = TEMPERATURE
+) -> dict[str, Any]:
+    payload = {
         "messages": messages,
         "model": MODEL,
         "max_tokens": MAX_TOKENS,
-        "temperature": TEMPERATURE,
+        "temperature": temperature,
         "top_p": TOP_P,
         "stream": False,
     }
+    if response_format:
+        payload["response_format"] = {"type": "json_object"}
+    return payload
 
 
 def _post_nvidia(client: dict[str, Any], payload: dict[str, Any]) -> NvidiaChatCompletion:
@@ -276,8 +314,36 @@ def _post_nvidia(client: dict[str, Any], payload: dict[str, Any]) -> NvidiaChatC
     return NvidiaChatCompletion(data=data, http_response=response, transport=details)
 
 
-def request_grade(client: Any, prompt: str, image_base64: str) -> NvidiaChatCompletion:
-    return _post_nvidia(client, _nvidia_payload(_vision_messages(prompt, image_base64)))
+def request_grade(
+    client: Any, prompt: str, image_base64: str, *, response_format: bool = True
+) -> NvidiaChatCompletion:
+    return _post_nvidia(
+        client, _nvidia_payload(_vision_messages(prompt, image_base64), response_format=response_format)
+    )
+
+
+def request_format_repair(
+    client: Any, previous_response: str, *, response_format: bool
+) -> NvidiaChatCompletion:
+    repair_prompt = (
+        "SYSTEM:\nYou are a deterministic JSON formatter. Convert the supplied completed evaluation "
+        "into the exact required JSON schema. Preserve grading decisions and evidence. Return JSON only.\n\n"
+        "USER:\nThe previous grading response was not valid grading JSON. Do not re-evaluate the concept "
+        "map, change scores, add evidence, or alter Yes/No decisions. Preserve explanations as closely as "
+        "possible. Return exactly one JSON object, no Markdown or code fences; first character {, final "
+        "character }. Every required field must be present.\n\nPREVIOUS RESPONSE:\n"
+        + previous_response
+        + "\n\nREQUIRED JSON SCHEMA:\n"
+        + json.dumps(_schema_template(), separators=(",", ":"))
+    )
+    return _post_nvidia(
+        client,
+        _nvidia_payload(
+            [{"role": "user", "content": repair_prompt}],
+            response_format=response_format,
+            temperature=0,
+        ),
+    )
 
 
 def _is_transient(error: Exception) -> bool:
@@ -348,8 +414,11 @@ def _response_diagnostics(response: NvidiaChatCompletion) -> dict[str, Any]:
         "choices": choices,
         "finish_reason": first.get("finish_reason") if isinstance(first, dict) else getattr(first, "finish_reason", None),
         "message_content": _message_value(message, "content"),
+        "message_reasoning": _message_value(message, "reasoning"),
+        "message_reasoning_content": _message_value(message, "reasoning_content"),
         "choice_text": first.get("text") if isinstance(first, dict) else getattr(first, "text", None),
         "usage": usage,
+        "completion_tokens": usage.get("completion_tokens") if isinstance(usage, dict) else None,
         "http_status": response.transport.get("http_status"),
     }
 
@@ -387,13 +456,16 @@ def clean_json_output(text: str) -> str:
 def _parse_json_object(text: str, attempts: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     cleaned = clean_json_output(text)
     decoder = json.JSONDecoder()
-    for match in re.finditer(r"\{", cleaned):
+    match = re.search(r"\{", cleaned)
+    if match:
         try:
-            value, _ = decoder.raw_decode(cleaned[match.start():])
+            value, end = decoder.raw_decode(cleaned[match.start():])
+            # A heading, prose, or trailing commentary is a format contract violation.  Let the
+            # single repair call remove it rather than accepting a partly Markdown response.
+            if isinstance(value, dict) and not cleaned[:match.start()].strip() and not cleaned[match.start() + end:].strip():
+                return json.dumps(value, separators=(",", ":")), value
         except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return json.dumps(value, separators=(",", ":")), value
+            pass
     error = RuntimeError("Llama 3.2 90B Vision returned malformed grading JSON.")
     error.attempts = attempts
     raise error
@@ -425,6 +497,41 @@ def _normalize_scores(result: dict[str, Any]) -> list[dict[str, Any]]:
     return normalizations
 
 
+def _validate_existing_schema(result: dict[str, Any]) -> dict[str, Any]:
+    """Use the application validator without importing it until a grading call completes."""
+    from interface.grading_runner import parse_model_json
+
+    return parse_model_json(json.dumps(result, separators=(",", ":")), normalize_decisions=True)
+
+
+def _response_format_rejected(error: Exception) -> bool:
+    """Identify NVIDIA rejection of the optional OpenAI-compatible JSON-mode field."""
+    if not isinstance(error, NvidiaHttpError):
+        return False
+    details = error.raw_response
+    body = " ".join(
+        str(value or "") for value in (details.get("response_text"), details.get("response_json"), str(error))
+    ).lower()
+    return "response_format" in body and any(
+        marker in body for marker in ("unsupported", "not support", "unknown", "invalid", "extra", "allowed")
+    )
+
+
+def _score_snapshot(result: dict[str, Any]) -> dict[str, int]:
+    """Return only explicitly supplied, valid scores; never synthesize a missing score."""
+    scores: dict[str, int] = {}
+    for group, fields in CATEGORY_FIELDS.items():
+        section = result.get(group)
+        if not isinstance(section, dict):
+            continue
+        for field in fields:
+            item = section.get(field)
+            value = item.get("score") if isinstance(item, dict) else None
+            if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 4:
+                scores[f"{group}.{field}"] = value
+    return scores
+
+
 def grade_pdf(
     pdf_path: Path,
     map_file: str,
@@ -432,7 +539,7 @@ def grade_pdf(
     reference_materials: list[dict[str, str]] | None = None,
     progress_callback: Any | None = None,
 ) -> dict[str, Any]:
-    """Run exactly one normal single-pass NVIDIA Llama grading request."""
+    """Grade once, then perform at most one text-only JSON formatting repair."""
     started_at = time.monotonic()
     image_path = Path(f"{debug_prefix}_request.jpg")
     image_info = render_pdf_first_page(pdf_path, image_path)
@@ -454,15 +561,34 @@ def grade_pdf(
         "image_base64_character_count": len(image_base64), "image_count": 1,
         "image_content_block_included": True, "reference_materials_used": bool(reference_files),
         "reference_files": reference_files, "http_status": None, "finish_reason": None,
+        "response_format_requested": True, "response_format_supported": None,
+        "initial_http_status": None, "initial_finish_reason": None, "initial_content_length": 0,
+        "initial_json_parse_success": False, "initial_schema_validation_success": False,
+        "repair_attempted": False, "repair_http_status": None, "repair_finish_reason": None,
+        "repair_content_length": 0, "repair_json_parse_success": False,
+        "repair_schema_validation_success": False, "image_resent_for_repair": False,
+        "final_result_source": "failure",
     }
     debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
     if progress_callback:
-        progress_callback("Grading concept map with Llama 3.2 90B Vision...")
+        progress_callback("Llama 3.2 90B Vision is grading the concept map...")
     client = create_client()
     try:
-        response, retry_debug = _request_with_retry(
-            lambda: request_grade(client, prompt, image_base64), progress_callback
-        )
+        try:
+            response, retry_debug = _request_with_retry(
+                lambda: request_grade(client, prompt, image_base64, response_format=True), progress_callback
+            )
+            debug["response_format_supported"] = True
+        except Exception as format_error:
+            if not _response_format_rejected(format_error):
+                raise
+            # NVIDIA support differs by served model/version.  Fall back once to the same request
+            # without JSON mode; this is not a grading retry and is recorded for deployment diagnosis.
+            debug["response_format_supported"] = False
+            debug["response_format_rejection"] = getattr(format_error, "raw_response", None)
+            response, retry_debug = _request_with_retry(
+                lambda: request_grade(client, prompt, image_base64, response_format=False), progress_callback
+            )
         attempts = {"first_attempt": _response_dump(response)}
         raw_text = response_text(response, attempts)
     except Exception as exc:
@@ -476,25 +602,96 @@ def grade_pdf(
     diagnostics = _response_diagnostics(response)
     raw_path = Path(f"{debug_prefix}_grading_raw.txt")
     raw_path.write_text(raw_text, encoding="utf-8")
-    try:
-        cleaned_text, parsed = _parse_json_object(raw_text, attempts)
-    except RuntimeError as exc:
-        debug.update({"complete_response": diagnostics, "http_status": diagnostics["http_status"], "finish_reason": diagnostics["finish_reason"], "raw_path": str(raw_path), "error": str(exc)})
-        debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
-        raise MalformedLlamaVisionJsonError(attempts) from exc
-    parsed_path = Path(f"{debug_prefix}_grading_parsed.json")
-    parsed_path.write_text(json.dumps(parsed, indent=2), encoding="utf-8")
-    normalizations = _normalize_scores(parsed)
-    cleaned_text = json.dumps(parsed, separators=(",", ":"))
     debug.update({
         "request_count": retry_debug["request_count"], "retry_attempted": retry_debug["retry_attempted"],
-        "http_status": diagnostics["http_status"], "finish_reason": diagnostics["finish_reason"],
-        "usage": diagnostics["usage"], "response_content_length": len(raw_text),
-        "complete_response": diagnostics, "raw_path": str(raw_path), "parsed_path": str(parsed_path),
-        "score_normalizations": normalizations, "duration_seconds": round(time.monotonic() - started_at, 3),
-        "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}]},
+        "initial_http_status": diagnostics["http_status"], "initial_finish_reason": diagnostics["finish_reason"],
+        "initial_content_length": len(raw_text), "initial_response": diagnostics,
+        "raw_path": str(raw_path),
     })
-    debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
-    return {"model": MODEL, "provider": PROVIDER, "raw_text": raw_text, "cleaned_text": cleaned_text,
-            "response": response, "prompt": prompt, "prompt_path": prompt_path, "image_path": image_path,
-            "raw_path": raw_path, "debug": {**debug, "debug_path": str(debug_path)}}
+    initial_parsed: dict[str, Any] | None = None
+    initial_scores: dict[str, int] = {}
+    initial_error_text = ""
+    try:
+        _, initial_parsed = _parse_json_object(raw_text, attempts)
+        debug["initial_json_parse_success"] = True
+        initial_normalizations = _normalize_scores(initial_parsed)
+        initial_scores = _score_snapshot(initial_parsed)
+        validated = _validate_existing_schema(initial_parsed)
+        debug["initial_schema_validation_success"] = True
+        parsed_path = Path(f"{debug_prefix}_grading_parsed.json")
+        parsed_path.write_text(json.dumps(validated, indent=2), encoding="utf-8")
+        debug.update({
+            "score_normalizations": initial_normalizations, "parsed_path": str(parsed_path),
+            "http_status": diagnostics["http_status"], "finish_reason": diagnostics["finish_reason"],
+            "usage": diagnostics["usage"], "response_content_length": len(raw_text),
+            "final_result_source": "initial", "duration_seconds": round(time.monotonic() - started_at, 3),
+            "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}]},
+        })
+        debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
+        return {"model": MODEL, "provider": PROVIDER, "raw_text": raw_text,
+                "cleaned_text": json.dumps(validated, separators=(",", ":")), "response": response,
+                "prompt": prompt, "prompt_path": prompt_path, "image_path": image_path,
+                "raw_path": raw_path, "debug": {**debug, "debug_path": str(debug_path)}}
+    except Exception as initial_error:
+        initial_error_text = str(initial_error)
+        debug["initial_error"] = initial_error_text
+
+    # A complete but malformed/invalid response gets one formatter request only.  It has no image,
+    # reference context, or rubric, so it cannot regrade the map.
+    debug["repair_attempted"] = True
+    if progress_callback:
+        progress_callback("Llama completed the grading but returned the wrong format. Converting it to the required JSON structure...")
+    try:
+        repair_response, repair_retry = _request_with_retry(
+            lambda: request_format_repair(
+                client, raw_text, response_format=debug.get("response_format_supported") is True
+            ),
+            progress_callback,
+        )
+        repair_attempts = {"repair_attempt": _response_dump(repair_response)}
+        repair_text = response_text(repair_response, repair_attempts)
+        repair_diagnostics = _response_diagnostics(repair_response)
+        repair_raw_path = Path(f"{debug_prefix}_format_repair_raw.txt")
+        repair_raw_path.write_text(repair_text, encoding="utf-8")
+        debug.update({
+            "repair_request_count": repair_retry["request_count"],
+            "repair_retry_attempted": repair_retry["retry_attempted"],
+            "repair_http_status": repair_diagnostics["http_status"],
+            "repair_finish_reason": repair_diagnostics["finish_reason"],
+            "repair_content_length": len(repair_text), "repair_response": repair_diagnostics,
+            "repair_raw_path": str(repair_raw_path),
+        })
+        _, repaired = _parse_json_object(repair_text, repair_attempts)
+        debug["repair_json_parse_success"] = True
+        repair_normalizations = _normalize_scores(repaired)
+        repaired_scores = _score_snapshot(repaired)
+        if initial_parsed is not None and (
+            len(initial_scores) != REQUIRED_SCORE_COUNT or repaired_scores != initial_scores
+        ):
+            raise RuntimeError("The JSON formatter omitted, added, or changed one or more model-generated scores.")
+        validated = _validate_existing_schema(repaired)
+        debug["repair_schema_validation_success"] = True
+        parsed_path = Path(f"{debug_prefix}_grading_parsed.json")
+        parsed_path.write_text(json.dumps(validated, indent=2), encoding="utf-8")
+        debug.update({
+            "repair_score_normalizations": repair_normalizations, "parsed_path": str(parsed_path),
+            "final_result_source": "repair", "duration_seconds": round(time.monotonic() - started_at, 3),
+        })
+        debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
+        return {"model": MODEL, "provider": PROVIDER, "raw_text": repair_text,
+                "cleaned_text": json.dumps(validated, separators=(",", ":")), "response": repair_response,
+                "prompt": prompt, "prompt_path": prompt_path, "image_path": image_path,
+                "raw_path": repair_raw_path, "debug": {**debug, "debug_path": str(debug_path)}}
+    except Exception as repair_error:
+        debug.update({
+            "repair_error": str(repair_error), "repair_attempts": getattr(repair_error, "attempts", None),
+            "duration_seconds": round(time.monotonic() - started_at, 3), "final_result_source": "failure",
+        })
+        debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
+        schema_error = debug["initial_json_parse_success"] and not debug["initial_schema_validation_success"]
+        message = (
+            "Llama returned JSON, but required grading fields were missing or invalid."
+            if schema_error else
+            "Llama completed the grading, but its response could not be converted into the required grading JSON."
+        )
+        raise MalformedLlamaVisionJsonError(debug, message) from repair_error

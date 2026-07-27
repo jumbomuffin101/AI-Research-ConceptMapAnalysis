@@ -52,6 +52,20 @@ class Llama32SinglePassTests(unittest.TestCase):
         self.assertEqual(content[0]["type"], "text")
         self.assertEqual(content[1]["image_url"]["url"], "data:image/jpeg;base64,encoded-image")
 
+    def test_format_repair_payload_is_text_only_and_uses_json_mode_setting(self) -> None:
+        captured: dict = {}
+        def post(_client, payload):
+            captured["payload"] = payload
+            return object()
+        with patch.object(grade_llama, "_post_nvidia", post):
+            grade_llama.request_format_repair(object(), "## Markdown evaluation", response_format=True)
+        payload = captured["payload"]
+        self.assertEqual(payload["temperature"], 0)
+        self.assertEqual(payload["max_tokens"], 1800)
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertIsInstance(payload["messages"][0]["content"], str)
+        self.assertNotIn("image_url", payload["messages"][0]["content"])
+
     def test_nvidia_key_and_compact_references_are_used(self) -> None:
         self.assertEqual(grade_llama.API_KEY_ENV, "NVIDIA_API_KEY")
         summary = grade_llama._compress_reference_materials([
@@ -71,7 +85,7 @@ class Llama32SinglePassTests(unittest.TestCase):
         def render(_pdf, output):
             output.parent.mkdir(parents=True, exist_ok=True); output.write_bytes(b"jpeg")
             return {"path": output, "base64": "image", "width": 10, "height": 10, "bytes": 4, "render_matrix": [1, 1], "max_width_px": 1400, "jpeg_quality": 80}
-        def request(_client, _prompt, _image):
+        def request(_client, _prompt, _image, **_kwargs):
             calls.append(1); return response
         with tempfile.TemporaryDirectory() as temp:
             with patch.object(grade_llama, "render_pdf_first_page", render), patch.object(grade_llama, "create_client", return_value=object()), patch.object(grade_llama, "request_grade", request):
@@ -79,6 +93,94 @@ class Llama32SinglePassTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(result["debug"]["request_count"], 1)
         self.assertEqual(json.loads(result["cleaned_text"])["knowledge_acquisition"]["basic_science"]["score"], 3)
+
+    def test_valid_initial_json_does_not_trigger_format_repair(self) -> None:
+        response = grade_llama.NvidiaChatCompletion(
+            data={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(valid_payload(3))}}]},
+            http_response=HttpResponse(), transport={"http_status": 200},
+        )
+        def render(_pdf, output):
+            output.parent.mkdir(parents=True, exist_ok=True); output.write_bytes(b"jpeg")
+            return {"path": output, "base64": "image", "width": 10, "height": 10, "bytes": 4}
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(grade_llama, "render_pdf_first_page", render), \
+             patch.object(grade_llama, "create_client", return_value=object()), \
+             patch.object(grade_llama, "request_grade", return_value=response), \
+             patch.object(grade_llama, "request_format_repair") as repair:
+            result = grade_llama.grade_pdf(Path(temp) / "map.pdf", "map.pdf", Path(temp) / "debug")
+        repair.assert_not_called()
+        self.assertEqual(result["debug"]["final_result_source"], "initial")
+
+    def test_markdown_response_uses_one_text_only_repair_and_preserves_scores(self) -> None:
+        markdown = "## Evaluation\n" + json.dumps(valid_payload(3))
+        initial = grade_llama.NvidiaChatCompletion(
+            data={"choices": [{"finish_reason": "stop", "message": {"content": markdown}}]},
+            http_response=HttpResponse(), transport={"http_status": 200},
+        )
+        repaired = grade_llama.NvidiaChatCompletion(
+            data={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(valid_payload(3))}}]},
+            http_response=HttpResponse(), transport={"http_status": 200},
+        )
+        captured: dict = {}
+        def render(_pdf, output):
+            output.parent.mkdir(parents=True, exist_ok=True); output.write_bytes(b"jpeg")
+            return {"path": output, "base64": "image", "width": 10, "height": 10, "bytes": 4}
+        def repair(_client, previous, **kwargs):
+            captured["previous"] = previous; captured["kwargs"] = kwargs
+            return repaired
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(grade_llama, "render_pdf_first_page", render), \
+             patch.object(grade_llama, "create_client", return_value=object()), \
+             patch.object(grade_llama, "request_grade", return_value=initial), \
+             patch.object(grade_llama, "request_format_repair", repair):
+            result = grade_llama.grade_pdf(Path(temp) / "map.pdf", "map.pdf", Path(temp) / "debug")
+        self.assertTrue(captured["previous"].startswith("## Evaluation"))
+        self.assertEqual(result["debug"]["final_result_source"], "repair")
+        self.assertFalse(result["debug"]["image_resent_for_repair"])
+        self.assertEqual(json.loads(result["cleaned_text"])["integration"]["illness_scripts"]["score"], 3)
+
+    def test_malformed_repair_fails_after_one_repair_call(self) -> None:
+        initial = grade_llama.NvidiaChatCompletion(
+            data={"choices": [{"finish_reason": "stop", "message": {"content": "not JSON"}}]},
+            http_response=HttpResponse(), transport={"http_status": 200},
+        )
+        repair = grade_llama.NvidiaChatCompletion(
+            data={"choices": [{"finish_reason": "stop", "message": {"content": "still not JSON"}}]},
+            http_response=HttpResponse(), transport={"http_status": 200},
+        )
+        def render(_pdf, output):
+            output.parent.mkdir(parents=True, exist_ok=True); output.write_bytes(b"jpeg")
+            return {"path": output, "base64": "image", "width": 10, "height": 10, "bytes": 4}
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(grade_llama, "render_pdf_first_page", render), \
+             patch.object(grade_llama, "create_client", return_value=object()), \
+             patch.object(grade_llama, "request_grade", return_value=initial), \
+             patch.object(grade_llama, "request_format_repair", return_value=repair) as repair_call:
+            with self.assertRaises(grade_llama.MalformedLlamaVisionJsonError):
+                grade_llama.grade_pdf(Path(temp) / "map.pdf", "map.pdf", Path(temp) / "debug")
+        repair_call.assert_called_once()
+
+    def test_repair_cannot_add_a_missing_score_from_parseable_initial_json(self) -> None:
+        incomplete = valid_payload(3)
+        del incomplete["knowledge_acquisition"]["basic_science"]["score"]
+        initial = grade_llama.NvidiaChatCompletion(
+            data={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(incomplete)}}]},
+            http_response=HttpResponse(), transport={"http_status": 200},
+        )
+        repair = grade_llama.NvidiaChatCompletion(
+            data={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(valid_payload(3))}}]},
+            http_response=HttpResponse(), transport={"http_status": 200},
+        )
+        def render(_pdf, output):
+            output.parent.mkdir(parents=True, exist_ok=True); output.write_bytes(b"jpeg")
+            return {"path": output, "base64": "image", "width": 10, "height": 10, "bytes": 4}
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(grade_llama, "render_pdf_first_page", render), \
+             patch.object(grade_llama, "create_client", return_value=object()), \
+             patch.object(grade_llama, "request_grade", return_value=initial), \
+             patch.object(grade_llama, "request_format_repair", return_value=repair):
+            with self.assertRaises(grade_llama.MalformedLlamaVisionJsonError):
+                grade_llama.grade_pdf(Path(temp) / "map.pdf", "map.pdf", Path(temp) / "debug")
 
     def test_invalid_or_missing_scores_fail_validation(self) -> None:
         missing = valid_payload(); del missing["knowledge_acquisition"]["basic_science"]["score"]
