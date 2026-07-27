@@ -204,8 +204,8 @@ def _schema_template() -> dict[str, Any]:
     result: dict[str, Any] = {
         "map_file": "<map filename>", "model": MODEL,
         "overall_meets_expectations": "<Yes or No>",
-        "strengths": ["<concise item>"],
-        "areas_for_improvement": ["<concise item>"],
+        "strengths": ["<concise evidence-based strength>"],
+        "areas_for_improvement": ["<concise evidence-based improvement area>"],
         "grading_notes": "<up to two concise sentences>",
     }
     for group, fields in CATEGORY_FIELDS.items():
@@ -251,6 +251,8 @@ def build_prompt(
         "introductory text, trailing commentary, single quotes, comments, trailing commas, NaN, or Infinity. "
         "The first character must be { and the final character must be }. Use double quotes for all keys and "
         "string values. Every required field must be present; do not abbreviate or rename any schema key.\n"
+        'The top-level fields "strengths" and "areas_for_improvement" are mandatory. Each must be a JSON '
+        "array of 1 to 3 non-empty strings. Do not omit, rename, or return either field as a single string.\n"
         "REQUIRED JSON SCHEMA (placeholders describe types only; replace them with real values):\n"
         + json.dumps(_schema_template(), separators=(",", ":"))
     )
@@ -331,10 +333,24 @@ def request_format_repair(
         "USER:\nThe previous grading response was not valid grading JSON. Do not re-evaluate the concept "
         "map, change scores, add evidence, or alter Yes/No decisions. Preserve explanations as closely as "
         "possible. Return exactly one JSON object, no Markdown or code fences; first character {, final "
-        "character }. Every required field must be present.\n\nPREVIOUS RESPONSE:\n"
+        "character }. Every required field must be present. The top-level fields \"strengths\" and "
+        "\"areas_for_improvement\" are mandatory arrays of 1 to 3 non-empty strings; do not rename or "
+        "return either as a string. If the prior response has a Grading Notes section, convert its positive "
+        "observations into strengths and its stated limitations or missing evidence into areas_for_improvement. "
+        "You may summarize only evidence and limitations already present; do not invent facts.\n\nPREVIOUS RESPONSE:\n"
         + previous_response
         + "\n\nREQUIRED JSON SCHEMA:\n"
         + json.dumps(_schema_template(), separators=(",", ":"))
+        + "\n\nFINAL CHECKLIST BEFORE RESPONDING\n"
+        "- All 15 rubric criteria are present.\n"
+        "- Every score is an integer from 1 through 4.\n"
+        "- All four domain decisions are present.\n"
+        "- The final overall decision is present.\n"
+        "- The overall explanation is present.\n"
+        "- \"strengths\" is present as an array of 1 to 3 strings.\n"
+        "- \"areas_for_improvement\" is present as an array of 1 to 3 strings.\n"
+        "- No required field is omitted.\n"
+        "- Return JSON only."
     )
     return _post_nvidia(
         client,
@@ -501,7 +517,37 @@ def _validate_existing_schema(result: dict[str, Any]) -> dict[str, Any]:
     """Use the application validator without importing it until a grading call completes."""
     from interface.grading_runner import parse_model_json
 
-    return parse_model_json(json.dumps(result, separators=(",", ":")), normalize_decisions=True)
+    validated = parse_model_json(json.dumps(result, separators=(",", ":")), normalize_decisions=True)
+    _validate_narrative_fields(validated)
+    return validated
+
+
+def _narrative_field_present(result: dict[str, Any], field: str) -> bool:
+    return field in result and isinstance(result.get(field), list)
+
+
+def _narrative_fields_valid(result: dict[str, Any]) -> bool:
+    try:
+        _validate_narrative_fields(result)
+    except RuntimeError:
+        return False
+    return True
+
+
+def _validate_narrative_fields(result: dict[str, Any]) -> None:
+    """Llama-only completeness checks; Python never supplies narrative fallback text."""
+    for field in ("strengths", "areas_for_improvement"):
+        value = result.get(field)
+        if not isinstance(value, list):
+            raise RuntimeError(f"'{field}' must be a JSON array of 1 to 3 non-empty strings.")
+        if not 1 <= len(value) <= 3:
+            raise RuntimeError(f"'{field}' must contain 1 to 3 non-empty strings.")
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise RuntimeError(f"'{field}' must contain only non-empty strings.")
+            stripped = item.strip()
+            if stripped.startswith("<") and stripped.endswith(">"):
+                raise RuntimeError(f"'{field}' contains a placeholder value.")
 
 
 def _response_format_rejected(error: Exception) -> bool:
@@ -530,6 +576,17 @@ def _score_snapshot(result: dict[str, Any]) -> dict[str, int]:
             if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 4:
                 scores[f"{group}.{field}"] = value
     return scores
+
+
+def _decision_snapshot(result: dict[str, Any]) -> dict[str, Any]:
+    """Track raw model decisions when JSON was already parseable before repair."""
+    decisions = {"overall_meets_expectations": result.get("overall_meets_expectations")}
+    for group in CATEGORY_FIELDS:
+        section = result.get(group)
+        decisions[f"{group}.overall_decision"] = (
+            section.get("overall_decision") if isinstance(section, dict) else None
+        )
+    return decisions
 
 
 def grade_pdf(
@@ -568,6 +625,9 @@ def grade_pdf(
         "repair_content_length": 0, "repair_json_parse_success": False,
         "repair_schema_validation_success": False, "image_resent_for_repair": False,
         "final_result_source": "failure",
+        "strengths_present_initial": False, "areas_for_improvement_present_initial": False,
+        "strengths_present_after_repair": False, "areas_for_improvement_present_after_repair": False,
+        "narrative_field_repair_required": False, "final_schema_valid": False,
     }
     debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
     if progress_callback:
@@ -610,12 +670,17 @@ def grade_pdf(
     })
     initial_parsed: dict[str, Any] | None = None
     initial_scores: dict[str, int] = {}
+    initial_decisions: dict[str, Any] = {}
     initial_error_text = ""
     try:
         _, initial_parsed = _parse_json_object(raw_text, attempts)
         debug["initial_json_parse_success"] = True
+        debug["strengths_present_initial"] = _narrative_field_present(initial_parsed, "strengths")
+        debug["areas_for_improvement_present_initial"] = _narrative_field_present(initial_parsed, "areas_for_improvement")
+        debug["narrative_field_repair_required"] = not _narrative_fields_valid(initial_parsed)
         initial_normalizations = _normalize_scores(initial_parsed)
         initial_scores = _score_snapshot(initial_parsed)
+        initial_decisions = _decision_snapshot(initial_parsed)
         validated = _validate_existing_schema(initial_parsed)
         debug["initial_schema_validation_success"] = True
         parsed_path = Path(f"{debug_prefix}_grading_parsed.json")
@@ -625,6 +690,7 @@ def grade_pdf(
             "http_status": diagnostics["http_status"], "finish_reason": diagnostics["finish_reason"],
             "usage": diagnostics["usage"], "response_content_length": len(raw_text),
             "final_result_source": "initial", "duration_seconds": round(time.monotonic() - started_at, 3),
+            "final_schema_valid": True,
             "payload_shape": {"messages": [{"role": "user", "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<image-bytes>"}}]}]},
         })
         debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
@@ -663,12 +729,16 @@ def grade_pdf(
         })
         _, repaired = _parse_json_object(repair_text, repair_attempts)
         debug["repair_json_parse_success"] = True
+        debug["strengths_present_after_repair"] = _narrative_field_present(repaired, "strengths")
+        debug["areas_for_improvement_present_after_repair"] = _narrative_field_present(repaired, "areas_for_improvement")
         repair_normalizations = _normalize_scores(repaired)
         repaired_scores = _score_snapshot(repaired)
         if initial_parsed is not None and (
             len(initial_scores) != REQUIRED_SCORE_COUNT or repaired_scores != initial_scores
         ):
             raise RuntimeError("The JSON formatter omitted, added, or changed one or more model-generated scores.")
+        if initial_parsed is not None and _decision_snapshot(repaired) != initial_decisions:
+            raise RuntimeError("The JSON formatter changed one or more model-generated Yes/No decisions.")
         validated = _validate_existing_schema(repaired)
         debug["repair_schema_validation_success"] = True
         parsed_path = Path(f"{debug_prefix}_grading_parsed.json")
@@ -676,6 +746,7 @@ def grade_pdf(
         debug.update({
             "repair_score_normalizations": repair_normalizations, "parsed_path": str(parsed_path),
             "final_result_source": "repair", "duration_seconds": round(time.monotonic() - started_at, 3),
+            "final_schema_valid": True,
         })
         debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
         return {"model": MODEL, "provider": PROVIDER, "raw_text": repair_text,

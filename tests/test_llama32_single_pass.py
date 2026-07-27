@@ -14,7 +14,7 @@ from scripts import generate_evaluation_report
 
 
 def valid_payload(score: int = 2) -> dict:
-    result = {"map_file": "map.pdf", "model": grade_llama.MODEL, "overall_meets_expectations": "Yes", "strengths": [], "areas_for_improvement": [], "grading_notes": ""}
+    result = {"map_file": "map.pdf", "model": grade_llama.MODEL, "overall_meets_expectations": "Yes", "strengths": ["Visible concepts are connected to the working diagnosis."], "areas_for_improvement": ["Make one pathophysiology connection more explicit."], "grading_notes": ""}
     for group, fields in grade_llama.CATEGORY_FIELDS.items():
         result[group] = {"overall_decision": "Yes", "if_no_explanation": "", **{field: {"score": score, "explanation": "Concise evidence-based explanation."} for field in fields}}
     return result
@@ -181,6 +181,44 @@ class Llama32SinglePassTests(unittest.TestCase):
              patch.object(grade_llama, "request_format_repair", return_value=repair):
             with self.assertRaises(grade_llama.MalformedLlamaVisionJsonError):
                 grade_llama.grade_pdf(Path(temp) / "map.pdf", "map.pdf", Path(temp) / "debug")
+
+    def test_missing_narrative_fields_trigger_repair_and_preserve_scores_and_decisions(self) -> None:
+        for missing_fields in (("strengths",), ("areas_for_improvement",), ("strengths", "areas_for_improvement")):
+            initial_payload = valid_payload(3)
+            for field in missing_fields:
+                del initial_payload[field]
+            initial = grade_llama.NvidiaChatCompletion(
+                data={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(initial_payload)}}]},
+                http_response=HttpResponse(), transport={"http_status": 200},
+            )
+            repaired = grade_llama.NvidiaChatCompletion(
+                data={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(valid_payload(3))}}]},
+                http_response=HttpResponse(), transport={"http_status": 200},
+            )
+            def render(_pdf, output):
+                output.parent.mkdir(parents=True, exist_ok=True); output.write_bytes(b"jpeg")
+                return {"path": output, "base64": "image", "width": 10, "height": 10, "bytes": 4}
+            with tempfile.TemporaryDirectory() as temp, \
+                 patch.object(grade_llama, "render_pdf_first_page", render), \
+                 patch.object(grade_llama, "create_client", return_value=object()), \
+                 patch.object(grade_llama, "request_grade", return_value=initial), \
+                 patch.object(grade_llama, "request_format_repair", return_value=repaired) as repair_call:
+                result = grade_llama.grade_pdf(Path(temp) / "map.pdf", "map.pdf", Path(temp) / "debug")
+            repair_call.assert_called_once()
+            parsed = json.loads(result["cleaned_text"])
+            self.assertIsInstance(parsed["strengths"], list)
+            self.assertIsInstance(parsed["areas_for_improvement"], list)
+            self.assertEqual(parsed["knowledge_acquisition"]["basic_science"]["score"], 3)
+            self.assertEqual(parsed["overall_meets_expectations"], "Yes")
+
+    def test_empty_narrative_arrays_fail_without_python_fallback(self) -> None:
+        payload = valid_payload()
+        payload["strengths"] = []
+        payload["areas_for_improvement"] = []
+        with self.assertRaisesRegex(RuntimeError, "strengths.*1 to 3"):
+            grade_llama._validate_narrative_fields(payload)
+        self.assertEqual(payload["strengths"], [])
+        self.assertEqual(payload["areas_for_improvement"], [])
 
     def test_invalid_or_missing_scores_fail_validation(self) -> None:
         missing = valid_payload(); del missing["knowledge_acquisition"]["basic_science"]["score"]
