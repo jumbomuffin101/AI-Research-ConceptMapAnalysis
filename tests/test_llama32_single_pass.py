@@ -55,6 +55,15 @@ class Llama32SinglePassTests(unittest.TestCase):
         self.assertIn("Example A — strong map that passes", prompt)
         self.assertIn("A successful map may still have areas_for_improvement", prompt)
 
+    def test_prompt_requires_demonstrated_relationships_for_high_scores_and_passing(self) -> None:
+        prompt = grade_llama.build_prompt("map.pdf")
+        self.assertIn("A concept or term being present does not by itself demonstrate", prompt)
+        self.assertIn("do not award 3 or 4 unless meaningful relationships are visibly shown", prompt)
+        self.assertIn("prioritized DDx requires multiple plausible diagnoses ranked", prompt)
+        self.assertIn("Before Yes, verify internally at least one clear Integration strength", prompt)
+        self.assertIn("Expected: mostly 1 or 2 in Integration/Application and overall No", prompt)
+        self.assertIn("anti-inflation review", prompt)
+
     def test_decision_debug_metadata_only_reports_model_values(self) -> None:
         payload = valid_payload(3)
         payload["knowledge_acquisition"]["basic_science"]["score"] = 4
