@@ -269,6 +269,42 @@ def build_prompt(
         "identifies a meaningful visible deficiency; otherwise use 4 if the criterion's full intent is "
         "clearly demonstrated. For every 4, verify the map visibly demonstrates the full criterion intent "
         "without requiring perfection. Do not output this review.\n\n"
+        "OVERALL DECISION CALIBRATION\n"
+        "The final Yes/No decision is a holistic judgment of whether the concept map meets the educational "
+        "expectations of the rubric. It is not a requirement for every criterion to receive 4, every domain "
+        "to be flawless, a mathematical threshold or average, or an automatic failure because one or more "
+        "criteria receive 3 or have minor omissions. A strong map may receive several 3s and still earn Yes.\n"
+        "Return Yes when the visible map as a whole demonstrates central clinical and scientific concepts, "
+        "meaningfully connects patient data to diagnoses, mechanisms, or management, shows substantial "
+        "integration rather than isolated fact listing, applies knowledge to the working diagnosis or key "
+        "patient findings, and contains enough accurate evidence to satisfy the rubric's main intent. Minor "
+        "or moderate limitations that do not undermine overall educational performance do not require No.\n"
+        "Return No only for a substantial map-level deficiency that prevents the map meeting educational "
+        "expectations: for example, absent major domains, missing central concepts, mostly disconnected patient "
+        "data, absent or seriously incorrect pathophysiology, a list of terms without meaningful relationships, "
+        "multiple weak core criteria, or inaccuracies that substantially undermine reasoning. Before No, identify "
+        "the major unmet expectation, visible evidence of that failure, and why it outweighs the rest of the map. "
+        "Do not use generic incompleteness, several 3s, or opportunities for improvement as a failure basis.\n"
+        "Apply the same principle to each domain: answer Yes when its central purpose is clearly demonstrated "
+        "with mostly accurate, meaningfully connected evidence despite minor or moderate limitations; answer No "
+        "only when the domain's central purpose is not sufficiently demonstrated. Do not require every domain "
+        "criterion to receive 4.\n"
+        "A score of 4 represents full criterion intent at the expected student level, not expert depth, every "
+        "possible fact, exhaustive reference coverage, perfect wording, every relationship label, or no remaining "
+        "improvement opportunity. A successful map may still have areas_for_improvement; that feedback does not "
+        "imply overall No.\n"
+        "\nOVERALL CALIBRATION EXAMPLES (illustrative only; grade the submitted map independently)\n"
+        "Example A — strong map that passes: a map accurately connects patient findings, differential diagnoses, "
+        "working diagnosis, pathophysiology, treatment, and relevant foundational science. Some secondary "
+        "relationships are not fully labeled and several criteria receive 3. Correct overall decision: Yes, "
+        "because major educational objectives are demonstrated with only moderate limitations.\n"
+        "Example B — weak map that fails: a map lists symptoms, diagnoses, and treatments without connections, "
+        "has little or no pathophysiology, and omits major patient-specific reasoning. Correct overall decision: "
+        "No, because central integration and application expectations are not demonstrated.\n"
+        "Before returning JSON, silently review every domain No and final No: identify a specific substantial "
+        "visible deficiency affecting a central educational expectation, and confirm the decision is not based "
+        "only on 3s, minor omissions, or improvement opportunities. If no substantial deficiency exists, use Yes. "
+        "Do not output this review.\n\n"
         "OUTPUT CONTRACT\n"
         "Return exactly one valid JSON object. Do not return Markdown, headings, bullets, code fences, "
         "introductory text, trailing commentary, single quotes, comments, trailing commas, NaN, or Infinity. "
@@ -612,6 +648,35 @@ def _decision_snapshot(result: dict[str, Any]) -> dict[str, Any]:
     return decisions
 
 
+def _decision_debug_metadata(result: dict[str, Any]) -> dict[str, Any]:
+    """Expose the model's decisions and score distribution without changing its judgment."""
+    domain_decisions: dict[str, Any] = {}
+    scored_three: list[str] = []
+    scored_four: list[str] = []
+    for group, fields in CATEGORY_FIELDS.items():
+        section = result.get(group)
+        domain_decisions[group] = section.get("overall_decision") if isinstance(section, dict) else None
+        if not isinstance(section, dict):
+            continue
+        for field in fields:
+            item = section.get(field)
+            score = item.get("score") if isinstance(item, dict) else None
+            if score == 3:
+                scored_three.append(f"{group}.{field}")
+            elif score == 4:
+                scored_four.append(f"{group}.{field}")
+    overall = result.get("overall_meets_expectations")
+    return {
+        "domain_decisions": domain_decisions,
+        "overall_decision": overall,
+        # This is intentionally not inferred by Python; the model's grading_notes is retained verbatim.
+        "overall_no_substantial_deficiency_identified": "not independently assessed by Python",
+        "overall_decision_explanation": result.get("grading_notes"),
+        "criteria_scored_3": scored_three,
+        "criteria_scored_4": scored_four,
+    }
+
+
 def grade_pdf(
     pdf_path: Path,
     map_file: str,
@@ -710,6 +775,7 @@ def grade_pdf(
         parsed_path.write_text(json.dumps(validated, indent=2), encoding="utf-8")
         debug.update({
             "score_normalizations": initial_normalizations, "parsed_path": str(parsed_path),
+            **_decision_debug_metadata(validated),
             "http_status": diagnostics["http_status"], "finish_reason": diagnostics["finish_reason"],
             "usage": diagnostics["usage"], "response_content_length": len(raw_text),
             "final_result_source": "initial", "duration_seconds": round(time.monotonic() - started_at, 3),
@@ -768,6 +834,7 @@ def grade_pdf(
         parsed_path.write_text(json.dumps(validated, indent=2), encoding="utf-8")
         debug.update({
             "repair_score_normalizations": repair_normalizations, "parsed_path": str(parsed_path),
+            **_decision_debug_metadata(validated),
             "final_result_source": "repair", "duration_seconds": round(time.monotonic() - started_at, 3),
             "final_schema_valid": True,
         })

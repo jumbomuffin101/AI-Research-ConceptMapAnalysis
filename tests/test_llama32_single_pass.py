@@ -47,6 +47,25 @@ class Llama32SinglePassTests(unittest.TestCase):
         self.assertIn("Example B — score 3", prompt)
         self.assertIn("never treat reference text as map evidence", prompt)
 
+    def test_prompt_calibrates_holistic_yes_no_without_score_thresholds(self) -> None:
+        prompt = grade_llama.build_prompt("map.pdf")
+        self.assertIn("The final Yes/No decision is a holistic judgment", prompt)
+        self.assertIn("It is not a requirement for every criterion to receive 4", prompt)
+        self.assertIn("Return No only for a substantial map-level deficiency", prompt)
+        self.assertIn("Example A — strong map that passes", prompt)
+        self.assertIn("A successful map may still have areas_for_improvement", prompt)
+
+    def test_decision_debug_metadata_only_reports_model_values(self) -> None:
+        payload = valid_payload(3)
+        payload["knowledge_acquisition"]["basic_science"]["score"] = 4
+        payload["integration"]["overall_decision"] = "No"
+        metadata = grade_llama._decision_debug_metadata(payload)
+        self.assertEqual(metadata["domain_decisions"]["integration"], "No")
+        self.assertEqual(metadata["overall_decision"], "Yes")
+        self.assertIn("knowledge_acquisition.basic_science", metadata["criteria_scored_4"])
+        self.assertIn("integration.illness_scripts", metadata["criteria_scored_3"])
+        self.assertEqual(metadata["overall_no_substantial_deficiency_identified"], "not independently assessed by Python")
+
     def test_nvidia_payload_uses_image_and_expected_model(self) -> None:
         captured: dict = {}
         def post(_client, payload):
