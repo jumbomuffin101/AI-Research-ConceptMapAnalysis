@@ -20,6 +20,7 @@ PROVIDER = "NVIDIA NIM"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 API_KEY_ENV = "NVIDIA_API_KEY"
 MAX_TOKENS = 1800
+FULL_RETRY_MAX_TOKENS = 2600
 TEMPERATURE = 0.2
 TOP_P = 0.9
 TIMEOUT_SECONDS = 120
@@ -375,14 +376,15 @@ def _vision_messages(prompt: str, image_base64: str) -> list[dict[str, Any]]:
 
 
 def _nvidia_payload(
-    messages: list[dict[str, Any]], *, response_format: bool = False, temperature: float = TEMPERATURE
+    messages: list[dict[str, Any]], *, response_format: bool = False,
+    temperature: float = TEMPERATURE, top_p: float = TOP_P, max_tokens: int = MAX_TOKENS,
 ) -> dict[str, Any]:
     payload = {
         "messages": messages,
         "model": MODEL,
-        "max_tokens": MAX_TOKENS,
+        "max_tokens": max_tokens,
         "temperature": temperature,
-        "top_p": TOP_P,
+        "top_p": top_p,
         "stream": False,
     }
     if response_format:
@@ -470,6 +472,29 @@ def request_format_repair(
     )
 
 
+def request_complete_grading_retry(
+    client: Any, prompt: str, image_base64: str, *, response_format: bool
+) -> NvidiaChatCompletion:
+    """One new multimodal evaluation when the first response omitted substantive rubric grading."""
+    retry_prompt = (
+        "Your previous response was incomplete because it returned only summary fields and omitted the required "
+        "rubric grading. Perform the complete evaluation again from the supplied concept-map image and reference "
+        "materials. You must independently assign every required rubric score. Do not return a summary-only response. "
+        "The response is invalid unless knowledge_acquisition, integration, application, and transfer are present "
+        "with all 15 criterion scores.\n\nMANDATORY COMPLETENESS CHECK\n"
+        "Before responding, silently verify: all four domains are present; all 15 criteria and scores (integers 1-4) "
+        "are present; every criterion has an explanation; all domain decisions and overall_meets_expectations are "
+        "present; strengths and areas_for_improvement are arrays; and grading_notes is present. A summary-only "
+        "response is invalid. Return the full JSON object only.\n\n"
+        + prompt
+    )
+    return _post_nvidia(
+        client,
+        _nvidia_payload(
+            _vision_messages(retry_prompt, image_base64), response_format=response_format,
+            temperature=0, top_p=1, max_tokens=FULL_RETRY_MAX_TOKENS,
+        ),
+    )
 def _is_transient(error: Exception) -> bool:
     status = getattr(error, "status_code", None)
     return status in {429, 502, 503, 504} or "timeout" in error.__class__.__name__.lower()
@@ -593,6 +618,77 @@ def _parse_json_object(text: str, attempts: dict[str, Any]) -> tuple[str, dict[s
     error = RuntimeError("Llama 3.2 90B Vision returned malformed grading JSON.")
     error.attempts = attempts
     raise error
+
+
+def _lenient_json_object(text: str) -> dict[str, Any] | None:
+    """Recover a complete JSON object surrounded by Markdown/prose solely for inspection."""
+    cleaned = clean_json_output(text)
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", cleaned):
+        try:
+            value, _ = decoder.raw_decode(cleaned[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def inspect_grading_completeness(text: str) -> dict[str, Any]:
+    """Classify content before selecting a formatter or a full multimodal retry."""
+    parsed = _lenient_json_object(text)
+    domains_present: list[str] = []
+    criteria_present: list[str] = []
+    criteria_missing: list[str] = []
+    recoverable_scores: dict[str, int] = {}
+    all_explanations_present = False
+    all_domain_decisions_present = False
+    if isinstance(parsed, dict):
+        candidate = json.loads(json.dumps(parsed))
+        _normalize_scores(candidate)
+        recoverable_scores = _score_snapshot(candidate)
+        for group, fields in CATEGORY_FIELDS.items():
+            section = candidate.get(group)
+            if isinstance(section, dict):
+                domains_present.append(group)
+            for field in fields:
+                path = f"{group}.{field}"
+                item = section.get(field) if isinstance(section, dict) else None
+                if isinstance(item, dict) and path in recoverable_scores:
+                    criteria_present.append(path)
+                else:
+                    criteria_missing.append(path)
+        all_explanations_present = all(
+            isinstance(candidate.get(group), dict)
+            and all(isinstance(candidate[group].get(field), dict)
+                    and isinstance(candidate[group][field].get("explanation"), str)
+                    for field in fields)
+            for group, fields in CATEGORY_FIELDS.items()
+        )
+        all_domain_decisions_present = all(
+            isinstance(candidate.get(group), dict) and "overall_decision" in candidate[group]
+            for group in CATEGORY_FIELDS
+        )
+    domains_missing = [group for group in CATEGORY_FIELDS if group not in domains_present]
+    score_count = len(recoverable_scores)
+    all_scores_recoverable = score_count == REQUIRED_SCORE_COUNT
+    summary_keys = {"map_file", "model", "overall_meets_expectations", "strengths", "areas_for_improvement", "grading_notes"}
+    summary_only = isinstance(parsed, dict) and bool(parsed) and set(parsed).issubset(summary_keys)
+    complete = (
+        not domains_missing and not criteria_missing and all_scores_recoverable
+        and all_explanations_present and all_domain_decisions_present
+    )
+    return {
+        "classification": "format_only_failure" if complete else "incomplete_grading_failure",
+        "domains_present": domains_present,
+        "domains_missing": domains_missing,
+        "criteria_present": criteria_present,
+        "criteria_missing": criteria_missing,
+        "original_score_count": score_count,
+        "all_original_scores_recoverable": all_scores_recoverable,
+        "summary_only_response": summary_only,
+        "parsed": parsed,
+    }
 
 
 def _normalize_scores(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -765,6 +861,14 @@ def grade_pdf(
         "strengths_present_initial": False, "areas_for_improvement_present_initial": False,
         "strengths_present_after_repair": False, "areas_for_improvement_present_after_repair": False,
         "narrative_field_repair_required": False, "final_schema_valid": False,
+        "initial_response_classification": None, "initial_domains_present": [],
+        "initial_domains_missing": [], "initial_criteria_present": [],
+        "initial_criteria_missing": [], "initial_original_score_count": 0,
+        "initial_all_scores_recoverable": False, "initial_summary_only_response": False,
+        "format_repair_eligible": False, "full_multimodal_retry_required": False,
+        "full_multimodal_retry_attempted": False, "image_resent_for_full_retry": False,
+        # NIM JSON Schema support is not established for this endpoint/model; use json_object only.
+        "strict_json_schema_requested": False, "strict_json_schema_supported": None,
     }
     debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
     if progress_callback:
@@ -805,6 +909,16 @@ def grade_pdf(
         "initial_content_length": len(raw_text), "initial_response": diagnostics,
         "raw_path": str(raw_path),
     })
+    inspection = inspect_grading_completeness(raw_text)
+    debug.update({
+        "initial_domains_present": inspection["domains_present"],
+        "initial_domains_missing": inspection["domains_missing"],
+        "initial_criteria_present": inspection["criteria_present"],
+        "initial_criteria_missing": inspection["criteria_missing"],
+        "initial_original_score_count": inspection["original_score_count"],
+        "initial_all_scores_recoverable": inspection["all_original_scores_recoverable"],
+        "initial_summary_only_response": inspection["summary_only_response"],
+    })
     initial_parsed: dict[str, Any] | None = None
     initial_scores: dict[str, int] = {}
     initial_decisions: dict[str, Any] = {}
@@ -820,6 +934,7 @@ def grade_pdf(
         initial_decisions = _decision_snapshot(initial_parsed)
         validated = _validate_existing_schema(initial_parsed)
         debug["initial_schema_validation_success"] = True
+        debug["initial_response_classification"] = "valid_complete_grading"
         parsed_path = Path(f"{debug_prefix}_grading_parsed.json")
         parsed_path.write_text(json.dumps(validated, indent=2), encoding="utf-8")
         debug.update({
@@ -840,8 +955,79 @@ def grade_pdf(
         initial_error_text = str(initial_error)
         debug["initial_error"] = initial_error_text
 
+    if inspection["classification"] == "incomplete_grading_failure":
+        debug.update({
+            "initial_response_classification": "incomplete_grading_failure",
+            "full_multimodal_retry_required": True,
+            "full_multimodal_retry_attempted": True,
+            "image_resent_for_full_retry": True,
+        })
+        if progress_callback:
+            progress_callback("Llama returned an incomplete evaluation. Running one complete grading retry...")
+        try:
+            retry_response, full_retry_debug = _request_with_retry(
+                lambda: request_complete_grading_retry(
+                    client, prompt, image_base64,
+                    response_format=debug.get("response_format_supported") is True,
+                ),
+                progress_callback,
+            )
+            full_retry_attempts = {"full_multimodal_retry": _response_dump(retry_response)}
+            retry_text = response_text(retry_response, full_retry_attempts)
+            retry_diagnostics = _response_diagnostics(retry_response)
+            retry_raw_path = Path(f"{debug_prefix}_full_retry_raw.txt")
+            retry_raw_path.write_text(retry_text, encoding="utf-8")
+            debug.update({
+                "full_multimodal_retry_request_count": full_retry_debug["request_count"],
+                "full_multimodal_retry_http_status": retry_diagnostics["http_status"],
+                "full_multimodal_retry_finish_reason": retry_diagnostics["finish_reason"],
+                "full_multimodal_retry_content_length": len(retry_text),
+                "full_multimodal_retry_response": retry_diagnostics,
+                "full_multimodal_retry_raw_path": str(retry_raw_path),
+                "full_multimodal_retry_max_tokens": FULL_RETRY_MAX_TOKENS,
+            })
+            _, retried = _parse_json_object(retry_text, full_retry_attempts)
+            retry_inspection = inspect_grading_completeness(retry_text)
+            if retry_inspection["classification"] != "format_only_failure":
+                raise RuntimeError("The complete grading retry still omitted required rubric domains, criteria, or scores.")
+            retry_normalizations = _normalize_scores(retried)
+            validated = _validate_existing_schema(retried)
+            parsed_path = Path(f"{debug_prefix}_grading_parsed.json")
+            parsed_path.write_text(json.dumps(validated, indent=2), encoding="utf-8")
+            debug.update({
+                "full_multimodal_retry_schema_validation_success": True,
+                "full_multimodal_retry_score_normalizations": retry_normalizations,
+                "parsed_path": str(parsed_path), **_decision_debug_metadata(validated),
+                "final_result_source": "full_multimodal_retry", "final_schema_valid": True,
+                "duration_seconds": round(time.monotonic() - started_at, 3),
+            })
+            debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
+            return {"model": MODEL, "provider": PROVIDER, "raw_text": retry_text,
+                    "cleaned_text": json.dumps(validated, separators=(",", ":")), "response": retry_response,
+                    "prompt": prompt, "prompt_path": prompt_path, "image_path": image_path,
+                    "raw_path": retry_raw_path, "debug": {**debug, "debug_path": str(debug_path)}}
+        except Exception as full_retry_error:
+            debug.update({
+                "full_multimodal_retry_error": str(full_retry_error),
+                "full_multimodal_retry_attempts": getattr(full_retry_error, "attempts", None),
+                "duration_seconds": round(time.monotonic() - started_at, 3), "final_result_source": "failure",
+            })
+            debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
+            raise MalformedLlamaVisionJsonError(
+                debug,
+                "Llama returned an incomplete evaluation, and the complete grading retry did not return valid required grading JSON.",
+            ) from full_retry_error
+
     # A complete but malformed/invalid response gets one formatter request only.  It has no image,
     # reference context, or rubric, so it cannot regrade the map.
+    recoverable_initial = inspection.get("parsed")
+    if isinstance(recoverable_initial, dict):
+        recoverable_initial = json.loads(json.dumps(recoverable_initial))
+        _normalize_scores(recoverable_initial)
+        initial_scores = _score_snapshot(recoverable_initial)
+        initial_decisions = _decision_snapshot(recoverable_initial)
+    debug["initial_response_classification"] = "format_only_failure"
+    debug["format_repair_eligible"] = True
     debug["repair_attempted"] = True
     if progress_callback:
         progress_callback("Llama completed the grading but returned the wrong format. Converting it to the required JSON structure...")
@@ -871,11 +1057,9 @@ def grade_pdf(
         debug["areas_for_improvement_present_after_repair"] = _narrative_field_present(repaired, "areas_for_improvement")
         repair_normalizations = _normalize_scores(repaired)
         repaired_scores = _score_snapshot(repaired)
-        if initial_parsed is not None and (
-            len(initial_scores) != REQUIRED_SCORE_COUNT or repaired_scores != initial_scores
-        ):
+        if len(initial_scores) != REQUIRED_SCORE_COUNT or repaired_scores != initial_scores:
             raise RuntimeError("The JSON formatter omitted, added, or changed one or more model-generated scores.")
-        if initial_parsed is not None and _decision_snapshot(repaired) != initial_decisions:
+        if _decision_snapshot(repaired) != initial_decisions:
             raise RuntimeError("The JSON formatter changed one or more model-generated Yes/No decisions.")
         validated = _validate_existing_schema(repaired)
         debug["repair_schema_validation_success"] = True
