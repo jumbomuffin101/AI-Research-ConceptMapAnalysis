@@ -37,6 +37,16 @@ class Llama32SinglePassTests(unittest.TestCase):
         self.assertEqual(prompt.count(grade_llama.SPRING_2025_RUBRIC), 1)
         self.assertNotIn('"score": 1', prompt)
 
+    def test_prompt_calibrates_three_vs_four_without_weakening_one_or_two(self) -> None:
+        prompt = grade_llama.build_prompt("map.pdf")
+        self.assertIn("A score of 4 does not require perfection", prompt)
+        self.assertIn("meaningful visible limitation", prompt)
+        self.assertIn("use 2 for partial, superficial, inconsistent, or weakly connected", prompt)
+        self.assertIn("use 1 for absent, largely incorrect, or unsupported", prompt)
+        self.assertIn("Example A — score 4", prompt)
+        self.assertIn("Example B — score 3", prompt)
+        self.assertIn("never treat reference text as map evidence", prompt)
+
     def test_nvidia_payload_uses_image_and_expected_model(self) -> None:
         captured: dict = {}
         def post(_client, payload):
