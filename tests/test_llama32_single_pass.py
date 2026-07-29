@@ -65,6 +65,17 @@ class Llama32SinglePassTests(unittest.TestCase):
         self.assertIn("Expected: mostly 1 or 2 in Integration/Application and overall No", prompt)
         self.assertIn("anti-inflation review", prompt)
 
+    def test_prompt_allows_holistic_domains_without_weakening_list_based_map_rules(self) -> None:
+        prompt = grade_llama.build_prompt("map.pdf")
+        self.assertIn("A domain decision is holistic", prompt)
+        self.assertIn("health-system science and determinants of health support the domain", prompt)
+        self.assertIn("a numbered list is not required", prompt)
+        self.assertIn("a missing detail is usually 3 rather than 2", prompt)
+        self.assertIn("terminology, density, and lists without meaningful relationships remain insufficient", prompt)
+        retry = grade_llama.build_full_retry_prompt("map.pdf")
+        self.assertIn("Domain decisions are holistic", retry)
+        self.assertIn("require meaningful visible relationships", retry)
+
     def test_full_retry_prompt_is_compact_and_contains_every_criterion(self) -> None:
         initial = grade_llama.build_prompt("map.pdf")
         retry = grade_llama.build_full_retry_prompt("map.pdf")
