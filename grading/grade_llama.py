@@ -869,6 +869,7 @@ def grade_pdf(
         "full_multimodal_retry_attempted": False, "image_resent_for_full_retry": False,
         # NIM JSON Schema support is not established for this endpoint/model; use json_object only.
         "strict_json_schema_requested": False, "strict_json_schema_supported": None,
+        "llama_recovery_version": "incomplete-grading-retry-v2",
     }
     debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
     if progress_callback:
@@ -961,6 +962,8 @@ def grade_pdf(
             "full_multimodal_retry_required": True,
             "full_multimodal_retry_attempted": True,
             "image_resent_for_full_retry": True,
+            # Compatibility field: this is a grading retry, never a format repair.
+            "retry_attempted": True,
         })
         if progress_callback:
             progress_callback("Llama returned an incomplete evaluation. Running one complete grading retry...")
@@ -981,6 +984,8 @@ def grade_pdf(
                 "full_multimodal_retry_request_count": full_retry_debug["request_count"],
                 "full_multimodal_retry_http_status": retry_diagnostics["http_status"],
                 "full_multimodal_retry_finish_reason": retry_diagnostics["finish_reason"],
+                "full_retry_http_status": retry_diagnostics["http_status"],
+                "full_retry_finish_reason": retry_diagnostics["finish_reason"],
                 "full_multimodal_retry_content_length": len(retry_text),
                 "full_multimodal_retry_response": retry_diagnostics,
                 "full_multimodal_retry_raw_path": str(retry_raw_path),
@@ -996,6 +1001,7 @@ def grade_pdf(
             parsed_path.write_text(json.dumps(validated, indent=2), encoding="utf-8")
             debug.update({
                 "full_multimodal_retry_schema_validation_success": True,
+                "full_retry_schema_validation_success": True,
                 "full_multimodal_retry_score_normalizations": retry_normalizations,
                 "parsed_path": str(parsed_path), **_decision_debug_metadata(validated),
                 "final_result_source": "full_multimodal_retry", "final_schema_valid": True,

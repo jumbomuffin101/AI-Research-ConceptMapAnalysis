@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from grading import grade_gemma, grade_llama
-from interface.grading_runner import MalformedResultError, parse_model_json, selected_model_names
+from interface import grading_runner
+from interface.grading_runner import EvaluationResult, MalformedResultError, parse_model_json, run_evaluation, selected_model_names
 from scripts import generate_evaluation_report
 
 
@@ -177,12 +178,12 @@ class Llama32SinglePassTests(unittest.TestCase):
         self.assertFalse(result["debug"]["image_resent_for_repair"])
         self.assertEqual(json.loads(result["cleaned_text"])["integration"]["illness_scripts"]["score"], 3)
 
-    def test_malformed_repair_fails_after_one_repair_call(self) -> None:
+    def test_unrecoverable_content_uses_one_full_retry_not_formatter(self) -> None:
         initial = grade_llama.NvidiaChatCompletion(
             data={"choices": [{"finish_reason": "stop", "message": {"content": "not JSON"}}]},
             http_response=HttpResponse(), transport={"http_status": 200},
         )
-        repair = grade_llama.NvidiaChatCompletion(
+        retry = grade_llama.NvidiaChatCompletion(
             data={"choices": [{"finish_reason": "stop", "message": {"content": "still not JSON"}}]},
             http_response=HttpResponse(), transport={"http_status": 200},
         )
@@ -193,32 +194,96 @@ class Llama32SinglePassTests(unittest.TestCase):
              patch.object(grade_llama, "render_pdf_first_page", render), \
              patch.object(grade_llama, "create_client", return_value=object()), \
              patch.object(grade_llama, "request_grade", return_value=initial), \
-             patch.object(grade_llama, "request_format_repair", return_value=repair) as repair_call:
+             patch.object(grade_llama, "request_complete_grading_retry", return_value=retry) as full_retry, \
+             patch.object(grade_llama, "request_format_repair") as repair_call:
             with self.assertRaises(grade_llama.MalformedLlamaVisionJsonError):
                 grade_llama.grade_pdf(Path(temp) / "map.pdf", "map.pdf", Path(temp) / "debug")
-        repair_call.assert_called_once()
+        repair_call.assert_not_called()
+        full_retry.assert_called_once()
 
-    def test_repair_cannot_add_a_missing_score_from_parseable_initial_json(self) -> None:
-        incomplete = valid_payload(3)
-        del incomplete["knowledge_acquisition"]["basic_science"]["score"]
+    def test_summary_only_json_uses_full_multimodal_retry_not_formatter(self) -> None:
+        incomplete = {
+            "map_file": "map.pdf", "model": grade_llama.MODEL, "overall_meets_expectations": "Yes",
+            "strengths": ["Clear concepts."], "areas_for_improvement": ["Add connections."], "grading_notes": "Summary only.",
+        }
         initial = grade_llama.NvidiaChatCompletion(
             data={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(incomplete)}}]},
             http_response=HttpResponse(), transport={"http_status": 200},
         )
-        repair = grade_llama.NvidiaChatCompletion(
+        full_retry = grade_llama.NvidiaChatCompletion(
             data={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(valid_payload(3))}}]},
             http_response=HttpResponse(), transport={"http_status": 200},
         )
+        images: list[str] = []
         def render(_pdf, output):
             output.parent.mkdir(parents=True, exist_ok=True); output.write_bytes(b"jpeg")
             return {"path": output, "base64": "image", "width": 10, "height": 10, "bytes": 4}
+        def initial_request(_client, _prompt, image, **_kwargs):
+            images.append(image)
+            return initial
+        def retry_request(_client, _prompt, image, **_kwargs):
+            images.append(image)
+            return full_retry
         with tempfile.TemporaryDirectory() as temp, \
              patch.object(grade_llama, "render_pdf_first_page", render), \
              patch.object(grade_llama, "create_client", return_value=object()), \
-             patch.object(grade_llama, "request_grade", return_value=initial), \
-             patch.object(grade_llama, "request_format_repair", return_value=repair):
-            with self.assertRaises(grade_llama.MalformedLlamaVisionJsonError):
-                grade_llama.grade_pdf(Path(temp) / "map.pdf", "map.pdf", Path(temp) / "debug")
+             patch.object(grade_llama, "request_grade", initial_request), \
+             patch.object(grade_llama, "request_complete_grading_retry", retry_request), \
+             patch.object(grade_llama, "request_format_repair") as formatter:
+            result = grade_llama.grade_pdf(Path(temp) / "map.pdf", "map.pdf", Path(temp) / "debug")
+        formatter.assert_not_called()
+        self.assertEqual(images, ["image", "image"])
+        self.assertEqual(result["debug"]["initial_response_classification"], "incomplete_grading_failure")
+        self.assertEqual(result["debug"]["initial_original_score_count"], 0)
+        self.assertTrue(result["debug"]["initial_summary_only_response"])
+        self.assertFalse(result["debug"]["format_repair_eligible"])
+        self.assertTrue(result["debug"]["image_resent_for_full_retry"])
+        self.assertEqual(result["debug"]["final_result_source"], "full_multimodal_retry")
+
+    def test_missing_one_domain_uses_full_multimodal_retry(self) -> None:
+        incomplete = valid_payload(3)
+        del incomplete["transfer"]
+        inspection = grade_llama.inspect_grading_completeness(json.dumps(incomplete))
+        self.assertEqual(inspection["classification"], "incomplete_grading_failure")
+        self.assertIn("transfer", inspection["domains_missing"])
+
+    def test_streamlit_public_runner_uses_full_retry_for_summary_only_llama(self) -> None:
+        summary = {
+            "map_file": "map.pdf", "model": grade_llama.MODEL, "overall_meets_expectations": "Yes",
+            "strengths": ["Clear concepts."], "areas_for_improvement": ["Add connections."], "grading_notes": "Summary only.",
+        }
+        first = grade_llama.NvidiaChatCompletion(
+            data={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(summary)}}]},
+            http_response=HttpResponse(), transport={"http_status": 200},
+        )
+        second = grade_llama.NvidiaChatCompletion(
+            data={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(valid_payload(3))}}]},
+            http_response=HttpResponse(), transport={"http_status": 200},
+        )
+        sent_images: list[str] = []
+        def render(_pdf, output):
+            output.parent.mkdir(parents=True, exist_ok=True); output.write_bytes(b"jpeg")
+            return {"path": output, "base64": "image", "width": 10, "height": 10, "bytes": 4}
+        def first_request(_client, _prompt, image, **_kwargs):
+            sent_images.append(image); return first
+        def full_retry(_client, _prompt, image, **_kwargs):
+            sent_images.append(image); return second
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pdf_path = root / "map.pdf"; pdf_path.write_bytes(b"pdf")
+            with patch.object(grade_llama, "render_pdf_first_page", render), \
+                 patch.object(grade_llama, "create_client", return_value=object()), \
+                 patch.object(grade_llama, "request_grade", first_request), \
+                 patch.object(grade_llama, "request_complete_grading_retry", full_retry), \
+                 patch.object(grade_llama, "request_format_repair") as formatter, \
+                 patch.object(grading_runner, "OUTPUT_DIR", root / "outputs"), \
+                 patch.object(grading_runner, "DEBUG_DIR", root / "debug"), \
+                 patch.object(grading_runner, "FAILURE_EVALUATION_DIR", root / "failures"):
+                outcomes = run_evaluation(pdf_path, ["Llama 3.2 90B Vision"], "map.pdf")
+        formatter.assert_not_called()
+        self.assertEqual(sent_images, ["image", "image"])
+        self.assertEqual(len(outcomes), 1)
+        self.assertIsInstance(outcomes[0], EvaluationResult)
 
     def test_missing_narrative_fields_trigger_repair_and_preserve_scores_and_decisions(self) -> None:
         for missing_fields in (("strengths",), ("areas_for_improvement",), ("strengths", "areas_for_improvement")):
