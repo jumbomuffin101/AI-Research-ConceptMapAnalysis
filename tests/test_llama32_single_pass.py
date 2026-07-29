@@ -65,6 +65,50 @@ class Llama32SinglePassTests(unittest.TestCase):
         self.assertIn("Expected: mostly 1 or 2 in Integration/Application and overall No", prompt)
         self.assertIn("anti-inflation review", prompt)
 
+    def test_full_retry_prompt_is_compact_and_contains_every_criterion(self) -> None:
+        initial = grade_llama.build_prompt("map.pdf")
+        retry = grade_llama.build_full_retry_prompt("map.pdf")
+        self.assertLess(len(retry), len(initial))
+        self.assertLess(len(retry), 8000)
+        self.assertIn("Your previous response was incomplete", retry)
+        self.assertNotIn("ANTI-INFLATION REVIEW", retry)
+        for group, fields in grade_llama.CATEGORY_FIELDS.items():
+            self.assertIn(group, retry)
+            for field in fields:
+                self.assertIn(field, retry)
+
+    def test_full_retry_uses_streaming_and_its_own_timeout(self) -> None:
+        captured: dict = {}
+        def post(_client, payload, **kwargs):
+            captured["payload"] = payload; captured["kwargs"] = kwargs
+            return object()
+        with patch.object(grade_llama, "_post_nvidia", post):
+            grade_llama.request_complete_grading_retry(object(), "compact prompt", "image", response_format=True)
+        self.assertTrue(captured["payload"]["stream"])
+        self.assertTrue(captured["kwargs"]["stream"])
+        self.assertEqual(captured["kwargs"]["timeout"], (30, 300))
+        self.assertEqual(captured["payload"]["max_tokens"], 2600)
+
+    def test_streaming_chunks_are_collected_into_completion_content(self) -> None:
+        class StreamResponse:
+            status_code = 200
+            headers: dict[str, str] = {}
+            text = ""
+            def iter_lines(self, decode_unicode=True):
+                return iter([
+                    'data: {"choices":[{"delta":{"content":"{\\\"a\\\":"},"finish_reason":null}]}',
+                    'data: {"choices":[{"delta":{"content":"1}"},"finish_reason":"stop"}]}',
+                    "data: [DONE]",
+                ])
+        class Requests:
+            def post(self, *_args, **_kwargs): return StreamResponse()
+        completion = grade_llama._post_nvidia(
+            {"requests": Requests(), "headers": {}}, {"stream": True}, stream=True, timeout=(30, 300)
+        )
+        self.assertEqual(completion.choices[0]["message"]["content"], '{"a":1}')
+        self.assertTrue(completion.transport["streaming_enabled"])
+        self.assertEqual(completion.transport["read_timeout_seconds"], 300)
+
     def test_decision_debug_metadata_only_reports_model_values(self) -> None:
         payload = valid_payload(3)
         payload["knowledge_acquisition"]["basic_science"]["score"] = 4
@@ -246,6 +290,29 @@ class Llama32SinglePassTests(unittest.TestCase):
         inspection = grade_llama.inspect_grading_completeness(json.dumps(incomplete))
         self.assertEqual(inspection["classification"], "incomplete_grading_failure")
         self.assertIn("transfer", inspection["domains_missing"])
+
+    def test_full_retry_timeout_is_transport_failure_not_json_or_format_repair(self) -> None:
+        summary = {
+            "map_file": "map.pdf", "model": grade_llama.MODEL, "overall_meets_expectations": "Yes",
+            "strengths": ["Clear concepts."], "areas_for_improvement": ["Add connections."], "grading_notes": "Summary only.",
+        }
+        initial = grade_llama.NvidiaChatCompletion(
+            data={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(summary)}}]},
+            http_response=HttpResponse(), transport={"http_status": 200},
+        )
+        def render(_pdf, output):
+            output.parent.mkdir(parents=True, exist_ok=True); output.write_bytes(b"jpeg")
+            return {"path": output, "base64": "image", "width": 10, "height": 10, "bytes": 4}
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(grade_llama, "render_pdf_first_page", render), \
+             patch.object(grade_llama, "create_client", return_value=object()), \
+             patch.object(grade_llama, "request_grade", return_value=initial), \
+             patch.object(grade_llama, "request_complete_grading_retry", side_effect=TimeoutError("read timed out")), \
+             patch.object(grade_llama, "request_format_repair") as formatter:
+            with self.assertRaisesRegex(grade_llama.MalformedLlamaVisionJsonError, "timed out before NVIDIA") as caught:
+                grade_llama.grade_pdf(Path(temp) / "map.pdf", "map.pdf", Path(temp) / "debug")
+        formatter.assert_not_called()
+        self.assertEqual(caught.exception.attempts["full_retry_failure_type"], "timeout")
 
     def test_streamlit_public_runner_uses_full_retry_for_summary_only_llama(self) -> None:
         summary = {

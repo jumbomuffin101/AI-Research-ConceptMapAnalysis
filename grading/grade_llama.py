@@ -24,6 +24,8 @@ FULL_RETRY_MAX_TOKENS = 2600
 TEMPERATURE = 0.2
 TOP_P = 0.9
 TIMEOUT_SECONDS = 120
+CONNECT_TIMEOUT_SECONDS = 30
+FULL_RETRY_READ_TIMEOUT_SECONDS = 300
 IMAGE_MIME_TYPE = "image/jpeg"
 
 CATEGORY_FIELDS = {
@@ -40,6 +42,36 @@ CATEGORY_FIELDS = {
     "transfer": ["prior_basic_science", "prior_clinical_concepts", "deepens_understanding"],
 }
 REQUIRED_SCORE_COUNT = sum(len(fields) for fields in CATEGORY_FIELDS.values())
+
+RETRY_CRITERION_LABELS = {
+    "knowledge_acquisition": {
+        "basic_science": "Identifies key knowledge from basic sciences learned this unit",
+        "health_system_science": "Identifies key knowledge from health system science learned this unit",
+        "clinical_science": "Identifies key knowledge from clinical sciences learned this unit",
+        "patient_case_information": "Extracts key information from the patient case",
+        "determinants_of_health": "Identifies key determinants of health (DoH)",
+        "overall": "Does the student's map include key knowledge from the case and content learned during this unit?",
+    },
+    "integration": {
+        "prioritized_differential_diagnosis": "Includes a prioritized differential diagnosis (DDx)",
+        "illness_scripts": "Connects patient data to reflect illness script(s)",
+        "basic_to_foundational_science": "Connects basic science knowledge to foundational science information",
+        "patient_data_to_clinical_information": "Connects patient data to relevant clinical information",
+        "patient_data_to_basic_science": "Connects patient data to relevant basic science knowledge",
+        "overall": "Did the learner connect key knowledge accurately and comprehensively?",
+    },
+    "application": {
+        "working_diagnosis_pathophysiology": "Explains pathophysiology of the working diagnosis",
+        "patient_data_pathophysiology": "Explains pathophysiology underlying key patient data",
+        "overall": "Did the learner explain key clinical data with relevant basic science?",
+    },
+    "transfer": {
+        "prior_basic_science": "Identifies relevant previous-course basic science concepts",
+        "prior_clinical_concepts": "Identifies relevant previous-course clinical concepts",
+        "deepens_understanding": "Uses previous knowledge to deepen understanding of pathophysiology",
+        "overall": "Did the learner use previously learned content to deepen understanding?",
+    },
+}
 
 
 class EmptyLlamaVisionResponseError(RuntimeError):
@@ -228,6 +260,7 @@ def build_prompt(
         if reference_context
         else ""
     )
+
     return (
         "You are grading a medical student concept map using the Spring 2025 Concept Map Feedback "
         "Tool for SUMMATIVE Activities. Inspect all visible concepts, labels, groupings, arrows, and "
@@ -367,6 +400,44 @@ def build_prompt(
     )
 
 
+def build_full_retry_prompt(
+    map_file: str, reference_materials: list[dict[str, str]] | None = None
+) -> str:
+    """Compact recovery prompt: exact rubric/schema, without the initial request's calibration essays."""
+    reference_context = _compress_reference_materials(reference_materials)
+    reference_section = (
+        "\nREFERENCE SUMMARY (comparison standard only; never map evidence)\n" + reference_context + "\n"
+        if reference_context else ""
+    )
+    rubric_lines: list[str] = []
+    for domain, fields in RETRY_CRITERION_LABELS.items():
+        rubric_lines.append(domain.upper())
+        for key, label in fields.items():
+            rubric_lines.append(f"- {key}: {label}")
+    compact_rubric = "\n".join(rubric_lines)
+    return (
+        "Your previous response was incomplete because it returned only a summary. Return the complete rubric "
+        "evaluation this time. Inspect the supplied concept-map image. Do not write introductory text or summary "
+        "fields before constructing the rubric domains. The JSON is invalid unless all four domains and all 15 "
+        "criterion scores are included.\n\nREQUIRED JSON SCHEMA\n"
+        + json.dumps(_schema_template(), separators=(",", ":"))
+        + "\n\nTASK\nGrade the student concept map using the exact Spring 2025 Concept Map Feedback Tool below. "
+        "Evaluate only visible map content; references define expected content but are not map evidence.\n"
+        + reference_section
+        + "\nEXACT SPRING 2025 CRITERIA\n" + compact_rubric
+        + "\nCOMPACT CALIBRATION\n"
+        "Score 4: clearly and substantially demonstrates the criterion with accurate, specific, connected evidence; "
+        "perfection is not required. Score 3: mostly demonstrates it with one meaningful limitation. Score 2: some "
+        "relevant evidence is present but only partially, superficially, or inconsistently demonstrated. Score 1: "
+        "absent, largely unsupported, seriously incorrect, or isolated terms. Presence of terminology alone does not "
+        "demonstrate integration, application, or transfer.\n\nMANDATORY COMPLETENESS CHECK\n"
+        "Before responding, silently verify knowledge_acquisition, integration, application, and transfer are present; "
+        "all 15 criteria have integer scores 1-4 and explanations; all domain decisions, overall_meets_expectations, "
+        "strengths (array), areas_for_improvement (array), and grading_notes are present. A summary-only response is "
+        "invalid. Return the full JSON object only."
+    )
+
+
 def _vision_messages(prompt: str, image_base64: str) -> list[dict[str, Any]]:
     """NVIDIA NIM OpenAI-compatible multimodal message: text plus a JPEG data URL."""
     return [{"role": "user", "content": [
@@ -378,6 +449,7 @@ def _vision_messages(prompt: str, image_base64: str) -> list[dict[str, Any]]:
 def _nvidia_payload(
     messages: list[dict[str, Any]], *, response_format: bool = False,
     temperature: float = TEMPERATURE, top_p: float = TOP_P, max_tokens: int = MAX_TOKENS,
+    stream: bool = False,
 ) -> dict[str, Any]:
     payload = {
         "messages": messages,
@@ -385,25 +457,69 @@ def _nvidia_payload(
         "max_tokens": max_tokens,
         "temperature": temperature,
         "top_p": top_p,
-        "stream": False,
+        "stream": stream,
     }
     if response_format:
         payload["response_format"] = {"type": "json_object"}
     return payload
 
 
-def _post_nvidia(client: dict[str, Any], payload: dict[str, Any]) -> NvidiaChatCompletion:
+def _post_nvidia(
+    client: dict[str, Any], payload: dict[str, Any], *, stream: bool = False,
+    timeout: int | tuple[int, int] = TIMEOUT_SECONDS,
+) -> NvidiaChatCompletion:
     endpoint = f"{BASE_URL}/chat/completions"
     started_at = time.monotonic()
+    headers = dict(client["headers"])
+    if stream:
+        headers["Accept"] = "text/event-stream"
     response = client["requests"].post(
-        endpoint, headers=client["headers"], json=payload, stream=False, timeout=TIMEOUT_SECONDS
+        endpoint, headers=headers, json=payload, stream=stream, timeout=timeout
     )
-    response_text = response.text
-    try:
-        data = response.json()
-    except (TypeError, ValueError):
-        data = None
     headers = dict(getattr(response, "headers", {}) or {})
+    if stream:
+        raw_lines: list[str] = []
+        chunks: list[str] = []
+        finish_reason: Any = None
+        usage: Any = None
+        time_to_first_token: float | None = None
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else str(raw_line)
+            raw_lines.append(line)
+            if not line.startswith("data:"):
+                continue
+            event_text = line[5:].strip()
+            if event_text == "[DONE]":
+                break
+            try:
+                event = json.loads(event_text)
+            except json.JSONDecodeError:
+                continue
+            choices = event.get("choices") or []
+            if choices:
+                choice = choices[0]
+                delta = choice.get("delta") or {}
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    if time_to_first_token is None:
+                        time_to_first_token = round(time.monotonic() - started_at, 3)
+                    chunks.append(content)
+                finish_reason = choice.get("finish_reason") or finish_reason
+            usage = event.get("usage") or usage
+        response_text = "\n".join(raw_lines)
+        data = {
+            "choices": [{"finish_reason": finish_reason, "message": {"content": "".join(chunks)}}],
+            "usage": usage or {}, "model": MODEL,
+        }
+    else:
+        response_text = response.text
+        try:
+            data = response.json()
+        except (TypeError, ValueError):
+            data = None
+        time_to_first_token = None
     details = {
         "provider": "nvidia",
         "http_status": getattr(response, "status_code", None),
@@ -415,6 +531,10 @@ def _post_nvidia(client: dict[str, Any], payload: dict[str, Any]) -> NvidiaChatC
             if key.lower() in {"x-request-id", "request-id", "nvcf-request-id", "nvcf-requestid"}
         },
         "elapsed_request_seconds": round(time.monotonic() - started_at, 3),
+        "streaming_enabled": stream,
+        "time_to_first_token_seconds": time_to_first_token,
+        "connect_timeout_seconds": timeout[0] if isinstance(timeout, tuple) else timeout,
+        "read_timeout_seconds": timeout[1] if isinstance(timeout, tuple) else timeout,
     }
     if not (200 <= int(getattr(response, "status_code", 0)) < 300):
         body = response_text.strip()
@@ -473,39 +593,33 @@ def request_format_repair(
 
 
 def request_complete_grading_retry(
-    client: Any, prompt: str, image_base64: str, *, response_format: bool
+    client: Any, retry_prompt: str, image_base64: str, *, response_format: bool
 ) -> NvidiaChatCompletion:
     """One new multimodal evaluation when the first response omitted substantive rubric grading."""
-    retry_prompt = (
-        "Your previous response was incomplete because it returned only summary fields and omitted the required "
-        "rubric grading. Perform the complete evaluation again from the supplied concept-map image and reference "
-        "materials. You must independently assign every required rubric score. Do not return a summary-only response. "
-        "The response is invalid unless knowledge_acquisition, integration, application, and transfer are present "
-        "with all 15 criterion scores.\n\nMANDATORY COMPLETENESS CHECK\n"
-        "Before responding, silently verify: all four domains are present; all 15 criteria and scores (integers 1-4) "
-        "are present; every criterion has an explanation; all domain decisions and overall_meets_expectations are "
-        "present; strengths and areas_for_improvement are arrays; and grading_notes is present. A summary-only "
-        "response is invalid. Return the full JSON object only.\n\n"
-        + prompt
-    )
     return _post_nvidia(
         client,
         _nvidia_payload(
             _vision_messages(retry_prompt, image_base64), response_format=response_format,
             temperature=0, top_p=1, max_tokens=FULL_RETRY_MAX_TOKENS,
+            stream=True,
         ),
+        stream=True,
+        timeout=(CONNECT_TIMEOUT_SECONDS, FULL_RETRY_READ_TIMEOUT_SECONDS),
     )
 def _is_transient(error: Exception) -> bool:
     status = getattr(error, "status_code", None)
     return status in {429, 502, 503, 504} or "timeout" in error.__class__.__name__.lower()
 
 
-def _request_with_retry(request: Any, progress_callback: Any | None = None) -> tuple[Any, dict[str, Any]]:
+def _request_with_retry(
+    request: Any, progress_callback: Any | None = None, *, retry_timeouts: bool = True
+) -> tuple[Any, dict[str, Any]]:
     try:
         response = request()
         return response, {"request_count": 1, "retry_attempted": False, "http_status": response.transport.get("http_status")}
     except Exception as first_error:
-        if not _is_transient(first_error):
+        is_timeout = "timeout" in first_error.__class__.__name__.lower() or "timed out" in str(first_error).lower()
+        if not _is_transient(first_error) or (is_timeout and not retry_timeouts):
             raise
         if progress_callback:
             progress_callback("Llama 3.2 90B Vision request failed transiently. Retrying once...")
@@ -870,6 +984,11 @@ def grade_pdf(
         # NIM JSON Schema support is not established for this endpoint/model; use json_object only.
         "strict_json_schema_requested": False, "strict_json_schema_supported": None,
         "llama_recovery_version": "incomplete-grading-retry-v2",
+        "initial_request": {
+            "prompt_character_count": len(prompt), "prompt_token_count": round(len(prompt) / 4),
+            "max_tokens": MAX_TOKENS, "temperature": TEMPERATURE, "top_p": TOP_P,
+            "connect_timeout_seconds": TIMEOUT_SECONDS, "read_timeout_seconds": TIMEOUT_SECONDS,
+        },
     }
     debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
     if progress_callback:
@@ -967,13 +1086,25 @@ def grade_pdf(
         })
         if progress_callback:
             progress_callback("Llama returned an incomplete evaluation. Running one complete grading retry...")
+        full_retry_prompt = build_full_retry_prompt(map_file, reference_materials)
+        debug["full_retry_request"] = {
+            "prompt_character_count": len(full_retry_prompt), "prompt_token_count": round(len(full_retry_prompt) / 4),
+            "max_tokens": FULL_RETRY_MAX_TOKENS, "temperature": 0, "top_p": 1,
+            "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
+            "read_timeout_seconds": FULL_RETRY_READ_TIMEOUT_SECONDS,
+            "streaming_enabled": True,
+            "image_width": image_info["width"], "image_height": image_info["height"],
+            "image_bytes": image_info["bytes"], "jpeg_quality": image_info.get("jpeg_quality"),
+            "resize_applied": image_info.get("render_matrix"),
+        }
         try:
             retry_response, full_retry_debug = _request_with_retry(
                 lambda: request_complete_grading_retry(
-                    client, prompt, image_base64,
+                    client, full_retry_prompt, image_base64,
                     response_format=debug.get("response_format_supported") is True,
                 ),
                 progress_callback,
+                retry_timeouts=False,
             )
             full_retry_attempts = {"full_multimodal_retry": _response_dump(retry_response)}
             retry_text = response_text(retry_response, full_retry_attempts)
@@ -990,6 +1121,17 @@ def grade_pdf(
                 "full_multimodal_retry_response": retry_diagnostics,
                 "full_multimodal_retry_raw_path": str(retry_raw_path),
                 "full_multimodal_retry_max_tokens": FULL_RETRY_MAX_TOKENS,
+                "full_retry_prompt_character_count": len(full_retry_prompt),
+                "full_retry_prompt_estimated_tokens": round(len(full_retry_prompt) / 4),
+                "full_retry_max_tokens": FULL_RETRY_MAX_TOKENS,
+                "full_retry_temperature": 0, "full_retry_top_p": 1,
+                "full_retry_connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
+                "full_retry_read_timeout_seconds": FULL_RETRY_READ_TIMEOUT_SECONDS,
+                "full_retry_streaming_enabled": True,
+                "full_retry_time_to_first_token_seconds": retry_response.transport.get("time_to_first_token_seconds"),
+                "full_retry_duration_seconds": retry_response.transport.get("elapsed_request_seconds"),
+                "full_retry_response_received": True,
+                "full_retry_response_length": len(retry_text),
             })
             _, retried = _parse_json_object(retry_text, full_retry_attempts)
             retry_inspection = inspect_grading_completeness(retry_text)
@@ -1013,15 +1155,29 @@ def grade_pdf(
                     "prompt": prompt, "prompt_path": prompt_path, "image_path": image_path,
                     "raw_path": retry_raw_path, "debug": {**debug, "debug_path": str(debug_path)}}
         except Exception as full_retry_error:
+            error_text = str(full_retry_error).lower()
+            if "timed out" in error_text or "timeout" in error_text:
+                failure_type = "timeout"
+                message = "Llama returned an incomplete evaluation. The complete grading retry timed out before NVIDIA returned a response."
+            elif isinstance(full_retry_error, NvidiaHttpError):
+                failure_type = "http_error"
+                message = "Llama returned an incomplete evaluation. NVIDIA returned an error during the complete grading retry."
+            elif "schema" in error_text or "required" in error_text:
+                failure_type = "schema_error"
+                message = "Llama returned an incomplete evaluation. The complete grading retry returned JSON that did not match the required grading schema."
+            else:
+                failure_type = "parse_error"
+                message = "Llama returned an incomplete evaluation. The complete grading retry returned invalid JSON."
             debug.update({
                 "full_multimodal_retry_error": str(full_retry_error),
                 "full_multimodal_retry_attempts": getattr(full_retry_error, "attempts", None),
+                "full_retry_failure_type": failure_type, "full_retry_response_received": False,
                 "duration_seconds": round(time.monotonic() - started_at, 3), "final_result_source": "failure",
             })
             debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
             raise MalformedLlamaVisionJsonError(
                 debug,
-                "Llama returned an incomplete evaluation, and the complete grading retry did not return valid required grading JSON.",
+                message,
             ) from full_retry_error
 
     # A complete but malformed/invalid response gets one formatter request only.  It has no image,
