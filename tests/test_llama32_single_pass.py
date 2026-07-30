@@ -65,6 +65,15 @@ class Llama32SinglePassTests(unittest.TestCase):
         self.assertIn("Expected: mostly 1 or 2 in Integration/Application and overall No", prompt)
         self.assertIn("anti-inflation review", prompt)
 
+    def test_prompt_forbids_proximity_and_keyword_inference(self) -> None:
+        prompt = grade_llama.build_prompt("map.pdf")
+        self.assertIn("Do not infer relationships because concepts are near one another", prompt)
+        self.assertIn("do not assume prioritization because one diagnosis is present", prompt)
+        self.assertIn("do not assume integration merely because arrows exist", prompt)
+        self.assertIn("When uncertain whether a relationship is demonstrated, use the lower score", prompt)
+        retry = grade_llama.build_full_retry_prompt("map.pdf")
+        self.assertIn("Do not infer required relationships from proximity", retry)
+
     def test_prompt_allows_holistic_domains_without_weakening_list_based_map_rules(self) -> None:
         prompt = grade_llama.build_prompt("map.pdf")
         self.assertIn("A domain decision is holistic", prompt)
