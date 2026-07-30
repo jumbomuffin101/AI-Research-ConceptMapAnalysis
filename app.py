@@ -5,9 +5,19 @@ from __future__ import annotations
 import hashlib
 import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 import streamlit as st
 
+from consensus import run_consensus_pipeline
+from interface.consensus_display import display_both_with_consensus
+from interface.consensus_integration import (
+    consensus_ready,
+    exact_request_image_inputs,
+    fallback_comparison_export,
+    immutable_initial_results,
+    successful_results,
+)
 from interface.grading_runner import (
     GradingError,
     run_evaluation,
@@ -41,11 +51,6 @@ model_selection = st.radio(
     options=["Gemma", "Llama 3.2 90B Vision", "Both"],
     horizontal=True,
 )
-interface_mode = st.radio(
-    "Mode",
-    options=["Grading Mode", "Learning Mode"],
-    horizontal=True,
-)
 
 reference_uploads = st.file_uploader(
     "Reference Materials (Optional)",
@@ -67,55 +72,83 @@ reference_fingerprint = hashlib.sha256(
 previous_model_selection = st.session_state.get("previous_model_selection")
 previous_file_fingerprint = st.session_state.get("previous_file_fingerprint")
 previous_reference_fingerprint = st.session_state.get("previous_reference_fingerprint")
-previous_interface_mode = st.session_state.get("previous_interface_mode")
+RUN_STATE_KEYS = (
+    "evaluation_results",
+    "evaluation_debug",
+    "evaluation_error",
+    "saved_model_results",
+    "initial_gemma_result",
+    "initial_llama_result",
+    "consensus_pipeline_result",
+    "consensus_error",
+    "consensus_fallback_export",
+    "current_run_id",
+)
+
+
+def clear_current_run() -> None:
+    for key in RUN_STATE_KEYS:
+        st.session_state.pop(key, None)
+
+
 if previous_model_selection is None:
     st.session_state["previous_model_selection"] = model_selection
 elif model_selection != previous_model_selection:
-    st.session_state.pop("evaluation_results", None)
-    st.session_state.pop("evaluation_debug", None)
-    st.session_state.pop("evaluation_error", None)
-    st.session_state.pop("saved_model_results", None)
+    clear_current_run()
     st.session_state["previous_model_selection"] = model_selection
 
 if previous_file_fingerprint != uploaded_file_fingerprint:
-    st.session_state.pop("evaluation_results", None)
-    st.session_state.pop("evaluation_debug", None)
-    st.session_state.pop("evaluation_error", None)
-    st.session_state.pop("saved_model_results", None)
+    clear_current_run()
     st.session_state["previous_file_fingerprint"] = uploaded_file_fingerprint
+    st.session_state["uploaded_map_identity"] = uploaded_file_fingerprint
 
 if previous_reference_fingerprint is None:
     st.session_state["previous_reference_fingerprint"] = reference_fingerprint
 elif previous_reference_fingerprint != reference_fingerprint:
-    st.session_state.pop("evaluation_results", None)
-    st.session_state.pop("evaluation_debug", None)
-    st.session_state.pop("evaluation_error", None)
-    st.session_state.pop("saved_model_results", None)
+    clear_current_run()
     st.session_state["previous_reference_fingerprint"] = reference_fingerprint
 
-if previous_interface_mode is None:
-    st.session_state["previous_interface_mode"] = interface_mode
-elif previous_interface_mode != interface_mode:
-    st.session_state.pop("evaluation_results", None)
-    st.session_state.pop("evaluation_debug", None)
-    st.session_state.pop("evaluation_error", None)
-    st.session_state.pop("saved_model_results", None)
-    st.session_state["previous_interface_mode"] = interface_mode
-
-st.button("Multi-AI Consensus Grading - Coming Soon", disabled=True)
+st.session_state["selected_model_mode"] = model_selection
 
 if st.button("Run Evaluation", type="primary"):
     if uploaded_file is None:
         st.error("Upload a PDF before running the evaluation.")
     else:
-        st.session_state.pop("evaluation_results", None)
-        st.session_state.pop("saved_model_results", None)
+        clear_current_run()
+        st.session_state["current_run_id"] = uuid4().hex
         try:
             reference_materials = extract_reference_materials(reference_uploads)
             status_placeholder = st.empty()
+            progress_bar = st.progress(0)
+            progress_stage = {"value": 0}
 
             def show_progress(message: str) -> None:
-                status_placeholder.info(message)
+                stage_labels = {
+                    "Running Gemma grading": ("Grading with Gemma", 1),
+                    "Running Llama 3.2 90B Vision grading": (
+                        "Grading with Llama",
+                        2,
+                    ),
+                    "Comparing model outputs": ("Comparing model outputs", 3),
+                    "No disagreements detected": ("No disagreements detected", 4),
+                    "Confirming consensus": ("Confirming consensus", 6),
+                    "Gemma is independently reviewing disputed fields": (
+                        "Gemma reviewing disagreements",
+                        4,
+                    ),
+                    "Llama is independently reviewing disputed fields": (
+                        "Llama reviewing disagreements",
+                        5,
+                    ),
+                    "Generating model-authored consensus": (
+                        "Producing consensus",
+                        6,
+                    ),
+                }
+                label, stage = stage_labels.get(message, (message, progress_stage["value"]))
+                progress_stage["value"] = max(progress_stage["value"], stage)
+                progress_bar.progress(min(progress_stage["value"] / 7, 1.0))
+                status_placeholder.info(label)
 
             with st.spinner("Running evaluation..."):
                 with tempfile.TemporaryDirectory(prefix="concept-map-") as temp_dir:
@@ -127,20 +160,73 @@ if st.button("Run Evaluation", type="primary"):
                         original_filename=uploaded_file.name,
                         progress_callback=show_progress,
                         reference_materials=reference_materials,
-                        learning_mode=interface_mode == "Learning Mode",
+                        learning_mode=False,
                     )
-                show_progress("Rendering results")
-                st.session_state["evaluation_results"] = results
+                    st.session_state["evaluation_results"] = results
+                    successes = successful_results(results)
+                    gemma = successes.get("Gemma")
+                    llama = successes.get("Llama 3.2 90B Vision")
+                    immutable_initial = immutable_initial_results(results)
+                    st.session_state["initial_gemma_result"] = (
+                        immutable_initial.get("gemma")
+                    )
+                    st.session_state["initial_llama_result"] = (
+                        immutable_initial.get("llama")
+                    )
+
+                    if model_selection == "Both":
+                        if not consensus_ready(results):
+                            st.session_state["consensus_error"] = (
+                                "Consensus unavailable because both independent "
+                                "graders are required."
+                            )
+                        else:
+                            try:
+                                show_progress("Comparing model outputs")
+                                fallback_export = fallback_comparison_export(
+                                    uploaded_file.name,
+                                    immutable_initial,
+                                )
+                                initial_comparison = fallback_export["initial_comparison"]
+                                st.session_state["consensus_fallback_export"] = (
+                                    fallback_export
+                                )
+                                if initial_comparison["disagreement_count"] == 0:
+                                    show_progress("No disagreements detected")
+                                    show_progress("Confirming consensus")
+
+                                image_inputs = exact_request_image_inputs(results)
+                                pipeline = run_consensus_pipeline(
+                                    pdf_path=pdf_path,
+                                    map_file=uploaded_file.name,
+                                    initial_results=immutable_initial,
+                                    progress_callback=show_progress,
+                                    image_inputs=image_inputs,
+                                )
+                                st.session_state["consensus_pipeline_result"] = pipeline
+                            except Exception as consensus_exc:
+                                st.session_state["consensus_error"] = (
+                                    "Consensus unavailable. Independent model results "
+                                    f"are still available. {consensus_exc}"
+                                )
+                progress_stage["value"] = 7
+                progress_bar.progress(1.0)
+                status_placeholder.success("Complete")
         except (GradingError, ReferenceMaterialError) as exc:
             st.error(str(exc))
         except Exception as exc:
             st.error(f"Evaluation failed unexpectedly: {exc}")
 
 if st.session_state.get("evaluation_results"):
-    display_results(
-        st.session_state["evaluation_results"],
-        learning_mode=interface_mode == "Learning Mode",
-    )
+    if st.session_state.get("selected_model_mode") == "Both":
+        display_both_with_consensus(
+            results=st.session_state["evaluation_results"],
+            pipeline=st.session_state.get("consensus_pipeline_result"),
+            consensus_error=st.session_state.get("consensus_error"),
+            fallback_export=st.session_state.get("consensus_fallback_export"),
+        )
+    else:
+        display_results(st.session_state["evaluation_results"], learning_mode=False)
 
     if st.button("Save Results"):
         saved_models = save_evaluation_results(
