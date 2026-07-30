@@ -10,6 +10,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from grading.multimodal_feedback import (
+    compact_evidence_contract,
+    compact_grounding_instructions,
+    evidence_only_recovery_prompt,
+    evidence_recovery_template,
+)
 from grading.spring_2025_prompt import build_grading_prompt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +23,7 @@ MODEL = "google/gemma-4-26b-a4b-it:free"
 PROVIDER = "OpenRouter"
 BASE_URL = "https://openrouter.ai/api/v1"
 API_KEY_ENV = "OPENROUTER_API_KEY"
-MAX_TOKENS = 1800
+MAX_TOKENS = 4000
 TIMEOUT_SECONDS = 90
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
@@ -132,7 +138,11 @@ def schema(map_file: str) -> dict[str, Any]:
 def build_prompt(
     map_file: str, reference_materials: list[dict[str, str]] | None = None
 ) -> str:
-    return build_grading_prompt(map_file, schema(map_file), reference_materials)
+    return (
+        build_grading_prompt(map_file, schema(map_file), reference_materials)
+        + compact_grounding_instructions()
+        + compact_evidence_contract()
+    )
 
 
 def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
@@ -157,6 +167,38 @@ def request_grade(client: Any, prompt: str, image_base64: str) -> Any:
             }
         ],
     )
+
+
+def recover_multimodal_evidence(
+    image_base64: str,
+    original_result: dict[str, Any],
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    """Make one evidence-only call without permitting regrading."""
+    if progress_callback:
+        progress_callback("Gemma grading preserved; recovering visual evidence")
+    prompt = evidence_only_recovery_prompt(
+        original_result,
+        evidence_recovery_template(),
+    )
+    client = create_client()
+    response = request_grade(client, prompt, image_base64)
+    raw_text = response_text(response)
+    return {
+        "raw_text": raw_text,
+        "cleaned_text": clean_json_output(raw_text),
+        "response": response,
+        "debug": {
+            "provider": PROVIDER,
+            "model": MODEL,
+            "prompt_character_count": len(prompt),
+            "max_tokens": MAX_TOKENS,
+            "temperature": 0,
+            "timeout_seconds": TIMEOUT_SECONDS,
+            "streaming_enabled": False,
+            "image_resent": True,
+        },
+    }
 
 
 def response_text(response: Any) -> str:
@@ -249,6 +291,7 @@ def grade_pdf(
         "prompt": prompt,
         "prompt_path": prompt_path,
         "image_path": image_path,
+        "image_base64": image_base64,
         "raw_path": raw_path,
         "debug": {
             "provider": PROVIDER,

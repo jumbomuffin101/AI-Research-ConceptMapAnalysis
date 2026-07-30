@@ -160,6 +160,48 @@ def _bullets(lines: list[str], values: list[str]) -> None:
         lines.append(f"- {value}")
 
 
+def _render_multimodal_summary(
+    lines: list[str],
+    model_title: str,
+    result: dict[str, Any] | None,
+) -> None:
+    lines += [f"#### {model_title} Visual Evidence", ""]
+    feedback = result.get("multimodal_feedback") if result else None
+    if not isinstance(feedback, dict):
+        lines += ["Grounded multimodal evidence unavailable.", ""]
+        return
+    lines.append(
+        f"- Overall visual confidence: {feedback.get('overall_visual_confidence', 'N/A')}"
+    )
+    lines.append(
+        "- Human review recommended: "
+        + ("Yes" if feedback.get("human_review_recommended") else "No")
+    )
+    lines.append("- Strongest visible regions:")
+    strongest = feedback.get("strongest_regions", [])
+    if isinstance(strongest, list) and strongest:
+        for item in strongest:
+            if isinstance(item, dict):
+                lines.append(
+                    f"  - {item.get('description', 'Visible evidence')} "
+                    f"(confidence {item.get('confidence', 'N/A')})"
+                )
+    else:
+        lines.append("  - None returned.")
+    lines.append("- Highest-priority missing relationships:")
+    improvements = feedback.get("highest_priority_improvements", [])
+    if isinstance(improvements, list) and improvements:
+        for item in improvements:
+            if isinstance(item, dict):
+                lines.append(
+                    f"  - {item.get('missing_bridge', 'Missing connection')}: "
+                    f"{item.get('suggested_revision', '')}"
+                )
+    else:
+        lines.append("  - None returned.")
+    lines.append("")
+
+
 def render_report(maps: dict[str, dict[str, Any]]) -> str:
     lines = ["# Concept Map Evaluation Results", ""]
     entries = sorted(maps.values(), key=lambda entry: _sort_key(entry["map_file"]))
@@ -186,6 +228,13 @@ def render_report(maps: dict[str, dict[str, Any]]) -> str:
             for model_key, message in entry["failures"].items():
                 lines.append(f"- {MODEL_TITLES[model_key]}: {message}")
             lines.append("")
+        lines += ["### Visual Evidence & Feedback", ""]
+        _render_multimodal_summary(lines, "Gemma", gemma)
+        _render_multimodal_summary(
+            lines,
+            "Llama 3.2 90B Vision",
+            llama,
+        )
 
     comparable = [entry for entry in entries if _result(entry, "gemma") and _result(entry, "llama32_90b_vision")]
     agreed = sum(_overall(_result(entry, "gemma")) == _overall(_result(entry, "llama32_90b_vision")) for entry in comparable)
@@ -228,6 +277,17 @@ def write_machine_summaries(maps: dict[str, dict[str, Any]]) -> None:
             row[f"{prefix}_successful"] = result is not None
             row[f"{prefix}_failure"] = entry["failures"].get(model_key, "")
             row[f"{prefix}_average_score"] = _average(result)
+            feedback = result.get("multimodal_feedback") if result else None
+            row[f"{prefix}_overall_visual_confidence"] = (
+                feedback.get("overall_visual_confidence")
+                if isinstance(feedback, dict)
+                else None
+            )
+            row[f"{prefix}_human_review_recommended"] = (
+                feedback.get("human_review_recommended")
+                if isinstance(feedback, dict)
+                else None
+            )
             for domain in DOMAIN_FIELDS:
                 row[f"{prefix}_{domain}_average"] = _average(result, domain)
                 row[f"{prefix}_{domain}_overall_decision"] = _domain_decision(

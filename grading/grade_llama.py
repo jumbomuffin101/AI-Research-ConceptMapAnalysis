@@ -11,6 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from grading.multimodal_feedback import (
+    compact_evidence_contract,
+    compact_grounding_instructions,
+    evidence_only_recovery_prompt,
+    evidence_recovery_template,
+)
 from grading.spring_2025_prompt import SPRING_2025_RUBRIC
 from interface.reference_materials import format_reference_context
 
@@ -19,7 +25,7 @@ MODEL = "meta/llama-3.2-90b-vision-instruct"
 PROVIDER = "NVIDIA NIM"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 API_KEY_ENV = "NVIDIA_API_KEY"
-MAX_TOKENS = 1800
+MAX_TOKENS = 4000
 FULL_RETRY_MAX_TOKENS = 2600
 TEMPERATURE = 0.2
 TOP_P = 0.9
@@ -232,8 +238,8 @@ def _output_contract() -> str:
     return "\n".join(lines)
 
 
-def _schema_template() -> dict[str, Any]:
-    """Exact application field names with non-numeric placeholders to avoid score anchoring."""
+def _core_schema_template() -> dict[str, Any]:
+    """Grading-only fields used by format repair; no evidence can be invented."""
     result: dict[str, Any] = {
         "map_file": "<map filename>", "model": MODEL,
         "overall_meets_expectations": "<Yes or No>",
@@ -250,7 +256,12 @@ def _schema_template() -> dict[str, Any]:
     return result
 
 
-def build_prompt(
+def _schema_template() -> dict[str, Any]:
+    """Core grading template; repeated evidence fields are described once."""
+    return _core_schema_template()
+
+
+def _legacy_build_prompt(
     map_file: str, reference_materials: list[dict[str, str]] | None = None
 ) -> str:
     reference_context = _compress_reference_materials(reference_materials)
@@ -273,7 +284,9 @@ def build_prompt(
         "Return JSON only using the existing schema. Each explanation is one concise sentence; include "
         "at most 3 strengths and 3 areas_for_improvement; grading_notes is at most 2 sentences. "
         "No markdown, chain-of-thought, or text outside JSON.\n"
-        "\nSCORING CALIBRATION FOR STRONG MAPS\n"
+        + compact_grounding_instructions()
+        + compact_evidence_contract()
+        + "\nSCORING CALIBRATION FOR STRONG MAPS\n"
         "Score only visible map evidence. A score of 4 does not require perfection, exhaustive detail, or "
         "every possible concept. Award 4 when the map clearly and accurately demonstrates the full intent "
         "of the rubric criterion through sufficiently detailed and integrated visible evidence. Minor "
@@ -464,6 +477,78 @@ def build_prompt(
     )
 
 
+def build_prompt(
+    map_file: str,
+    reference_materials: list[dict[str, str]] | None = None,
+) -> str:
+    """Bounded initial prompt preserving the established grading calibration."""
+    reference_context = _compress_reference_materials(reference_materials)
+    reference_section = (
+        "\nREFERENCE SUMMARY (comparison standard only; never map evidence)\n"
+        + reference_context
+        + "\n"
+        if reference_context
+        else ""
+    )
+    calibration = (
+        "\nCOMPACT CALIBRATION\n"
+        "Apply all four exact descriptors independently. A score of 4 does not require "
+        "perfection, but it does require the full criterion intent through accurate, "
+        "specific, visibly connected evidence. Use 3 when the criterion is substantially "
+        "demonstrated with one meaningful visible limitation; use 2 for partial, superficial, "
+        "inconsistent, generic, or weakly connected evidence; use 1 for absent, largely "
+        "incorrect, unsupported, or isolated terminology. Do not assign 2 merely because a "
+        "criterion is not fully comprehensive: incomplete-but-substantial evidence is 3, "
+        "not 2. 'Does not fully explain' usually indicates 3, not 2.\n"
+        "A concept being present does not itself demonstrate a relationship. Do not infer "
+        "relationships because concepts are near one another; do not assume prioritization "
+        "because one diagnosis is present, illness scripts because symptoms and a diagnosis "
+        "appear together, integration merely because arrows exist, or pathophysiology merely "
+        "because a mechanism is named. When uncertain whether a relationship is demonstrated, "
+        "use the lower score. Prioritized DDx requires multiple plausible diagnoses visibly "
+        "ranked or prioritized from patient evidence. Integration, Application, and Transfer "
+        "scores of 3 or 4 require meaningful visible relationships.\n"
+        "Assess patient_data_pathophysiology through patient-specific finding-to-mechanism "
+        "links, not treatment or epidemiology. Pathophysiology can be clinically or "
+        "mechanistically sufficient without exhaustive molecular detail. Transfer need not "
+        "be labeled 'previously learned.' when prior science or clinical concepts visibly "
+        "deepen current reasoning. Evidence quality—not evidence perfection—controls scores.\n"
+        "A domain decision is holistic and answers its exact rubric question; one low criterion "
+        "does not automatically force No. Basic science, clinical science, and patient-case "
+        "information are core Knowledge Acquisition evidence; health-system science and "
+        "determinants of health support the domain and alone should not force No unless "
+        "case-relevant. Integration may be Yes when several meaningful patient, diagnosis, "
+        "clinical, and science links are demonstrated despite an incomplete link; a numbered "
+        "DDx list is not required when prioritization is visibly conveyed. Application and "
+        "Transfer may be Yes when their central purpose is substantially demonstrated despite "
+        "missing detail. Terminology, density, and lists without meaningful relationships "
+        "remain insufficient.\n"
+        "The final Yes/No decision is holistic, not an average, threshold, or automatic result "
+        "of one domain. Return No only for a substantial map-level deficiency in central "
+        "knowledge, integration, application, or transfer. A successful map may still have "
+        "areas_for_improvement. Silently perform a consistency and anti-inflation review: "
+        "verify every 3 or 4 has specific visible support, explanations match scores, domain "
+        "decisions answer the domain questions, and the final decision reflects the map as a "
+        "whole. Do not output this review.\n"
+    )
+    return (
+        "You are grading a medical student concept map using the Spring 2025 Concept Map "
+        "Feedback Tool for SUMMATIVE Activities. Inspect the submitted image and independently "
+        "generate every score, decision, explanation, and grounded feedback item.\n\n"
+        + SPRING_2025_RUBRIC
+        + reference_section
+        + calibration
+        + compact_grounding_instructions()
+        + "\nCORE GRADING JSON SCHEMA\n"
+        + json.dumps(_core_schema_template(), separators=(",", ":"))
+        + compact_evidence_contract()
+        + "\nReturn exactly one raw valid JSON object. Include all 15 criteria, all four "
+        "domain decisions, the final decision, strengths, areas_for_improvement, grading_notes, "
+        "all grounded multimodal fields, and learning_feedback. Do not use Markdown, prose "
+        "outside JSON, comments, trailing commas, or renamed fields."
+    )
+
+
 def build_full_retry_prompt(
     map_file: str, reference_materials: list[dict[str, str]] | None = None
 ) -> str:
@@ -497,7 +582,7 @@ def build_full_retry_prompt(
         "demonstrate integration, application, or transfer. Do not infer required relationships from proximity, a "
         "diagnosis alone, symptoms beside a diagnosis, arrows without a clear link, or a named mechanism. When the "
         "relationship is uncertain, use the lower score.\n\n"
-        "Domain decisions are holistic: a central objective may meet expectations despite one secondary 2 or 3. For "
+        + "Domain decisions are holistic: a central objective may meet expectations despite one secondary 2 or 3. For "
         "Knowledge Acquisition, basic science, clinical science, and patient-case information are core; limited health-"
         "system science or determinants of health should not alone force No unless case-relevant. For Integration and "
         "Application, require meaningful visible relationships, but one weaker link does not alone force No when the "
@@ -646,7 +731,7 @@ def request_format_repair(
         "You may summarize only evidence and limitations already present; do not invent facts.\n\nPREVIOUS RESPONSE:\n"
         + previous_response
         + "\n\nREQUIRED JSON SCHEMA:\n"
-        + json.dumps(_schema_template(), separators=(",", ":"))
+        + json.dumps(_core_schema_template(), separators=(",", ":"))
         + "\n\nFINAL CHECKLIST BEFORE RESPONDING\n"
         "- All 15 rubric criteria are present.\n"
         "- Every score is an integer from 1 through 4.\n"
@@ -682,6 +767,53 @@ def request_complete_grading_retry(
         stream=True,
         timeout=(CONNECT_TIMEOUT_SECONDS, FULL_RETRY_READ_TIMEOUT_SECONDS),
     )
+
+
+def recover_multimodal_evidence(
+    image_base64: str,
+    original_result: dict[str, Any],
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    """Make one NVIDIA evidence-only recovery request with immutable grading."""
+    if progress_callback:
+        progress_callback(
+            "Llama grading preserved; recovering visual evidence"
+        )
+    prompt = evidence_only_recovery_prompt(
+        original_result,
+        evidence_recovery_template(),
+    )
+    client = create_client()
+    response = _post_nvidia(
+        client,
+        _nvidia_payload(
+            _vision_messages(prompt, image_base64),
+            response_format=True,
+            temperature=0,
+            top_p=1,
+            max_tokens=MAX_TOKENS,
+        ),
+        timeout=TIMEOUT_SECONDS,
+    )
+    raw_text = response_text(
+        response,
+        {"evidence_recovery": _response_dump(response)},
+    )
+    return {
+        "raw_text": raw_text,
+        "cleaned_text": clean_json_output(raw_text),
+        "response": response,
+        "debug": {
+            "provider": PROVIDER,
+            "model": MODEL,
+            "prompt_character_count": len(prompt),
+            "max_tokens": MAX_TOKENS,
+            "temperature": 0,
+            "timeout_seconds": TIMEOUT_SECONDS,
+            "streaming_enabled": False,
+            "image_resent": True,
+        },
+    }
 def _is_transient(error: Exception) -> bool:
     status = getattr(error, "status_code", None)
     return status in {429, 502, 503, 504} or "timeout" in error.__class__.__name__.lower()
@@ -1146,6 +1278,7 @@ def grade_pdf(
         return {"model": MODEL, "provider": PROVIDER, "raw_text": raw_text,
                 "cleaned_text": json.dumps(validated, separators=(",", ":")), "response": response,
                 "prompt": prompt, "prompt_path": prompt_path, "image_path": image_path,
+                "image_base64": image_base64,
                 "raw_path": raw_path, "debug": {**debug, "debug_path": str(debug_path)}}
     except Exception as initial_error:
         initial_error_text = str(initial_error)
@@ -1229,6 +1362,7 @@ def grade_pdf(
             return {"model": MODEL, "provider": PROVIDER, "raw_text": retry_text,
                     "cleaned_text": json.dumps(validated, separators=(",", ":")), "response": retry_response,
                     "prompt": prompt, "prompt_path": prompt_path, "image_path": image_path,
+                    "image_base64": image_base64,
                     "raw_path": retry_raw_path, "debug": {**debug, "debug_path": str(debug_path)}}
         except Exception as full_retry_error:
             error_text = str(full_retry_error).lower()
@@ -1313,6 +1447,7 @@ def grade_pdf(
         return {"model": MODEL, "provider": PROVIDER, "raw_text": repair_text,
                 "cleaned_text": json.dumps(validated, separators=(",", ":")), "response": repair_response,
                 "prompt": prompt, "prompt_path": prompt_path, "image_path": image_path,
+                "image_base64": image_base64,
                 "raw_path": repair_raw_path, "debug": {**debug, "debug_path": str(debug_path)}}
     except Exception as repair_error:
         debug.update({

@@ -42,34 +42,30 @@ class Llama32SinglePassTests(unittest.TestCase):
         prompt = grade_llama.build_prompt("map.pdf")
         self.assertIn("A score of 4 does not require perfection", prompt)
         self.assertIn("meaningful visible limitation", prompt)
-        self.assertIn("use 2 for partial, superficial, inconsistent, or weakly connected", prompt)
-        self.assertIn("use 1 for absent, largely incorrect, or unsupported", prompt)
-        self.assertIn("Example A — score 4", prompt)
-        self.assertIn("Example B — score 3", prompt)
-        self.assertIn("never treat reference text as map evidence", prompt)
+        self.assertIn("use 2 for partial, superficial", prompt)
+        self.assertIn("use 1 for absent, largely incorrect", prompt)
+        self.assertIn("do not treat reference material as student evidence", prompt)
 
     def test_prompt_calibrates_holistic_yes_no_without_score_thresholds(self) -> None:
         prompt = grade_llama.build_prompt("map.pdf")
-        self.assertIn("The final Yes/No decision is a holistic judgment", prompt)
-        self.assertIn("It is not a requirement for every criterion to receive 4", prompt)
+        self.assertIn("The final Yes/No decision is holistic", prompt)
+        self.assertIn("not an average, threshold, or automatic result", prompt)
         self.assertIn("Return No only for a substantial map-level deficiency", prompt)
-        self.assertIn("Example A — strong map that passes", prompt)
         self.assertIn("A successful map may still have areas_for_improvement", prompt)
 
     def test_prompt_requires_demonstrated_relationships_for_high_scores_and_passing(self) -> None:
         prompt = grade_llama.build_prompt("map.pdf")
-        self.assertIn("A concept or term being present does not by itself demonstrate", prompt)
-        self.assertIn("do not award 3 or 4 unless meaningful relationships are visibly shown", prompt)
-        self.assertIn("prioritized DDx requires multiple plausible diagnoses ranked", prompt)
-        self.assertIn("Before Yes, verify internally at least one clear Integration strength", prompt)
-        self.assertIn("Expected: mostly 1 or 2 in Integration/Application and overall No", prompt)
+        self.assertIn("A concept being present does not itself demonstrate a relationship", prompt)
+        self.assertIn("scores of 3 or 4 require meaningful visible relationships", prompt)
+        self.assertIn("Prioritized DDx requires multiple plausible diagnoses visibly ranked", prompt)
+        self.assertIn("verify every 3 or 4 has specific visible support", prompt)
         self.assertIn("anti-inflation review", prompt)
 
     def test_prompt_forbids_proximity_and_keyword_inference(self) -> None:
         prompt = grade_llama.build_prompt("map.pdf")
         self.assertIn("Do not infer relationships because concepts are near one another", prompt)
         self.assertIn("do not assume prioritization because one diagnosis is present", prompt)
-        self.assertIn("do not assume integration merely because arrows exist", prompt)
+        self.assertIn("integration merely because arrows exist", prompt)
         self.assertIn("When uncertain whether a relationship is demonstrated, use the lower score", prompt)
         retry = grade_llama.build_full_retry_prompt("map.pdf")
         self.assertIn("Do not infer required relationships from proximity", retry)
@@ -78,9 +74,9 @@ class Llama32SinglePassTests(unittest.TestCase):
         prompt = grade_llama.build_prompt("map.pdf")
         self.assertIn("A domain decision is holistic", prompt)
         self.assertIn("health-system science and determinants of health support the domain", prompt)
-        self.assertIn("a numbered list is not required", prompt)
-        self.assertIn("a missing detail is usually 3 rather than 2", prompt)
-        self.assertIn("terminology, density, and lists without meaningful relationships remain insufficient", prompt)
+        self.assertIn("a numbered DDx list is not required", prompt)
+        self.assertIn("incomplete-but-substantial evidence is 3, not 2", prompt)
+        self.assertIn("Terminology, density, and lists without meaningful relationships remain insufficient", prompt)
         retry = grade_llama.build_full_retry_prompt("map.pdf")
         self.assertIn("Domain decisions are holistic", retry)
         self.assertIn("require meaningful visible relationships", retry)
@@ -118,7 +114,7 @@ class Llama32SinglePassTests(unittest.TestCase):
         self.assertTrue(captured["payload"]["stream"])
         self.assertTrue(captured["kwargs"]["stream"])
         self.assertEqual(captured["kwargs"]["timeout"], (30, 300))
-        self.assertEqual(captured["payload"]["max_tokens"], 2600)
+        self.assertEqual(captured["payload"]["max_tokens"], grade_llama.FULL_RETRY_MAX_TOKENS)
 
     def test_streaming_chunks_are_collected_into_completion_content(self) -> None:
         class StreamResponse:
@@ -160,7 +156,7 @@ class Llama32SinglePassTests(unittest.TestCase):
             grade_llama.request_grade(object(), "rubric", "encoded-image")
         payload = captured["payload"]
         self.assertEqual(payload["model"], "meta/llama-3.2-90b-vision-instruct")
-        self.assertEqual(payload["max_tokens"], 1800)
+        self.assertEqual(payload["max_tokens"], grade_llama.MAX_TOKENS)
         self.assertEqual(payload["temperature"], 0.2)
         content = payload["messages"][0]["content"]
         self.assertEqual(content[0]["type"], "text")
@@ -175,7 +171,7 @@ class Llama32SinglePassTests(unittest.TestCase):
             grade_llama.request_format_repair(object(), "## Markdown evaluation", response_format=True)
         payload = captured["payload"]
         self.assertEqual(payload["temperature"], 0)
-        self.assertEqual(payload["max_tokens"], 1800)
+        self.assertEqual(payload["max_tokens"], grade_llama.MAX_TOKENS)
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertIsInstance(payload["messages"][0]["content"], str)
         self.assertNotIn("image_url", payload["messages"][0]["content"])

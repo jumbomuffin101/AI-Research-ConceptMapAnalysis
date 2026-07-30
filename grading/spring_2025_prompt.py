@@ -237,6 +237,6 @@ def build_grading_prompt(
         "Do not invent additional thresholds, weighting systems, or scoring rules.\n"
         "Answer each domain overall Yes/No question directly as written in the rubric.\n"
         "Answer 'This map meets expectations' as Yes or No based on the rubric as a whole.\n"
-        "Return only the existing required JSON schema exactly. No Markdown or prose outside the JSON.\n"
+        "Return only the required JSON schema exactly. No Markdown or prose outside the JSON.\n"
         f"{json.dumps(output_schema, separators=(',', ':'))}\n"
     )

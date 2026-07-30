@@ -41,6 +41,11 @@ model_selection = st.radio(
     options=["Gemma", "Llama 3.2 90B Vision", "Both"],
     horizontal=True,
 )
+interface_mode = st.radio(
+    "Mode",
+    options=["Grading Mode", "Learning Mode"],
+    horizontal=True,
+)
 
 reference_uploads = st.file_uploader(
     "Reference Materials (Optional)",
@@ -62,6 +67,7 @@ reference_fingerprint = hashlib.sha256(
 previous_model_selection = st.session_state.get("previous_model_selection")
 previous_file_fingerprint = st.session_state.get("previous_file_fingerprint")
 previous_reference_fingerprint = st.session_state.get("previous_reference_fingerprint")
+previous_interface_mode = st.session_state.get("previous_interface_mode")
 if previous_model_selection is None:
     st.session_state["previous_model_selection"] = model_selection
 elif model_selection != previous_model_selection:
@@ -86,6 +92,15 @@ elif previous_reference_fingerprint != reference_fingerprint:
     st.session_state.pop("evaluation_error", None)
     st.session_state.pop("saved_model_results", None)
     st.session_state["previous_reference_fingerprint"] = reference_fingerprint
+
+if previous_interface_mode is None:
+    st.session_state["previous_interface_mode"] = interface_mode
+elif previous_interface_mode != interface_mode:
+    st.session_state.pop("evaluation_results", None)
+    st.session_state.pop("evaluation_debug", None)
+    st.session_state.pop("evaluation_error", None)
+    st.session_state.pop("saved_model_results", None)
+    st.session_state["previous_interface_mode"] = interface_mode
 
 st.button("Multi-AI Consensus Grading - Coming Soon", disabled=True)
 
@@ -112,6 +127,7 @@ if st.button("Run Evaluation", type="primary"):
                         original_filename=uploaded_file.name,
                         progress_callback=show_progress,
                         reference_materials=reference_materials,
+                        learning_mode=interface_mode == "Learning Mode",
                     )
                 show_progress("Rendering results")
                 st.session_state["evaluation_results"] = results
@@ -121,7 +137,10 @@ if st.button("Run Evaluation", type="primary"):
             st.error(f"Evaluation failed unexpectedly: {exc}")
 
 if st.session_state.get("evaluation_results"):
-    display_results(st.session_state["evaluation_results"])
+    display_results(
+        st.session_state["evaluation_results"],
+        learning_mode=interface_mode == "Learning Mode",
+    )
 
     if st.button("Save Results"):
         saved_models = save_evaluation_results(
