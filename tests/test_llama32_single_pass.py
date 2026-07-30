@@ -85,6 +85,17 @@ class Llama32SinglePassTests(unittest.TestCase):
         self.assertIn("Domain decisions are holistic", retry)
         self.assertIn("require meaningful visible relationships", retry)
 
+    def test_prompt_distinguishes_incomplete_from_inadequate_evidence(self) -> None:
+        prompt = grade_llama.build_prompt("map.pdf")
+        self.assertIn("Do not assign 2 merely because a criterion is not fully comprehensive", prompt)
+        self.assertIn("'Does not fully explain' usually indicates 3, not 2", prompt)
+        self.assertIn("patient-specific finding-to-mechanism links", prompt)
+        self.assertIn("Transfer need not be labeled 'previously learned.'", prompt)
+        self.assertIn("Evidence quality", prompt)
+        self.assertIn("not evidence perfection", prompt)
+        retry = grade_llama.build_full_retry_prompt("map.pdf")
+        self.assertIn("Incomplete-but-substantial evidence is 3, not 2", retry)
+
     def test_full_retry_prompt_is_compact_and_contains_every_criterion(self) -> None:
         initial = grade_llama.build_prompt("map.pdf")
         retry = grade_llama.build_full_retry_prompt("map.pdf")
