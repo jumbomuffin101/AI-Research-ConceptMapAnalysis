@@ -577,9 +577,10 @@ def run_evaluation(
         try:
             if progress_callback:
                 progress_callback(f"Running {model_name} grading")
-            grade_kwargs = {"reference_materials": reference_materials}
-            if model_name == "Llama 3.2 90B Vision":
-                grade_kwargs["progress_callback"] = progress_callback
+            grade_kwargs = {
+                "reference_materials": reference_materials,
+                "progress_callback": progress_callback,
+            }
             grade = module.grade_pdf(
                 pdf_path,
                 map_file,

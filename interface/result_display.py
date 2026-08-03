@@ -492,6 +492,11 @@ def display_failure(result: Any) -> None:
             "Try a smaller PDF/image or use the local CLI pipeline. "
             "Raw response saved for debugging."
         )
+    elif "could not be converted into valid grading JSON" in error_message:
+        st.warning(
+            f"{model_name} completed the grading, but its response could not be "
+            "converted into valid grading JSON."
+        )
     else:
         st.warning(
             f"{model_name} did not return usable content. "
