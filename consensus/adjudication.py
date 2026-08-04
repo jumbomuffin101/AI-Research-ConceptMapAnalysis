@@ -97,7 +97,7 @@ def build_consensus_prompt(
         + "\n\nDELIBERATION CONTEXT\n"
         + json.dumps(context, separators=(",", ":"), ensure_ascii=False)
         + "\n\nReturn one raw JSON object containing consensus_status, consensus_grading "
-        "(the complete current grading schema, including grounded multimodal fields), "
+        "(the complete compact grading schema), "
         "criterion_resolutions, unresolved_disagreements, consensus_confidence, "
         "human_review_recommended, and consensus_notes. For every initially disputed path, "
         "include its initial and reviewed values, the model-generated consensus_value, "

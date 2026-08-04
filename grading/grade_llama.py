@@ -11,12 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from grading.multimodal_feedback import (
-    compact_evidence_contract,
-    compact_grounding_instructions,
-    evidence_only_recovery_prompt,
-    evidence_recovery_template,
-)
 from grading.spring_2025_prompt import SPRING_2025_RUBRIC
 from interface.reference_materials import format_reference_context
 
@@ -25,7 +19,7 @@ MODEL = "meta/llama-3.2-90b-vision-instruct"
 PROVIDER = "NVIDIA NIM"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 API_KEY_ENV = "NVIDIA_API_KEY"
-MAX_TOKENS = 4000
+MAX_TOKENS = 1800
 FULL_RETRY_MAX_TOKENS = 2600
 TEMPERATURE = 0.2
 TOP_P = 0.9
@@ -284,8 +278,6 @@ def _legacy_build_prompt(
         "Return JSON only using the existing schema. Each explanation is one concise sentence; include "
         "at most 3 strengths and 3 areas_for_improvement; grading_notes is at most 2 sentences. "
         "No markdown, chain-of-thought, or text outside JSON.\n"
-        + compact_grounding_instructions()
-        + compact_evidence_contract()
         + "\nSCORING CALIBRATION FOR STRONG MAPS\n"
         "Score only visible map evidence. A score of 4 does not require perfection, exhaustive detail, or "
         "every possible concept. Award 4 when the map clearly and accurately demonstrates the full intent "
@@ -534,17 +526,15 @@ def build_prompt(
     return (
         "You are grading a medical student concept map using the Spring 2025 Concept Map "
         "Feedback Tool for SUMMATIVE Activities. Inspect the submitted image and independently "
-        "generate every score, decision, explanation, and grounded feedback item.\n\n"
+        "generate every score, decision, and concise explanation.\n\n"
         + SPRING_2025_RUBRIC
         + reference_section
         + calibration
-        + compact_grounding_instructions()
         + "\nCORE GRADING JSON SCHEMA\n"
         + json.dumps(_core_schema_template(), separators=(",", ":"))
-        + compact_evidence_contract()
         + "\nReturn exactly one raw valid JSON object. Include all 15 criteria, all four "
         "domain decisions, the final decision, strengths, areas_for_improvement, grading_notes, "
-        "all grounded multimodal fields, and learning_feedback. Do not use Markdown, prose "
+        "and no additional fields. Do not use Markdown, prose "
         "outside JSON, comments, trailing commas, or renamed fields."
     )
 
@@ -769,51 +759,6 @@ def request_complete_grading_retry(
     )
 
 
-def recover_multimodal_evidence(
-    image_base64: str,
-    original_result: dict[str, Any],
-    progress_callback: Any | None = None,
-) -> dict[str, Any]:
-    """Make one NVIDIA evidence-only recovery request with immutable grading."""
-    if progress_callback:
-        progress_callback(
-            "Llama grading preserved; recovering visual evidence"
-        )
-    prompt = evidence_only_recovery_prompt(
-        original_result,
-        evidence_recovery_template(),
-    )
-    client = create_client()
-    response = _post_nvidia(
-        client,
-        _nvidia_payload(
-            _vision_messages(prompt, image_base64),
-            response_format=True,
-            temperature=0,
-            top_p=1,
-            max_tokens=MAX_TOKENS,
-        ),
-        timeout=TIMEOUT_SECONDS,
-    )
-    raw_text = response_text(
-        response,
-        {"evidence_recovery": _response_dump(response)},
-    )
-    return {
-        "raw_text": raw_text,
-        "cleaned_text": clean_json_output(raw_text),
-        "response": response,
-        "debug": {
-            "provider": PROVIDER,
-            "model": MODEL,
-            "prompt_character_count": len(prompt),
-            "max_tokens": MAX_TOKENS,
-            "temperature": 0,
-            "timeout_seconds": TIMEOUT_SECONDS,
-            "streaming_enabled": False,
-            "image_resent": True,
-        },
-    }
 def _is_transient(error: Exception) -> bool:
     status = getattr(error, "status_code", None)
     return status in {429, 502, 503, 504} or "timeout" in error.__class__.__name__.lower()

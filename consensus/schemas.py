@@ -13,7 +13,6 @@ from consensus.comparison import (
     get_path,
     set_path,
 )
-from grading.multimodal_feedback import validate_multimodal_feedback
 from interface.grading_runner import parse_model_json
 
 
@@ -69,12 +68,6 @@ def validate_complete_grading(value: Any) -> dict[str, Any]:
         )
     except Exception as exc:
         raise ConsensusValidationError(f"Incomplete reviewed grading: {exc}") from exc
-    multimodal = validate_multimodal_feedback(grading)
-    if not multimodal.complete:
-        raise ConsensusValidationError(
-            "Reviewed grading is missing valid grounded multimodal fields: "
-            + "; ".join([*multimodal.missing_fields, *multimodal.warnings])
-        )
     return grading
 
 

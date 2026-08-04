@@ -160,7 +160,6 @@ if st.button("Run Evaluation", type="primary"):
                         original_filename=uploaded_file.name,
                         progress_callback=show_progress,
                         reference_materials=reference_materials,
-                        learning_mode=False,
                     )
                     st.session_state["evaluation_results"] = results
                     successes = successful_results(results)
@@ -226,7 +225,7 @@ if st.session_state.get("evaluation_results"):
             fallback_export=st.session_state.get("consensus_fallback_export"),
         )
     else:
-        display_results(st.session_state["evaluation_results"], learning_mode=False)
+        display_results(st.session_state["evaluation_results"])
 
     if st.button("Save Results"):
         saved_models = save_evaluation_results(

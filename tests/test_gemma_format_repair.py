@@ -77,8 +77,9 @@ class GemmaFormatRepairTests(unittest.TestCase):
         initial_text: str,
         repair_text: str | None = None,
         progress: list[str] | None = None,
+        finish_reason: str = "stop",
     ):
-        initial_response = FakeResponse(initial_text)
+        initial_response = FakeResponse(initial_text, finish_reason=finish_reason)
         repair_response = FakeResponse(repair_text) if repair_text is not None else None
         repair_mock = Mock(return_value=repair_response)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -179,6 +180,27 @@ class GemmaFormatRepairTests(unittest.TestCase):
             "truncated_grading_failure",
         )
         self.assertFalse(diagnostic["format_repair_eligible"])
+
+    def test_truncated_response_does_not_call_format_repair(self) -> None:
+        raw = malformed_complete_text(complete_grading())
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             patch.object(grade_gemma, "render_pdf_first_page", self._render), \
+             patch.object(grade_gemma, "create_client", return_value=object()), \
+             patch.object(
+                 grade_gemma,
+                 "request_grade",
+                 return_value=FakeResponse(raw, finish_reason="length"),
+             ), \
+             patch.object(grade_gemma, "request_format_repair") as repair:
+            with self.assertRaises(grade_gemma.MalformedGemmaJsonError) as raised:
+                grade_gemma.grade_pdf(
+                    Path(temp_dir) / "map.pdf",
+                    "map.pdf",
+                    Path(temp_dir) / "debug" / "run",
+                )
+        repair.assert_not_called()
+        self.assertIn("truncated before the complete JSON", str(raised.exception))
+        self.assertFalse(raised.exception.attempts["format_repair_attempted"])
 
     def test_format_repair_request_contains_no_image_block(self) -> None:
         create = Mock(return_value=FakeResponse("{}"))

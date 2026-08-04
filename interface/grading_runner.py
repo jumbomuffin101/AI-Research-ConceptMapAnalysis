@@ -16,14 +16,6 @@ from typing import Any, Iterable
 from uuid import uuid4
 
 from grading import grade_gemma, grade_llama
-from grading.multimodal_feedback import (
-    merge_recovered_evidence,
-    multimodal_debug_metrics,
-    normalize_multimodal_numbers,
-    validate_multimodal_feedback,
-)
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = PROJECT_ROOT / "outputs" / "web_demo"
 DEBUG_DIR = OUTPUT_DIR / "debug"
@@ -87,9 +79,6 @@ class EvaluationResult:
     reference_materials_used: bool = False
     reference_files: tuple[str, ...] = ()
     source_image_path: Path | None = None
-    multimodal_available: bool = False
-    multimodal_warnings: tuple[str, ...] = ()
-    learning_mode: bool = False
 
 
 @dataclass(frozen=True)
@@ -224,18 +213,6 @@ def _short_reason_from_item(item: dict[str, Any]) -> str:
     explanation = str(item.get("explanation", "")).strip()
     if explanation:
         return explanation.rstrip(".")
-    evidence = item.get("evidence_from_map")
-    if isinstance(evidence, list):
-        useful_evidence = [
-            str(value).strip()
-            for value in evidence
-            if str(value).strip()
-            and str(value).strip() != "No clear evidence found in the concept map."
-        ]
-        if useful_evidence:
-            return useful_evidence[0].rstrip(".")
-    elif isinstance(evidence, str) and evidence.strip():
-        return evidence.strip().rstrip(".")
     return ""
 
 
@@ -354,6 +331,8 @@ def parse_model_json(raw_text: str, normalize_decisions: bool = False) -> dict[s
         )
 
     required_top_level = [
+        "map_file",
+        "model",
         *CATEGORY_FIELDS.keys(),
         "overall_meets_expectations",
         "strengths",
@@ -365,6 +344,9 @@ def parse_model_json(raw_text: str, normalize_decisions: bool = False) -> dict[s
         raise MalformedResultError(
             "The model result is missing required fields: " + ", ".join(missing)
         )
+    for field in ("map_file", "model"):
+        if not isinstance(result.get(field), str) or not result[field].strip():
+            raise MalformedResultError(f"'{field}' must be a non-empty string.")
 
     _require_yes_no(result.get("overall_meets_expectations"), "overall_meets_expectations")
 
@@ -392,7 +374,39 @@ def parse_model_json(raw_text: str, normalize_decisions: bool = False) -> dict[s
                 raise MalformedResultError(
                     f"'{group}.{field}.explanation' must be a string."
                 )
-    return result
+    for field in ("strengths", "areas_for_improvement"):
+        value = result.get(field)
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item.strip() for item in value
+        ):
+            raise MalformedResultError(
+                f"'{field}' must be a JSON array of non-empty strings."
+            )
+    if not isinstance(result.get("grading_notes"), str):
+        raise MalformedResultError("'grading_notes' must be a string.")
+
+    # Return only the compact production schema. Provider-added fields are not
+    # grading inputs and are deliberately excluded from UI and exports.
+    compact: dict[str, Any] = {
+        "map_file": result.get("map_file"),
+        "model": result.get("model"),
+    }
+    for group, fields in CATEGORY_FIELDS.items():
+        section = result[group]
+        compact[group] = {
+            field: {
+                "score": section[field]["score"],
+                "explanation": section[field]["explanation"],
+            }
+            for field in fields
+        }
+        compact[group]["overall_decision"] = section["overall_decision"]
+        compact[group]["if_no_explanation"] = section.get("if_no_explanation", "")
+    compact["overall_meets_expectations"] = result["overall_meets_expectations"]
+    compact["strengths"] = result["strengths"]
+    compact["areas_for_improvement"] = result["areas_for_improvement"]
+    compact["grading_notes"] = result["grading_notes"]
+    return compact
 
 
 def _debug_text(value: Any) -> str:
@@ -455,7 +469,6 @@ def _save_successful_evaluation(
     data: dict[str, Any],
     reference_materials_used: bool,
     reference_files: tuple[str, ...],
-    learning_mode: bool,
 ) -> Path:
     """Persist one validated model result, replacing only an older success."""
     RAW_EVALUATION_DIR.mkdir(parents=True, exist_ok=True)
@@ -469,7 +482,6 @@ def _save_successful_evaluation(
         "model_id": model_id,
         "reference_materials_used": reference_materials_used,
         "reference_files": list(reference_files),
-        "learning_mode": learning_mode,
         "result": data,
     }
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -496,7 +508,6 @@ def save_evaluation_results(
             data=result.data,
             reference_materials_used=result.reference_materials_used,
             reference_files=result.reference_files,
-            learning_mode=result.learning_mode,
         )
         saved_models.append(result.model_name)
     return saved_models
@@ -542,7 +553,6 @@ def run_evaluation(
     original_filename: str,
     progress_callback: Any | None = None,
     reference_materials: list[dict[str, str]] | None = None,
-    learning_mode: bool = False,
 ) -> list[EvaluationOutcome]:
     """Run one direct grading call for each selected model."""
     names = list(model_names)
@@ -606,56 +616,6 @@ def run_evaluation(
                 str(grade["cleaned_text"]),
                 normalize_decisions=True,
             )
-            multimodal_number_normalizations = normalize_multimodal_numbers(data)
-            initial_multimodal = validate_multimodal_feedback(data)
-            evidence_recovery_required = not initial_multimodal.complete
-            evidence_recovery_attempted = False
-            evidence_recovery_response: Any = None
-            evidence_recovery_validation_result: dict[str, Any] | None = None
-            ignored_recovery_grading_fields: tuple[str, ...] = ()
-            final_multimodal = initial_multimodal
-
-            if evidence_recovery_required:
-                evidence_recovery_attempted = True
-                try:
-                    recovery = module.recover_multimodal_evidence(
-                        str(grade.get("image_base64", "")),
-                        data,
-                        progress_callback,
-                    )
-                    evidence_recovery_response = recovery.get("raw_text")
-                    recovered_payload = json.loads(
-                        _cleaned_json_text(str(recovery.get("cleaned_text", "")))
-                    )
-                    if not isinstance(recovered_payload, dict):
-                        raise MalformedResultError(
-                            "The multimodal evidence recovery response must be a JSON object."
-                        )
-                    candidate, ignored_recovery_grading_fields = merge_recovered_evidence(
-                        data,
-                        recovered_payload,
-                    )
-                    multimodal_number_normalizations.extend(
-                        normalize_multimodal_numbers(candidate)
-                    )
-                    candidate_validation = validate_multimodal_feedback(candidate)
-                    evidence_recovery_validation_result = {
-                        "complete": candidate_validation.complete,
-                        "warnings": list(candidate_validation.warnings),
-                        "missing_fields": list(candidate_validation.missing_fields),
-                        "ignored_grading_fields": list(ignored_recovery_grading_fields),
-                    }
-                    if candidate_validation.complete:
-                        data = candidate
-                        final_multimodal = candidate_validation
-                    else:
-                        final_multimodal = candidate_validation
-                except Exception as recovery_error:
-                    evidence_recovery_validation_result = {
-                        "complete": False,
-                        "error": str(recovery_error),
-                    }
-
             output_path = (
                 OUTPUT_DIR
                 / f"{timestamp}_{run_id}_{file_stem}_{_model_slug(model_name)}.json"
@@ -668,15 +628,6 @@ def run_evaluation(
                 "prompt_path": str(grade.get("prompt_path")),
                 "raw_path": str(grade.get("raw_path")),
                 "output_path": str(output_path),
-                "evidence_recovery_required": evidence_recovery_required,
-                "evidence_recovery_attempted": evidence_recovery_attempted,
-                "image_resent_for_evidence_recovery": evidence_recovery_attempted,
-                "evidence_recovery_response": evidence_recovery_response,
-                "evidence_recovery_validation_result": evidence_recovery_validation_result,
-                "learning_mode_enabled": learning_mode,
-                "overlay_rendering_warnings": [],
-                "multimodal_number_normalizations": multimodal_number_normalizations,
-                **multimodal_debug_metrics(data, final_multimodal),
             }
             debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
@@ -692,14 +643,6 @@ def run_evaluation(
                     source_image_path=Path(grade["image_path"])
                     if grade.get("image_path")
                     else None,
-                    multimodal_available=final_multimodal.complete,
-                    multimodal_warnings=tuple(
-                        [
-                            *final_multimodal.missing_fields,
-                            *final_multimodal.warnings,
-                        ]
-                    ),
-                    learning_mode=learning_mode,
                 )
             )
         except Exception as exc:

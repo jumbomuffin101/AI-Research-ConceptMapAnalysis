@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from grading.multimodal_feedback import CRITERION_FIELDS
+from grading.grade_gemma import CATEGORY_FIELDS as CRITERION_FIELDS
 
 
 @dataclass(frozen=True)

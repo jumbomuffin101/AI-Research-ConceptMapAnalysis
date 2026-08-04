@@ -82,8 +82,9 @@ def build_cross_review_prompt(
         "changed_field_paths, defended_field_paths, and review_confidence. Each field review "
         "must include path, initial_own_value, peer_value, reviewed_own_value, action "
         "(revised, defended, agreed_with_peer, or unresolved_uncertainty), and a specific "
-        "reason. Every changed field must be declared. Preserve all grounded multimodal "
-        "fields unless the image requires an evidence correction. Silently verify that "
+        "reason. Every changed field must be declared. The reviewed grading must use the "
+        "compact schema: score and concise explanation per criterion, domain decisions, "
+        "final decision, strengths, areas_for_improvement, and grading_notes. Silently verify that "
         "undisputed scores did not change. No Markdown or prose outside JSON."
     )
 

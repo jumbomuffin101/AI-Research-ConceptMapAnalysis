@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any, Mapping
 
 import streamlit as st
@@ -138,7 +137,6 @@ def display_consensus_unavailable(reason: str) -> None:
 def _display_consensus_tab(
     pipeline: ConsensusPipelineResult | None,
     error_message: str | None,
-    source_image_path: Path | None,
 ) -> None:
     if pipeline is None:
         display_consensus_unavailable(error_message or "")
@@ -174,8 +172,6 @@ def _display_consensus_tab(
                 "model_id": "Model-generated adjudication",
                 "data": grading,
                 "output_path": pipeline.output_path,
-                "source_image_path": source_image_path,
-                "multimodal_available": bool(grading.get("multimodal_feedback")),
             }
         )
 
@@ -253,7 +249,6 @@ def display_both_with_consensus(
     with tabs[1]:
         display_failure(llama) if isinstance(llama, EvaluationFailure) or llama is None else display_result(llama)
     with tabs[2]:
-        source_path = gemma.source_image_path if isinstance(gemma, EvaluationResult) else None
-        _display_consensus_tab(pipeline, consensus_error, source_path)
+        _display_consensus_tab(pipeline, consensus_error)
     with tabs[3]:
         _display_comparison_tab(pipeline, fallback_export)

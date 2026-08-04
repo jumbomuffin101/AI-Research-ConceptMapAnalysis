@@ -20,25 +20,27 @@ from consensus.schemas import (
     validate_cross_review,
 )
 from consensus.service import run_consensus_pipeline
-from tests.test_multimodal_feedback import complete_result
+from grading.grade_gemma import CATEGORY_FIELDS
 
 
 def grading(score: int = 3, overall: str = "Yes") -> dict:
-    value = complete_result(bbox=[0.1, 0.1, 0.5, 0.5])
-    value["overall_meets_expectations"] = overall
-    for domain in (
-        "knowledge_acquisition",
-        "integration",
-        "application",
-        "transfer",
-    ):
+    value = {
+        "map_file": "map.pdf",
+        "model": "test-model",
+        "overall_meets_expectations": overall,
+        "strengths": ["Clear synthesis."],
+        "areas_for_improvement": ["Add detail."],
+        "grading_notes": "Model-generated grading.",
+    }
+    for domain, fields in CATEGORY_FIELDS.items():
+        value[domain] = {
+            field: {"score": score, "explanation": "Visible map evidence supports this score."}
+            for field in fields
+        }
         value[domain]["overall_decision"] = overall
         value[domain]["if_no_explanation"] = (
             "" if overall == "Yes" else "The domain is substantially incomplete."
         )
-        for item in value[domain].values():
-            if isinstance(item, dict) and "score" in item:
-                item["score"] = score
     return value
 
 
