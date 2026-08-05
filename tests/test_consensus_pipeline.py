@@ -7,13 +7,24 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from consensus.adjudication import AdjudicationResult, ConsensusModelConfig
+from consensus.adjudication import (
+    AdjudicationResult,
+    ConsensusModelConfig,
+    build_consensus_prompt,
+    run_adjudication,
+)
 from consensus.comparison import (
     COMPARISON_FIELDS,
     classify_post_review,
     compare_gradings,
 )
-from consensus.cross_review import CrossReviewResult
+from consensus.cross_review import (
+    CrossReviewFailure,
+    CrossReviewResult,
+    build_cross_review_prompt,
+    run_cross_review,
+)
+from consensus.providers import ProviderCallResult
 from consensus.schemas import (
     ConsensusValidationError,
     validate_consensus,
@@ -253,6 +264,141 @@ class CrossReviewValidationTests(unittest.TestCase):
             self.validate(payload)
         self.assertEqual(self.gemma, before)
 
+    def test_changed_fields_only_review_is_rejected_precisely(self) -> None:
+        payload = review_envelope(self.gemma, self.llama, self.path)
+        payload["reviewed_grading"] = {
+            "integration": {"illness_scripts": {"score": 3}}
+        }
+        with self.assertRaisesRegex(ConsensusValidationError, "map_file"):
+            self.validate(payload)
+
+    def test_validator_targets_nested_reviewed_grading(self) -> None:
+        payload = review_envelope(self.gemma, self.llama, self.path)
+        payload["map_file"] = "wrapper-only.pdf"
+        del payload["reviewed_grading"]["map_file"]
+        with self.assertRaisesRegex(ConsensusValidationError, "map_file"):
+            self.validate(payload)
+
+    def test_complete_llama_review_passes(self) -> None:
+        payload = review_envelope(self.llama, self.gemma, self.path)
+        payload["reviewer_model"] = "llama"
+        payload["reviewed_peer_model"] = "gemma"
+        validated = validate_cross_review(
+            payload,
+            reviewer_model="llama",
+            reviewed_peer_model="gemma",
+            initial_own=self.llama,
+            initial_peer=self.gemma,
+            initial_disagreement_paths={self.path},
+        )
+        self.assertEqual(validated.reviewed_grading["map_file"], "map.pdf")
+
+
+class CrossReviewRecoveryTests(unittest.TestCase):
+    path = "integration.illness_scripts.score"
+
+    def setUp(self) -> None:
+        self.gemma = grading(3)
+        self.llama = grading(3)
+        self.llama["integration"]["illness_scripts"]["score"] = 2
+        self.comparison = compare_gradings(self.gemma, self.llama)
+        self.valid = review_envelope(self.gemma, self.llama, self.path)
+
+    @staticmethod
+    def call(raw: str) -> ProviderCallResult:
+        return ProviderCallResult(
+            raw,
+            {"raw": raw},
+            {
+                "provider": "OpenRouter",
+                "model_id": "test/model",
+                "prompt_character_count": 10,
+                "max_tokens": 7600,
+                "image_resent": True,
+                "finish_reason": "stop",
+                "completion_tokens": 500,
+            },
+        )
+
+    def test_format_repair_preserves_scores_and_does_not_resend_image(self) -> None:
+        malformed = json.dumps(self.valid)[:-1]  # complete content, missing final brace
+        calls: list[dict] = []
+
+        def invoke(**kwargs):
+            calls.append(kwargs)
+            return self.call(malformed if len(calls) == 1 else json.dumps(self.valid))
+
+        result = run_cross_review(
+            reviewer_model="gemma",
+            reviewed_peer_model="llama",
+            provider="OpenRouter",
+            model_id="test/model",
+            image_base64="image",
+            initial_own=self.gemma,
+            initial_peer=self.llama,
+            initial_comparison=self.comparison,
+            invoke=invoke,
+        )
+        self.assertEqual(result.validated.reviewed_grading, self.gemma)
+        self.assertEqual(len(calls), 2)
+        self.assertIsNone(calls[1]["image_base64"])
+        self.assertEqual(result.request_metadata["recovery_type"], "format_only")
+
+    def test_incomplete_review_retries_full_review_with_image(self) -> None:
+        incomplete = copy.deepcopy(self.valid)
+        del incomplete["reviewed_grading"]["grading_notes"]
+        calls: list[dict] = []
+
+        def invoke(**kwargs):
+            calls.append(kwargs)
+            return self.call(
+                json.dumps(incomplete) if len(calls) == 1 else json.dumps(self.valid)
+            )
+
+        result = run_cross_review(
+            reviewer_model="gemma",
+            reviewed_peer_model="llama",
+            provider="OpenRouter",
+            model_id="test/model",
+            image_base64="image",
+            initial_own=self.gemma,
+            initial_peer=self.llama,
+            initial_comparison=self.comparison,
+            invoke=invoke,
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]["image_base64"], "image")
+        self.assertEqual(result.request_metadata["recovery_type"], "full_review_retry")
+
+    def test_two_incomplete_reviews_raise_structured_failure(self) -> None:
+        incomplete = copy.deepcopy(self.valid)
+        del incomplete["reviewed_grading"]["strengths"]
+
+        with self.assertRaises(CrossReviewFailure) as caught:
+            run_cross_review(
+                reviewer_model="gemma",
+                reviewed_peer_model="llama",
+                provider="OpenRouter",
+                model_id="test/model",
+                image_base64="image",
+                initial_own=self.gemma,
+                initial_peer=self.llama,
+                initial_comparison=self.comparison,
+                invoke=lambda **_kwargs: self.call(json.dumps(incomplete)),
+            )
+        self.assertEqual(len(caught.exception.debug_metadata["attempts"]), 2)
+
+    def test_prompt_contract_precedes_review_instructions(self) -> None:
+        prompt = build_cross_review_prompt(
+            reviewer_model="gemma",
+            reviewed_peer_model="llama",
+            initial_own=self.gemma,
+            initial_peer=self.llama,
+            disagreements=self.comparison["disagreements"],
+        )
+        self.assertTrue(prompt.startswith("OUTPUT CONTRACT"))
+        self.assertIn("Do not return a partial patch", prompt)
+
 
 class PostReviewClassificationTests(unittest.TestCase):
     path = "integration.illness_scripts.score"
@@ -368,6 +514,51 @@ class ConsensusValidationTests(unittest.TestCase):
         payload["criterion_resolutions"][0]["consensus_value"] = 2
         with self.assertRaisesRegex(ConsensusValidationError, "does not match"):
             validate_consensus(payload, initial_disagreement_paths={self.path})
+
+    def test_incomplete_consensus_grading_never_passes_as_complete(self) -> None:
+        gemma = grading(3)
+        llama = grading(2)
+        for missing in (
+            "map_file",
+            "model",
+            "strengths",
+            "areas_for_improvement",
+            "grading_notes",
+        ):
+            with self.subTest(missing=missing):
+                payload = consensus_envelope(grading(3), self.path, gemma, llama)
+                del payload["consensus_grading"][missing]
+                with self.assertRaisesRegex(ConsensusValidationError, missing):
+                    validate_consensus(payload, initial_disagreement_paths={self.path})
+
+    def test_model_authored_unavailable_status_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ConsensusValidationError, "cannot use status unavailable"):
+            validate_consensus(
+                {
+                    "consensus_status": "unavailable",
+                    "consensus_grading": None,
+                },
+                initial_disagreement_paths=set(),
+            )
+
+    def test_consensus_prompt_explicitly_handles_unavailable_reviews(self) -> None:
+        gemma = grading(3)
+        llama = grading(2, "No")
+        comparison = compare_gradings(gemma, llama)
+        prompt = build_consensus_prompt(
+            config=ConsensusModelConfig("OpenRouter", "test/model"),
+            initial_gemma=gemma,
+            initial_llama=llama,
+            gemma_review={"status": "failed", "model": "gemma"},
+            llama_review={"status": "failed", "model": "llama"},
+            initial_comparison=comparison,
+            post_review_comparison=classify_post_review(
+                comparison, gemma, llama, None, None
+            ),
+        )
+        self.assertTrue(prompt.startswith("OUTPUT CONTRACT"))
+        self.assertIn('"status":"failed"', prompt)
+        self.assertIn("unavailable reviews reduce confidence", prompt)
 
 
 class ConsensusServiceTests(unittest.TestCase):
@@ -493,6 +684,113 @@ class ConsensusServiceTests(unittest.TestCase):
         self.assertIsNone(result.export["consensus"]["consensus_grading"])
         self.assertEqual(result.export["initial_results"]["gemma"], before_gemma)
         self.assertEqual(result.export["initial_results"]["llama"], before_llama)
+
+    def test_both_review_failures_still_allow_adjudication_from_initials(self) -> None:
+        gemma = grading(3, "Yes")
+        llama = grading(2, "No")
+        comparison = compare_gradings(gemma, llama)
+        consensus_value = grading(3, "Yes")
+        resolutions = []
+        from consensus.comparison import get_path
+
+        for item in comparison["disagreements"]:
+            path = item["path"]
+            resolutions.append(
+                {
+                    "path": path,
+                    "initial_gemma": get_path(gemma, path),
+                    "initial_llama": get_path(llama, path),
+                    "reviewed_gemma": get_path(gemma, path),
+                    "reviewed_llama": get_path(llama, path),
+                    "consensus_value": get_path(consensus_value, path),
+                    "status": "resolved",
+                    "resolution_basis": "The image and rubric support this value.",
+                    "human_review_recommended": False,
+                    "confidence": 0.7,
+                }
+            )
+        envelope = {
+            "consensus_status": "complete",
+            "consensus_grading": consensus_value,
+            "criterion_resolutions": resolutions,
+            "unresolved_disagreements": [],
+            "consensus_confidence": 0.7,
+            "human_review_recommended": False,
+            "consensus_notes": "Adjudicated from complete initial grades.",
+        }
+        received: dict = {}
+
+        def failed_review(**_kwargs):
+            raise CrossReviewFailure(
+                "Incomplete reviewed grading: missing fields",
+                {"attempts": [{"raw_text": "partial"}]},
+            )
+
+        def adjudicate(**kwargs):
+            received.update(kwargs)
+            return AdjudicationResult(
+                envelope,
+                json.dumps(envelope),
+                {"mock": True},
+                {"max_tokens": 7600, "prompt_character_count": 1},
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            result = run_consensus_pipeline(
+                pdf_path=Path(temp) / "map.pdf",
+                map_file="map.pdf",
+                initial_results={
+                    "Gemma": gemma,
+                    "Llama 3.2 90B Vision": llama,
+                },
+                debug_prefix=Path(temp) / "run",
+                image_inputs={"gemma": "g", "llama": "l"},
+                cross_review_runner=failed_review,
+                adjudication_runner=adjudicate,
+            )
+        self.assertEqual(received["gemma_review"]["status"], "failed")
+        self.assertEqual(received["llama_review"]["status"], "failed")
+        self.assertEqual(result.export["consensus"]["consensus_status"], "complete")
+        self.assertEqual(result.export["initial_comparison"], comparison)
+        self.assertEqual(result.export["cross_reviews"]["gemma"]["error_type"], "incomplete_output")
+
+    def test_nineteen_disagreements_trigger_both_cross_reviews(self) -> None:
+        gemma = grading(3, "Yes")
+        llama = grading(2, "No")
+        # One configured field agrees; the other 19 reproduce the cited regression shape.
+        llama["knowledge_acquisition"]["basic_science"]["score"] = 3
+        self.assertEqual(compare_gradings(gemma, llama)["disagreement_count"], 19)
+        review_models: list[str] = []
+
+        def failed_review(**kwargs):
+            review_models.append(kwargs["reviewer_model"])
+            raise CrossReviewFailure("partial output", {"attempts": []})
+
+        with tempfile.TemporaryDirectory() as temp:
+            result = run_consensus_pipeline(
+                pdf_path=Path(temp) / "map.pdf",
+                map_file="ConceptMap1.pdf",
+                initial_results={
+                    "Gemma": gemma,
+                    "Llama 3.2 90B Vision": llama,
+                },
+                debug_prefix=Path(temp) / "run",
+                image_inputs={"gemma": "g", "llama": "l"},
+                cross_review_runner=failed_review,
+                adjudication_runner=lambda **_kwargs: (_ for _ in ()).throw(
+                    TimeoutError("consensus unavailable")
+                ),
+            )
+        self.assertEqual(review_models, ["gemma", "llama"])
+        self.assertEqual(result.export["initial_comparison"]["disagreement_count"], 19)
+        self.assertEqual(result.export["consensus"]["consensus_status"], "unavailable")
+
+    def test_service_source_contains_no_score_averaging(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "consensus" / "service.py").read_text(encoding="utf-8")
+        self.assertNotIn("mean(", source)
+        self.assertNotIn("average(", source)
+        self.assertNotIn("sum(scores", source)
 
     def test_unanimous_initial_grades_skip_cross_reviews_but_confirm_consensus(self) -> None:
         same_gemma = grading(3, "Yes")

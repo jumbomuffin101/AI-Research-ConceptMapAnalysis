@@ -20,13 +20,23 @@ def invoke_model(
     provider: str,
     model_id: str,
     prompt: str,
-    image_base64: str,
+    image_base64: str | None,
     max_tokens: int,
     timeout_seconds: int,
 ) -> ProviderCallResult:
     normalized = provider.strip().lower()
     if normalized in {"gemma", "openrouter"}:
         client = grade_gemma.create_client()
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        if image_base64:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{image_base64}"
+                    },
+                }
+            )
         response = client.chat.completions.create(
             model=model_id,
             max_tokens=max_tokens,
@@ -36,20 +46,15 @@ def invoke_model(
             messages=[
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_base64}"
-                            },
-                        },
-                    ],
+                    "content": content,
                 }
             ],
         )
         raw_text = grade_gemma.response_text(response)
         raw_response = grade_gemma._response_debug_value(response)
+        choices = getattr(response, "choices", None) or []
+        first_choice = choices[0] if choices else None
+        usage = getattr(response, "usage", None)
         return ProviderCallResult(
             raw_text,
             raw_response,
@@ -59,14 +64,23 @@ def invoke_model(
                 "timeout_seconds": timeout_seconds,
                 "max_tokens": max_tokens,
                 "streaming_enabled": False,
-                "image_resent": True,
+                "image_resent": bool(image_base64),
                 "prompt_character_count": len(prompt),
+                "finish_reason": getattr(first_choice, "finish_reason", None),
+                "completion_tokens": getattr(usage, "completion_tokens", None),
+                "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                "total_tokens": getattr(usage, "total_tokens", None),
             },
         )
     if normalized in {"llama", "nvidia", "nvidia nim"}:
         client = grade_llama.create_client()
+        messages = (
+            grade_llama._vision_messages(prompt, image_base64)
+            if image_base64
+            else [{"role": "user", "content": prompt}]
+        )
         payload = grade_llama._nvidia_payload(
-            grade_llama._vision_messages(prompt, image_base64),
+            messages,
             response_format=False,
             temperature=0,
             top_p=1,
@@ -79,18 +93,26 @@ def invoke_model(
         )
         attempts = {"deliberation": grade_llama._response_dump(response)}
         raw_text = grade_llama.response_text(response, attempts)
+        response_dump = grade_llama._response_dump(response)
+        choices = response_dump.get("choices", []) if isinstance(response_dump, dict) else []
+        first_choice = choices[0] if choices else {}
+        usage = response_dump.get("usage", {}) if isinstance(response_dump, dict) else {}
         return ProviderCallResult(
             raw_text,
-            grade_llama._response_dump(response),
+            response_dump,
             {
                 "provider": "NVIDIA NIM",
                 "model_id": model_id,
                 "timeout_seconds": timeout_seconds,
                 "max_tokens": max_tokens,
                 "streaming_enabled": False,
-                "image_resent": True,
+                "image_resent": bool(image_base64),
                 "prompt_character_count": len(prompt),
                 "http_status": response.transport.get("http_status"),
+                "finish_reason": first_choice.get("finish_reason"),
+                "completion_tokens": usage.get("completion_tokens"),
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "total_tokens": usage.get("total_tokens"),
             },
         )
     raise RuntimeError(f"Unsupported consensus provider: {provider}")

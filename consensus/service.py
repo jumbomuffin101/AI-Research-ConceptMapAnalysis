@@ -16,12 +16,12 @@ from consensus.adjudication import (
     run_adjudication,
 )
 from consensus.comparison import classify_post_review, compare_gradings
-from consensus.cross_review import CrossReviewResult, run_cross_review
+from consensus.cross_review import CrossReviewFailure, CrossReviewResult, run_cross_review
 from grading import grade_gemma, grade_llama
 from interface.grading_runner import EvaluationResult
 
 
-CONSENSUS_PIPELINE_VERSION = "single-round-consensus-v1"
+CONSENSUS_PIPELINE_VERSION = "single-round-consensus-v2-complete-output"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = PROJECT_ROOT / "outputs" / "web_demo"
 DEBUG_DIR = OUTPUT_DIR / "debug"
@@ -100,10 +100,11 @@ def _review_debug(
     error: Exception | None,
 ) -> dict[str, Any]:
     if result is None:
+        metadata = getattr(error, "debug_metadata", {}) if error else {}
         return {
-            "response": None,
+            "response": metadata.get("attempts"),
             "validation": {"valid": False, "error": str(error) if error else "not attempted"},
-            "request_metadata": {},
+            "request_metadata": metadata,
         }
     return {
         "response": result.raw_response,
@@ -114,6 +115,28 @@ def _review_debug(
             "changed_field_paths": list(result.validated.changed_field_paths),
         },
         "request_metadata": result.request_metadata,
+    }
+
+
+def _review_failure_payload(
+    model: str,
+    error: Exception | None,
+    debug_path: Path,
+) -> dict[str, Any] | None:
+    if error is None:
+        return None
+    error_type = (
+        "incomplete_output"
+        if isinstance(error, CrossReviewFailure)
+        else "provider_or_validation_error"
+    )
+    return {
+        "status": "failed",
+        "model": model,
+        "error_type": error_type,
+        "error_message": str(error),
+        "raw_debug_path": str(debug_path),
+        "initial_result_preserved": True,
     }
 
 
@@ -261,29 +284,31 @@ def run_consensus_pipeline(
         reviewed_llama,
     )
     gemma_review_payload = (
-        gemma_review_result.validated.payload if gemma_review_result else None
+        gemma_review_result.validated.payload
+        if gemma_review_result
+        else _review_failure_payload("gemma", gemma_review_error, debug_path)
     )
     llama_review_payload = (
-        llama_review_result.validated.payload if llama_review_result else None
+        llama_review_result.validated.payload
+        if llama_review_result
+        else _review_failure_payload("llama", llama_review_error, debug_path)
     )
+    gemma_debug = _review_debug(gemma_review_result, gemma_review_error)
+    llama_debug = _review_debug(llama_review_result, llama_review_error)
     debug.update(
         {
-            "gemma_cross_review_response": _review_debug(
-                gemma_review_result,
-                gemma_review_error,
-            )["response"],
-            "gemma_cross_review_validation": _review_debug(
-                gemma_review_result,
-                gemma_review_error,
-            )["validation"],
-            "llama_cross_review_response": _review_debug(
-                llama_review_result,
-                llama_review_error,
-            )["response"],
-            "llama_cross_review_validation": _review_debug(
-                llama_review_result,
-                llama_review_error,
-            )["validation"],
+            "gemma_cross_review_response": gemma_debug["response"],
+            "gemma_cross_review_validation": gemma_debug["validation"],
+            "gemma_cross_review_request_metadata": gemma_debug["request_metadata"],
+            "gemma_cross_review_final_status": (
+                "complete" if gemma_review_result else "failed"
+            ),
+            "llama_cross_review_response": llama_debug["response"],
+            "llama_cross_review_validation": llama_debug["validation"],
+            "llama_cross_review_request_metadata": llama_debug["request_metadata"],
+            "llama_cross_review_final_status": (
+                "complete" if llama_review_result else "failed"
+            ),
             "post_review_disagreement_summary": post_review,
             "resolution_status_by_path": post_review["resolution_status_by_path"],
         }
@@ -322,89 +347,89 @@ def run_consensus_pipeline(
         )
 
     unresolved_count = len(consensus.get("unresolved_disagreements", []))
+    gemma_meta = gemma_debug["request_metadata"]
+    llama_meta = llama_debug["request_metadata"]
+    consensus_meta = (
+        consensus_result.request_metadata
+        if consensus_result
+        else getattr(consensus_error, "debug_metadata", {})
+    )
     debug.update(
         {
             "consensus_raw_response": (
-                consensus_result.raw_response if consensus_result else None
+                consensus_result.raw_response
+                if consensus_result
+                else consensus_meta.get("attempts")
             ),
             "consensus_raw_text": (
-                consensus_result.raw_text if consensus_result else None
+                consensus_result.raw_text
+                if consensus_result
+                else [
+                    item.get("raw_text")
+                    for item in consensus_meta.get("attempts", [])
+                    if isinstance(item, Mapping)
+                ]
             ),
             "consensus_validation": (
-                {"valid": True}
+                {
+                    "valid": True,
+                    "consensus_grading_present": True,
+                    "wrapper_validation_success": True,
+                }
                 if consensus_result
-                else {"valid": False, "error": str(consensus_error)}
+                else {
+                    "valid": False,
+                    "error": str(consensus_error),
+                    "details": getattr(consensus_error, "debug_metadata", {}),
+                }
             ),
+            "consensus_request_metadata": consensus_meta,
             "unresolved_disagreement_count": unresolved_count,
             "human_review_recommended": bool(
                 consensus.get("human_review_recommended")
             ),
             "request_timeout_by_stage": {
                 "gemma_cross_review": (
-                    gemma_review_result.request_metadata.get("timeout_seconds")
-                    if gemma_review_result
-                    else None
+                    gemma_meta.get("timeout_seconds")
                 ),
                 "llama_cross_review": (
-                    llama_review_result.request_metadata.get("timeout_seconds")
-                    if llama_review_result
-                    else None
+                    llama_meta.get("timeout_seconds")
                 ),
                 "consensus": (
-                    consensus_result.request_metadata.get("timeout_seconds")
-                    if consensus_result
-                    else None
+                    consensus_meta.get("timeout_seconds")
                 ),
             },
             "prompt_size_by_stage": {
                 "gemma_cross_review": (
-                    gemma_review_result.request_metadata.get("prompt_character_count")
-                    if gemma_review_result
-                    else None
+                    gemma_meta.get("prompt_character_count")
                 ),
                 "llama_cross_review": (
-                    llama_review_result.request_metadata.get("prompt_character_count")
-                    if llama_review_result
-                    else None
+                    llama_meta.get("prompt_character_count")
                 ),
                 "consensus": (
-                    consensus_result.request_metadata.get("prompt_character_count")
-                    if consensus_result
-                    else None
+                    consensus_meta.get("prompt_character_count")
                 ),
             },
             "max_tokens_by_stage": {
                 "gemma_cross_review": (
-                    gemma_review_result.request_metadata.get("max_tokens")
-                    if gemma_review_result
-                    else None
+                    gemma_meta.get("max_tokens")
                 ),
                 "llama_cross_review": (
-                    llama_review_result.request_metadata.get("max_tokens")
-                    if llama_review_result
-                    else None
+                    llama_meta.get("max_tokens")
                 ),
                 "consensus": (
-                    consensus_result.request_metadata.get("max_tokens")
-                    if consensus_result
-                    else None
+                    consensus_meta.get("max_tokens")
                 ),
             },
             "streaming_configuration_by_stage": {
                 "gemma_cross_review": (
-                    gemma_review_result.request_metadata.get("streaming_enabled")
-                    if gemma_review_result
-                    else None
+                    gemma_meta.get("streaming_enabled")
                 ),
                 "llama_cross_review": (
-                    llama_review_result.request_metadata.get("streaming_enabled")
-                    if llama_review_result
-                    else None
+                    llama_meta.get("streaming_enabled")
                 ),
                 "consensus": (
-                    consensus_result.request_metadata.get("streaming_enabled")
-                    if consensus_result
-                    else None
+                    consensus_meta.get("streaming_enabled")
                 ),
             },
         }

@@ -58,17 +58,55 @@ def clean_json_object(raw_text: str) -> dict[str, Any]:
     return value
 
 
-def validate_complete_grading(value: Any) -> dict[str, Any]:
+def validate_complete_grading(
+    value: Any,
+    *,
+    object_name: str = "reviewed_grading",
+) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise ConsensusValidationError("reviewed_grading must be a JSON object.")
+        raise ConsensusValidationError(f"{object_name} must be a JSON object.")
     try:
         grading = parse_model_json(
             json.dumps(value, separators=(",", ":")),
             normalize_decisions=False,
         )
     except Exception as exc:
-        raise ConsensusValidationError(f"Incomplete reviewed grading: {exc}") from exc
+        readable_name = object_name.replace("_", " ")
+        raise ConsensusValidationError(f"Incomplete {readable_name}: {exc}") from exc
     return grading
+
+
+def _preserve_undisputed_grading_fields(
+    reviewed: dict[str, Any],
+    initial_own: Mapping[str, Any],
+    disputed_paths: set[str],
+) -> tuple[set[str], list[str]]:
+    """Reject model edits outside disputed grading fields without authoring grades."""
+    rejected: set[str] = set()
+    warnings: list[str] = []
+
+    def preserve(path: str) -> None:
+        if get_path(reviewed, path) == get_path(initial_own, path):
+            return
+        set_path(reviewed, path, copy.deepcopy(get_path(initial_own, path)))
+        rejected.add(path)
+        warnings.append(f"Unauthorized undisputed field change rejected: {path}")
+
+    preserve("map_file")
+    preserve("model")
+    for path, field in COMPARISON_FIELD_BY_PATH.items():
+        if path not in disputed_paths:
+            preserve(path)
+        if field.disagreement_type == "criterion_score":
+            explanation_path = path.removesuffix(".score") + ".explanation"
+            if path not in disputed_paths:
+                preserve(explanation_path)
+        elif field.disagreement_type == "domain_decision":
+            if path not in disputed_paths:
+                preserve(path.removesuffix(".overall_decision") + ".if_no_explanation")
+    for path in ("strengths", "areas_for_improvement", "grading_notes"):
+        preserve(path)
+    return rejected, warnings
 
 
 def validate_cross_review(
@@ -98,6 +136,8 @@ def validate_cross_review(
         path = str(item.get("path", ""))
         if path not in COMPARISON_FIELD_BY_PATH:
             raise ConsensusValidationError(f"Unknown reviewed field path: {path}")
+        if path in reviews_by_path:
+            raise ConsensusValidationError(f"Duplicate field review path: {path}")
         if item.get("action") not in ALLOWED_REVIEW_ACTIONS:
             raise ConsensusValidationError(f"Invalid review action for {path}.")
         if not str(item.get("reason", "")).strip():
@@ -114,18 +154,14 @@ def validate_cross_review(
             + ", ".join(sorted(missing_reviews))
         )
 
-    # Undisputed numeric criterion changes are unauthorized. Preserve the model's
-    # own original value rather than selecting a competing score.
-    rejected_unauthorized_paths: set[str] = set()
-    for path, field in COMPARISON_FIELD_BY_PATH.items():
-        if field.disagreement_type != "criterion_score":
-            continue
-        if path in initial_disagreement_paths:
-            continue
-        if get_path(reviewed, path) != get_path(initial_own, path):
-            set_path(reviewed, path, get_path(initial_own, path))
-            rejected_unauthorized_paths.add(path)
-            warnings.append(f"Unauthorized undisputed score change rejected: {path}")
+    rejected_unauthorized_paths, preservation_warnings = (
+        _preserve_undisputed_grading_fields(
+            reviewed,
+            initial_own,
+            initial_disagreement_paths,
+        )
+    )
+    warnings.extend(preservation_warnings)
 
     changed_paths = tuple(
         path
@@ -183,14 +219,29 @@ def validate_consensus(
     payload: Mapping[str, Any],
     *,
     initial_disagreement_paths: set[str],
+    expected_map_file: str | None = None,
+    expected_model: str | None = None,
 ) -> dict[str, Any]:
     value = copy.deepcopy(dict(payload))
     status = value.get("consensus_status")
     if status not in ALLOWED_CONSENSUS_STATUSES:
         raise ConsensusValidationError("Invalid consensus_status.")
     if status == "unavailable":
-        return value
-    grading = validate_complete_grading(value.get("consensus_grading"))
+        raise ConsensusValidationError(
+            "A model-authored consensus response cannot use status unavailable or omit consensus_grading."
+        )
+    grading = validate_complete_grading(
+        value.get("consensus_grading"),
+        object_name="consensus_grading",
+    )
+    if expected_map_file is not None and grading.get("map_file") != expected_map_file:
+        raise ConsensusValidationError(
+            "consensus_grading.map_file does not match the evaluated map context."
+        )
+    if expected_model is not None and grading.get("model") != expected_model:
+        raise ConsensusValidationError(
+            "consensus_grading.model does not match the configured consensus model label."
+        )
     resolutions = value.get("criterion_resolutions")
     unresolved = value.get("unresolved_disagreements")
     if not isinstance(resolutions, list) or not isinstance(unresolved, list):

@@ -224,9 +224,11 @@ def _display_comparison_tab(
         )
         if initial_comparison.get("disagreement_count", 0):
             reviews = export.get("cross_reviews", {})
-            if not isinstance(reviews, Mapping) or reviews.get("gemma") is None:
+            gemma_review = reviews.get("gemma") if isinstance(reviews, Mapping) else None
+            llama_review = reviews.get("llama") if isinstance(reviews, Mapping) else None
+            if not isinstance(gemma_review, Mapping) or gemma_review.get("status") == "failed":
                 st.warning("Gemma cross-review was unavailable.")
-            if not isinstance(reviews, Mapping) or reviews.get("llama") is None:
+            if not isinstance(llama_review, Mapping) or llama_review.get("status") == "failed":
                 st.warning("Llama cross-review was unavailable.")
     st.dataframe(comparison_rows(export), hide_index=True, use_container_width=True)
 
