@@ -33,6 +33,17 @@ class ConsensusValidationError(RuntimeError):
     pass
 
 
+class ConsensusResolutionConsistencyError(ConsensusValidationError):
+    """Resolution values disagree with the authoritative model grading."""
+
+    def __init__(self, mismatches: list[dict[str, Any]]) -> None:
+        self.mismatches = copy.deepcopy(mismatches)
+        super().__init__(
+            "Consensus resolution values do not match consensus_grading: "
+            + json.dumps({"mismatches": mismatches}, separators=(",", ":"))
+        )
+
+
 @dataclass(frozen=True)
 class ValidatedCrossReview:
     payload: dict[str, Any]
@@ -219,6 +230,7 @@ def validate_consensus(
     payload: Mapping[str, Any],
     *,
     initial_disagreement_paths: set[str],
+    required_resolution_paths: set[str] | None = None,
     expected_map_file: str | None = None,
     expected_model: str | None = None,
 ) -> dict[str, Any]:
@@ -248,20 +260,59 @@ def validate_consensus(
         raise ConsensusValidationError(
             "criterion_resolutions and unresolved_disagreements must be arrays."
         )
+    required_paths = (
+        set(initial_disagreement_paths)
+        if required_resolution_paths is None
+        else set(required_resolution_paths)
+    )
     seen_paths: set[str] = set()
+    duplicate_paths: set[str] = set()
+    extra_paths: set[str] = set()
     for item in resolutions:
         if not isinstance(item, Mapping):
             raise ConsensusValidationError("Every criterion resolution must be an object.")
         path = str(item.get("path", ""))
-        if path not in initial_disagreement_paths:
-            raise ConsensusValidationError(f"Resolution path was not initially disputed: {path}")
+        if path not in required_paths:
+            extra_paths.add(path)
+            continue
         if path in seen_paths:
-            raise ConsensusValidationError(f"Duplicate resolution path: {path}")
+            duplicate_paths.add(path)
+            continue
         seen_paths.add(path)
+    if duplicate_paths:
+        raise ConsensusValidationError(
+            "Duplicate resolution paths: " + ", ".join(sorted(duplicate_paths))
+        )
+    if extra_paths:
+        raise ConsensusValidationError(
+            "Unknown or extra resolution paths: " + ", ".join(sorted(extra_paths))
+        )
+    missing_paths = required_paths - seen_paths
+    if missing_paths:
+        raise ConsensusValidationError(
+            "Missing required resolution paths: " + ", ".join(sorted(missing_paths))
+        )
+
+    mismatches: list[dict[str, Any]] = []
+    for item in resolutions:
+        path = str(item.get("path", ""))
         if item.get("status") not in {"resolved", "unresolved"}:
             raise ConsensusValidationError(f"Invalid resolution status for {path}.")
-        if item.get("consensus_value") != get_path(grading, path):
-            raise ConsensusValidationError(f"consensus_value does not match grading at {path}.")
+        grading_value = get_path(grading, path)
+        resolution_value = item.get("consensus_value")
+        if (
+            type(resolution_value) is not type(grading_value)
+            or resolution_value != grading_value
+        ):
+            mismatches.append(
+                {
+                    "path": path,
+                    "grading_value": grading_value,
+                    "resolution_value": resolution_value,
+                    "grading_type": type(grading_value).__name__,
+                    "resolution_type": type(resolution_value).__name__,
+                }
+            )
         confidence = item.get("confidence")
         if (
             not isinstance(confidence, (int, float))
@@ -271,6 +322,8 @@ def validate_consensus(
             raise ConsensusValidationError(f"Invalid resolution confidence for {path}.")
         if not str(item.get("resolution_basis", "")).strip():
             raise ConsensusValidationError(f"resolution_basis is required for {path}.")
+    if mismatches:
+        raise ConsensusResolutionConsistencyError(mismatches)
     unresolved_paths: set[str] = set()
     for item in unresolved:
         if not isinstance(item, Mapping):
@@ -287,10 +340,6 @@ def validate_consensus(
         if not str(item.get("reason", "")).strip():
             raise ConsensusValidationError(f"Unresolved reason is required for {path}.")
         unresolved_paths.add(path)
-    if seen_paths != initial_disagreement_paths:
-        raise ConsensusValidationError(
-            "Every initially disputed field must have one criterion resolution."
-        )
     for item in resolutions:
         path = str(item["path"])
         should_be_unresolved = item.get("status") == "unresolved"

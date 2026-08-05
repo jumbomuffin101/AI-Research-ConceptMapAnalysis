@@ -354,6 +354,17 @@ def run_consensus_pipeline(
         if consensus_result
         else getattr(consensus_error, "debug_metadata", {})
     )
+    consensus_attempts = consensus_meta.get("attempts", [])
+    first_consensus_attempt = (
+        consensus_attempts[0]
+        if consensus_attempts and isinstance(consensus_attempts[0], Mapping)
+        else {}
+    )
+    final_consensus_attempt = (
+        consensus_attempts[-1]
+        if consensus_attempts and isinstance(consensus_attempts[-1], Mapping)
+        else {}
+    )
     debug.update(
         {
             "consensus_raw_response": (
@@ -384,6 +395,44 @@ def run_consensus_pipeline(
                 }
             ),
             "consensus_request_metadata": consensus_meta,
+            "consensus_resolution_consistency_checked": final_consensus_attempt.get(
+                "consensus_resolution_consistency_checked", False
+            ),
+            "compared_resolution_count": final_consensus_attempt.get(
+                "compared_resolution_count", 0
+            ),
+            "duplicate_resolution_paths": final_consensus_attempt.get(
+                "duplicate_resolution_paths", []
+            ),
+            "missing_resolution_paths": final_consensus_attempt.get(
+                "missing_resolution_paths", []
+            ),
+            "extra_resolution_paths": final_consensus_attempt.get(
+                "extra_resolution_paths", []
+            ),
+            "consensus_value_mismatches": first_consensus_attempt.get(
+                "consensus_value_mismatches", []
+            ),
+            "consistency_repair_required": consensus_meta.get(
+                "consistency_repair_required",
+                first_consensus_attempt.get("consistency_repair_required", False),
+            ),
+            "consistency_repair_attempted": consensus_meta.get(
+                "consistency_repair_attempted",
+                first_consensus_attempt.get("consistency_repair_attempted", False),
+            ),
+            "consistency_repair_success": consensus_meta.get(
+                "consistency_repair_success", False
+            ),
+            "consensus_grading_preserved_during_repair": consensus_meta.get(
+                "consensus_grading_preserved_during_repair"
+            ),
+            "final_consistency_validation_success": consensus_meta.get(
+                "final_consistency_validation_success",
+                final_consensus_attempt.get(
+                    "final_consistency_validation_success", False
+                ),
+            ),
             "unresolved_disagreement_count": unresolved_count,
             "human_review_recommended": bool(
                 consensus.get("human_review_recommended")

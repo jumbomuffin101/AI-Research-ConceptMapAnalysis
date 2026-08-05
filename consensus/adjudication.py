@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from consensus.cross_review import _complete_grading_contract
+from consensus.comparison import COMPARISON_FIELDS, get_path
 from consensus.providers import ProviderCallResult, invoke_model
 from consensus.schemas import (
     ConsensusValidationError,
+    ConsensusResolutionConsistencyError,
     clean_json_object,
     validate_consensus,
 )
@@ -116,6 +119,7 @@ def build_consensus_prompt(
         "initial_disagreements": initial_comparison.get("disagreements", []),
         "post_review_comparison": post_review_comparison,
     }
+    canonical_paths = [field.path for field in COMPARISON_FIELDS]
     return (
         "OUTPUT CONTRACT (FIRST AND MANDATORY)\n"
         "Your response is invalid unless consensus_grading is a complete compact production "
@@ -138,19 +142,83 @@ def build_consensus_prompt(
         "If either review status is unavailable, adjudicate from the original image, both "
         "complete initial grades, and the disagreement list; unavailable reviews reduce "
         "confidence but do not permit an incomplete consensus_grading. Keep resolution "
-        "reasons concise and output no chain-of-thought.\n\n"
+        "reasons concise and output no chain-of-thought. Use this generation order: "
+        "(1) review the image and grader outputs, (2) produce the complete "
+        "consensus_grading, (3) freeze consensus_grading, (4) produce "
+        "criterion_resolutions by looking up values in that frozen grading, (5) produce "
+        "unresolved_disagreements, and (6) run the consistency check below. Do not "
+        "independently adjudicate a field again while writing its resolution.\n\n"
         + SPRING_2025_RUBRIC
         + "\n\nDELIBERATION CONTEXT\n"
         + json.dumps(context, separators=(",", ":"), ensure_ascii=False)
-        + "\n\nFor every initially disputed path include exactly one criterion resolution. "
+        + "\n\nCANONICAL COMPARISON PATHS\n"
+        + json.dumps(canonical_paths, separators=(",", ":"))
+        + "\nReturn exactly one criterion_resolutions item for every canonical path above. "
+        "Use each path verbatim. Do not use aliases, omit paths, duplicate paths, or add "
+        "invented paths. The value in each criterion_resolutions[].consensus_value must "
+        "exactly equal the corresponding value in consensus_grading at the listed path. "
+        "Treat consensus_grading as the authoritative final adjudication within your "
+        "response. The resolution_basis summarizes the already-made decision; it must not "
+        "generate a second value. "
         "If unresolved, provide the best image-and-rubric-based value in consensus_grading, "
         "also list it under unresolved_disagreements, use "
-        "consensus_status=complete_with_human_review, and recommend human review. Return raw "
-        "JSON only, without Markdown or surrounding prose."
+        "consensus_status=complete_with_human_review, and recommend human review. An "
+        "unresolved status may remain even though consensus_value contains the best final "
+        "adjudication.\n\nCONSISTENCY CHECK BEFORE RESPONDING\n"
+        "For every criterion_resolutions item: (1) read its path, (2) look up the final "
+        "value at that exact path inside consensus_grading, (3) copy that exact value into "
+        "consensus_value, (4) verify the types match, and (5) do not return JSON until all "
+        "entries match. Criterion score paths must contain integers 1 through 4. Domain "
+        "decision paths and overall_meets_expectations must contain exactly Yes or No. "
+        "Return raw JSON only, without Markdown or surrounding prose."
     )
 
 
-def _attempt_debug(call: ProviderCallResult) -> dict[str, Any]:
+def _resolution_diagnostics(
+    parsed: Mapping[str, Any] | None,
+    required_paths: set[str],
+) -> dict[str, Any]:
+    resolutions = parsed.get("criterion_resolutions") if isinstance(parsed, Mapping) else None
+    grading = parsed.get("consensus_grading") if isinstance(parsed, Mapping) else None
+    if not isinstance(resolutions, list):
+        resolutions = []
+    paths = [str(item.get("path", "")) for item in resolutions if isinstance(item, Mapping)]
+    duplicates = sorted({path for path in paths if paths.count(path) > 1})
+    observed = set(paths)
+    mismatches: list[dict[str, Any]] = []
+    if isinstance(grading, Mapping):
+        for item in resolutions:
+            if not isinstance(item, Mapping):
+                continue
+            path = str(item.get("path", ""))
+            if path not in required_paths:
+                continue
+            grading_value = get_path(grading, path)
+            resolution_value = item.get("consensus_value")
+            if type(resolution_value) is not type(grading_value) or resolution_value != grading_value:
+                mismatches.append(
+                    {
+                        "path": path,
+                        "grading_value": grading_value,
+                        "resolution_value": resolution_value,
+                        "grading_type": type(grading_value).__name__,
+                        "resolution_type": type(resolution_value).__name__,
+                    }
+                )
+    return {
+        "consensus_resolution_consistency_checked": isinstance(grading, Mapping),
+        "compared_resolution_count": len(paths),
+        "duplicate_resolution_paths": duplicates,
+        "missing_resolution_paths": sorted(required_paths - observed),
+        "extra_resolution_paths": sorted(observed - required_paths),
+        "consensus_value_mismatches": mismatches,
+    }
+
+
+def _attempt_debug(
+    call: ProviderCallResult,
+    required_paths: set[str],
+) -> dict[str, Any]:
     parsed: dict[str, Any] | None = None
     parse_error: str | None = None
     try:
@@ -171,6 +239,7 @@ def _attempt_debug(call: ProviderCallResult) -> dict[str, Any]:
         "parse_error": parse_error,
         "truncated": call.metadata.get("finish_reason") == "length",
         "validation_object_path": "response.consensus_grading",
+        **_resolution_diagnostics(parsed, required_paths),
     }
 
 
@@ -203,6 +272,43 @@ def _repair_prompt(raw_text: str) -> str:
     )
 
 
+def _consistency_repair_prompt(
+    raw_text: str,
+    canonical_paths: list[str],
+    mismatches: list[dict[str, Any]],
+) -> str:
+    return (
+        "CONSISTENCY REPAIR ONLY. The JSON below contains a complete model-authored "
+        "consensus, but some criterion_resolutions consensus_value fields disagree with "
+        "the authoritative consensus_grading. Return one valid raw JSON object. Preserve "
+        "consensus_grading byte-for-value: do not change any score, domain decision, final "
+        "decision, explanation, strength, area for improvement, grading note, or other "
+        "consensus_grading content. Preserve resolution statuses, resolution bases, "
+        "confidence values, human-review flags, and unresolved_disagreements. Update only "
+        "the listed mismatched criterion_resolutions[].consensus_value fields by copying "
+        "the value at the exact path from consensus_grading. Do not re-adjudicate.\n\n"
+        "CANONICAL PATHS\n"
+        + json.dumps(canonical_paths, separators=(",", ":"))
+        + "\n\nMISMATCHES\n"
+        + json.dumps(mismatches, separators=(",", ":"), ensure_ascii=False)
+        + "\n\nCOMPLETE ORIGINAL CONSENSUS\n"
+        + raw_text
+    )
+
+
+def _without_repairable_consensus_values(
+    payload: Mapping[str, Any],
+    mismatch_paths: set[str],
+) -> dict[str, Any]:
+    value = copy.deepcopy(dict(payload))
+    resolutions = value.get("criterion_resolutions")
+    if isinstance(resolutions, list):
+        for item in resolutions:
+            if isinstance(item, dict) and str(item.get("path", "")) in mismatch_paths:
+                item["consensus_value"] = "<repairable-consensus-value>"
+    return value
+
+
 def run_adjudication(
     *,
     config: ConsensusModelConfig,
@@ -233,20 +339,24 @@ def run_adjudication(
         max_tokens=CONSENSUS_MAX_TOKENS,
         timeout_seconds=CONSENSUS_TIMEOUT_SECONDS,
     )
-    first_debug = _attempt_debug(first)
-    attempts.append(first_debug)
     disagreement_paths = {
         str(item["path"]) for item in initial_comparison.get("disagreements", [])
     }
+    canonical_paths = [field.path for field in COMPARISON_FIELDS]
+    required_resolution_paths = set(canonical_paths)
+    first_debug = _attempt_debug(first, required_resolution_paths)
+    attempts.append(first_debug)
     expected_map_file = str(
         initial_gemma.get("map_file") or initial_llama.get("map_file") or ""
     )
     expected_model = f"consensus:{config.model_id}"
+    validation_error: Exception | None = None
     try:
         payload = clean_json_object(first.raw_text)
         validated = validate_consensus(
             payload,
             initial_disagreement_paths=disagreement_paths,
+            required_resolution_paths=required_resolution_paths,
             expected_map_file=expected_map_file,
             expected_model=expected_model,
         )
@@ -255,6 +365,11 @@ def run_adjudication(
                 "consensus_grading_validation_success": True,
                 "wrapper_validation_success": True,
                 "response_classification": "complete",
+                "consistency_repair_required": False,
+                "consistency_repair_attempted": False,
+                "consistency_repair_success": False,
+                "consensus_grading_preserved_during_repair": None,
+                "final_consistency_validation_success": True,
             }
         )
         return AdjudicationResult(
@@ -270,6 +385,7 @@ def run_adjudication(
             },
         )
     except Exception as first_error:
+        validation_error = first_error
         first_debug.update(
             {
                 "consensus_grading_validation_success": False,
@@ -277,6 +393,130 @@ def run_adjudication(
                 "validation_error": str(first_error),
             }
         )
+
+    if isinstance(validation_error, ConsensusResolutionConsistencyError):
+        first_debug.update(
+            {
+                "response_classification": "resolution_consistency_mismatch",
+                "consistency_repair_required": True,
+                "consistency_repair_attempted": True,
+                "consistency_repair_success": False,
+                "final_consistency_validation_success": False,
+                "consensus_value_mismatches": validation_error.mismatches,
+            }
+        )
+        original_payload = clean_json_object(first.raw_text)
+        repair = invoke(
+            provider=config.provider,
+            model_id=config.model_id,
+            prompt=_consistency_repair_prompt(
+                first.raw_text,
+                canonical_paths,
+                validation_error.mismatches,
+            ),
+            image_base64=None,
+            max_tokens=CONSENSUS_MAX_TOKENS,
+            timeout_seconds=CONSENSUS_TIMEOUT_SECONDS,
+        )
+        repair_debug = _attempt_debug(repair, required_resolution_paths)
+        repair_debug.update(
+            {
+                "recovery_type": "consistency_only",
+                "consistency_repair_required": True,
+                "consistency_repair_attempted": True,
+            }
+        )
+        attempts.append(repair_debug)
+        try:
+            repaired_payload = clean_json_object(repair.raw_text)
+            original_grading = original_payload.get("consensus_grading")
+            repaired_grading = repaired_payload.get("consensus_grading")
+            grading_preserved = repaired_grading == original_grading
+            mismatch_paths = {
+                str(item["path"]) for item in validation_error.mismatches
+            }
+            only_allowed_values_changed = (
+                _without_repairable_consensus_values(original_payload, mismatch_paths)
+                == _without_repairable_consensus_values(repaired_payload, mismatch_paths)
+            )
+            repair_debug["consensus_grading_preserved_during_repair"] = grading_preserved
+            if not grading_preserved:
+                raise ConsensusValidationError(
+                    "Consistency repair changed consensus_grading."
+                )
+            if not only_allowed_values_changed:
+                raise ConsensusValidationError(
+                    "Consistency repair changed fields other than mismatched consensus_value entries."
+                )
+            validated = validate_consensus(
+                repaired_payload,
+                initial_disagreement_paths=disagreement_paths,
+                required_resolution_paths=required_resolution_paths,
+                expected_map_file=expected_map_file,
+                expected_model=expected_model,
+            )
+            repair_debug.update(
+                {
+                    "consensus_grading_validation_success": True,
+                    "wrapper_validation_success": True,
+                    "response_classification": "complete_after_consistency_repair",
+                    "consistency_repair_success": True,
+                    "final_consistency_validation_success": True,
+                }
+            )
+            return AdjudicationResult(
+                validated,
+                repair.raw_text,
+                {
+                    "initial": first.raw_response,
+                    "consistency_repair": repair.raw_response,
+                },
+                {
+                    **repair.metadata,
+                    "consensus_call_count": 2,
+                    "recovery_attempted": True,
+                    "recovery_type": "consistency_only",
+                    "consistency_repair_required": True,
+                    "consistency_repair_attempted": True,
+                    "consistency_repair_success": True,
+                    "consensus_grading_preserved_during_repair": True,
+                    "final_consistency_validation_success": True,
+                    "attempts": attempts,
+                    "final_status": "complete",
+                },
+            )
+        except Exception as repair_error:
+            repair_debug.update(
+                {
+                    "consensus_grading_validation_success": False,
+                    "wrapper_validation_success": False,
+                    "validation_error": str(repair_error),
+                    "response_classification": "failed_consistency_repair",
+                    "consistency_repair_success": False,
+                    "final_consistency_validation_success": False,
+                }
+            )
+            raise AdjudicationFailure(
+                str(repair_error),
+                {
+                    "provider": config.provider,
+                    "model_id": config.model_id,
+                    "prompt_character_count": len(prompt),
+                    "max_tokens": CONSENSUS_MAX_TOKENS,
+                    "timeout_seconds": CONSENSUS_TIMEOUT_SECONDS,
+                    "streaming_enabled": False,
+                    "image_resent": True,
+                    "consistency_repair_required": True,
+                    "consistency_repair_attempted": True,
+                    "consistency_repair_success": False,
+                    "consensus_grading_preserved_during_repair": repair_debug.get(
+                        "consensus_grading_preserved_during_repair"
+                    ),
+                    "final_consistency_validation_success": False,
+                    "attempts": attempts,
+                    "final_status": "failed",
+                },
+            ) from repair_error
 
     format_only = first_debug["parse_error"] is not None and _looks_complete(first.raw_text)
     first_debug["response_classification"] = (
@@ -296,7 +536,7 @@ def run_adjudication(
         max_tokens=CONSENSUS_MAX_TOKENS,
         timeout_seconds=CONSENSUS_TIMEOUT_SECONDS,
     )
-    recovered_debug = _attempt_debug(recovered)
+    recovered_debug = _attempt_debug(recovered, required_resolution_paths)
     recovered_debug["recovery_type"] = "format_only" if format_only else "full_consensus_retry"
     attempts.append(recovered_debug)
     try:
@@ -304,6 +544,7 @@ def run_adjudication(
         validated = validate_consensus(
             payload,
             initial_disagreement_paths=disagreement_paths,
+            required_resolution_paths=required_resolution_paths,
             expected_map_file=expected_map_file,
             expected_model=expected_model,
         )
@@ -312,6 +553,7 @@ def run_adjudication(
                 "consensus_grading_validation_success": True,
                 "wrapper_validation_success": True,
                 "response_classification": "complete_after_recovery",
+                "final_consistency_validation_success": True,
             }
         )
         return AdjudicationResult(
@@ -323,6 +565,7 @@ def run_adjudication(
                 "consensus_call_count": 2,
                 "recovery_attempted": True,
                 "recovery_type": recovered_debug["recovery_type"],
+                "final_consistency_validation_success": True,
                 "final_status": "complete",
                 "attempts": attempts,
             },
@@ -334,6 +577,7 @@ def run_adjudication(
                 "wrapper_validation_success": False,
                 "validation_error": str(recovery_error),
                 "response_classification": "failed_after_recovery",
+                "final_consistency_validation_success": False,
             }
         )
         raise AdjudicationFailure(
@@ -351,6 +595,7 @@ def run_adjudication(
                     "llama": _review_context(llama_review, "llama")["status"],
                 },
                 "attempts": attempts,
+                "final_consistency_validation_success": False,
                 "final_status": "failed",
             },
         ) from recovery_error

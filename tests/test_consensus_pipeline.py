@@ -26,6 +26,7 @@ from consensus.cross_review import (
 )
 from consensus.providers import ProviderCallResult
 from consensus.schemas import (
+    ConsensusResolutionConsistencyError,
     ConsensusValidationError,
     validate_consensus,
     validate_cross_review,
@@ -512,7 +513,65 @@ class ConsensusValidationTests(unittest.TestCase):
         llama = grading(2)
         payload = consensus_envelope(grading(3), self.path, gemma, llama)
         payload["criterion_resolutions"][0]["consensus_value"] = 2
-        with self.assertRaisesRegex(ConsensusValidationError, "does not match"):
+        with self.assertRaisesRegex(ConsensusValidationError, "do not match"):
+            validate_consensus(payload, initial_disagreement_paths={self.path})
+
+    def test_multiple_consensus_mismatches_are_reported_together(self) -> None:
+        gemma = grading(3)
+        llama = grading(2)
+        second_path = "application.overall_decision"
+        payload = consensus_envelope(grading(3), self.path, gemma, llama)
+        payload["criterion_resolutions"].append(
+            {
+                "path": second_path,
+                "initial_gemma": "Yes",
+                "initial_llama": "No",
+                "reviewed_gemma": "Yes",
+                "reviewed_llama": "No",
+                "consensus_value": "No",
+                "status": "resolved",
+                "resolution_basis": "The final grading is authoritative.",
+                "human_review_recommended": False,
+                "confidence": 0.8,
+            }
+        )
+        payload["criterion_resolutions"][0]["consensus_value"] = 4
+        with self.assertRaises(ConsensusResolutionConsistencyError) as caught:
+            validate_consensus(
+                payload,
+                initial_disagreement_paths={self.path, second_path},
+            )
+        self.assertEqual(
+            {item["path"] for item in caught.exception.mismatches},
+            {self.path, second_path},
+        )
+
+    def test_overall_decision_mismatch_fails(self) -> None:
+        path = "overall_meets_expectations"
+        gemma = grading(3, "Yes")
+        llama = grading(2, "No")
+        payload = consensus_envelope(grading(3, "Yes"), path, gemma, llama)
+        payload["criterion_resolutions"][0]["consensus_value"] = "No"
+        with self.assertRaises(ConsensusResolutionConsistencyError):
+            validate_consensus(payload, initial_disagreement_paths={path})
+
+    def test_resolution_paths_reject_duplicates_unknown_and_missing(self) -> None:
+        gemma = grading(3)
+        llama = grading(2)
+        payload = consensus_envelope(grading(3), self.path, gemma, llama)
+        duplicate = copy.deepcopy(payload["criterion_resolutions"][0])
+        payload["criterion_resolutions"].append(duplicate)
+        with self.assertRaisesRegex(ConsensusValidationError, "Duplicate"):
+            validate_consensus(payload, initial_disagreement_paths={self.path})
+
+        payload = consensus_envelope(grading(3), self.path, gemma, llama)
+        payload["criterion_resolutions"][0]["path"] = "invented.path"
+        with self.assertRaisesRegex(ConsensusValidationError, "Unknown or extra"):
+            validate_consensus(payload, initial_disagreement_paths={self.path})
+
+        payload = consensus_envelope(grading(3), self.path, gemma, llama)
+        payload["criterion_resolutions"] = []
+        with self.assertRaisesRegex(ConsensusValidationError, "Missing required"):
             validate_consensus(payload, initial_disagreement_paths={self.path})
 
     def test_incomplete_consensus_grading_never_passes_as_complete(self) -> None:
@@ -559,6 +618,160 @@ class ConsensusValidationTests(unittest.TestCase):
         self.assertTrue(prompt.startswith("OUTPUT CONTRACT"))
         self.assertIn('"status":"failed"', prompt)
         self.assertIn("unavailable reviews reduce confidence", prompt)
+
+
+class ConsensusConsistencyRepairTests(unittest.TestCase):
+    @staticmethod
+    def full_envelope(
+        consensus_grading: dict,
+        gemma: dict,
+        llama: dict,
+        *,
+        mismatch_path: str | None = None,
+    ) -> dict:
+        from consensus.comparison import get_path
+
+        resolutions = []
+        for field in COMPARISON_FIELDS:
+            value = get_path(consensus_grading, field.path)
+            resolutions.append(
+                {
+                    "path": field.path,
+                    "initial_gemma": get_path(gemma, field.path),
+                    "initial_llama": get_path(llama, field.path),
+                    "reviewed_gemma": get_path(gemma, field.path),
+                    "reviewed_llama": get_path(llama, field.path),
+                    "consensus_value": (
+                        4 if mismatch_path == field.path and isinstance(value, int) else value
+                    ),
+                    "status": "resolved",
+                    "resolution_basis": "The frozen consensus grading supplies this value.",
+                    "human_review_recommended": False,
+                    "confidence": 0.8,
+                }
+            )
+        return {
+            "consensus_status": "complete",
+            "consensus_grading": consensus_grading,
+            "criterion_resolutions": resolutions,
+            "unresolved_disagreements": [],
+            "consensus_confidence": 0.8,
+            "human_review_recommended": False,
+            "consensus_notes": "Complete model-authored consensus.",
+        }
+
+    @staticmethod
+    def call(payload: dict) -> ProviderCallResult:
+        raw = json.dumps(payload)
+        return ProviderCallResult(
+            raw,
+            {"raw": raw},
+            {
+                "provider": "OpenRouter",
+                "model_id": "test/model",
+                "prompt_character_count": 10,
+                "max_tokens": 7600,
+                "image_resent": True,
+                "finish_reason": "stop",
+                "completion_tokens": 1000,
+            },
+        )
+
+    def test_text_only_consistency_repair_changes_only_consensus_value(self) -> None:
+        gemma = grading(3, "Yes")
+        llama = grading(3, "Yes")
+        mismatch_path = "knowledge_acquisition.basic_science.score"
+        llama["knowledge_acquisition"]["basic_science"]["score"] = 2
+        comparison = compare_gradings(gemma, llama)
+        final_grading = copy.deepcopy(gemma)
+        final_grading["model"] = "consensus:test/model"
+        malformed = self.full_envelope(
+            final_grading,
+            gemma,
+            llama,
+            mismatch_path=mismatch_path,
+        )
+        repaired = copy.deepcopy(malformed)
+        repaired["criterion_resolutions"][0]["consensus_value"] = 3
+        calls: list[dict] = []
+
+        def invoke(**kwargs):
+            calls.append(kwargs)
+            return self.call(malformed if len(calls) == 1 else repaired)
+
+        result = run_adjudication(
+            config=ConsensusModelConfig("OpenRouter", "test/model"),
+            image_base64="image",
+            initial_gemma=gemma,
+            initial_llama=llama,
+            gemma_review=None,
+            llama_review=None,
+            initial_comparison=comparison,
+            post_review_comparison=classify_post_review(
+                comparison, gemma, llama, None, None
+            ),
+            invoke=invoke,
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertIsNone(calls[1]["image_base64"])
+        self.assertEqual(result.consensus["consensus_grading"], final_grading)
+        self.assertEqual(result.request_metadata["recovery_type"], "consistency_only")
+        self.assertTrue(result.request_metadata["consistency_repair_success"])
+        self.assertTrue(
+            result.request_metadata["consensus_grading_preserved_during_repair"]
+        )
+
+    def test_consistency_repair_cannot_change_consensus_grading(self) -> None:
+        gemma = grading(3, "Yes")
+        llama = grading(3, "Yes")
+        mismatch_path = "knowledge_acquisition.basic_science.score"
+        llama["knowledge_acquisition"]["basic_science"]["score"] = 2
+        comparison = compare_gradings(gemma, llama)
+        final_grading = copy.deepcopy(gemma)
+        final_grading["model"] = "consensus:test/model"
+        malformed = self.full_envelope(
+            final_grading, gemma, llama, mismatch_path=mismatch_path
+        )
+        invalid_repair = copy.deepcopy(malformed)
+        invalid_repair["criterion_resolutions"][0]["consensus_value"] = 3
+        invalid_repair["consensus_grading"]["knowledge_acquisition"]["basic_science"][
+            "score"
+        ] = 2
+        calls = iter([self.call(malformed), self.call(invalid_repair)])
+        with self.assertRaisesRegex(ConsensusValidationError, "changed consensus_grading"):
+            run_adjudication(
+                config=ConsensusModelConfig("OpenRouter", "test/model"),
+                image_base64="image",
+                initial_gemma=gemma,
+                initial_llama=llama,
+                gemma_review=None,
+                llama_review=None,
+                initial_comparison=comparison,
+                post_review_comparison=classify_post_review(
+                    comparison, gemma, llama, None, None
+                ),
+                invoke=lambda **_kwargs: next(calls),
+            )
+
+    def test_prompt_contains_canonical_paths_and_consistency_order(self) -> None:
+        gemma = grading(3)
+        llama = grading(2)
+        comparison = compare_gradings(gemma, llama)
+        prompt = build_consensus_prompt(
+            config=ConsensusModelConfig("OpenRouter", "test/model"),
+            initial_gemma=gemma,
+            initial_llama=llama,
+            gemma_review=None,
+            llama_review=None,
+            initial_comparison=comparison,
+            post_review_comparison=classify_post_review(
+                comparison, gemma, llama, None, None
+            ),
+        )
+        self.assertIn("freeze consensus_grading", prompt)
+        self.assertIn("CONSISTENCY CHECK BEFORE RESPONDING", prompt)
+        for field in COMPARISON_FIELDS:
+            self.assertIn(field.path, prompt)
 
 
 class ConsensusServiceTests(unittest.TestCase):
