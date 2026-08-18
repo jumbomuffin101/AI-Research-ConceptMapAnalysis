@@ -96,6 +96,7 @@ def invoke_model(
                 stream=True,
                 timeout=timeout,
                 progress_callback=progress_callback,
+                stage=stage,
             ),
             progress_callback,
             stage=stage,
@@ -137,6 +138,7 @@ def invoke_model(
                 "duration_seconds": response.transport.get(
                     "elapsed_request_seconds"
                 ),
+                "runtime_proof": response.transport.get("runtime_proof"),
             },
         )
     raise RuntimeError(f"Unsupported consensus provider: {provider}")

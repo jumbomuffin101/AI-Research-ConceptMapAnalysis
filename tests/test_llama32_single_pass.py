@@ -137,6 +137,44 @@ class Llama32SinglePassTests(unittest.TestCase):
         self.assertTrue(completion.transport["streaming_enabled"])
         self.assertEqual(completion.transport["read_timeout_seconds"], 300)
 
+    def test_active_http_transport_receives_30_300_timeout(self) -> None:
+        """Assert the timeout passed to the actual requests.post boundary."""
+        captured: dict = {}
+
+        class StreamResponse:
+            status_code = 200
+            headers: dict[str, str] = {}
+            text = ""
+
+            def iter_lines(self, decode_unicode=True):
+                return iter([
+                    'data: {"choices":[{"delta":{"content":"{}"},"finish_reason":"stop"}]}',
+                    "data: [DONE]",
+                ])
+
+        class Requests:
+            def post(self, *args, **kwargs):
+                captured["args"] = args
+                captured["kwargs"] = kwargs
+                return StreamResponse()
+
+        completion = grade_llama._post_nvidia(
+            {"requests": Requests(), "headers": {}},
+            {"stream": True},
+            stream=True,
+            timeout=(30, 300),
+            stage="transport_test",
+        )
+
+        self.assertEqual(captured["kwargs"]["timeout"], (30, 300))
+        self.assertEqual(
+            completion.transport["runtime_proof"]["request_function"],
+            "grading.grade_llama._post_nvidia",
+        )
+        self.assertEqual(
+            completion.transport["runtime_proof"]["read_timeout_seconds"], 300
+        )
+
     def test_decision_debug_metadata_only_reports_model_values(self) -> None:
         payload = valid_payload(3)
         payload["knowledge_acquisition"]["basic_science"]["score"] = 4

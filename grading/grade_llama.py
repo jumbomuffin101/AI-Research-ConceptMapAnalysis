@@ -7,6 +7,7 @@ import json
 import inspect
 import os
 import re
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,30 @@ TIMEOUT_SECONDS = READ_TIMEOUT_SECONDS
 FULL_RETRY_READ_TIMEOUT_SECONDS = READ_TIMEOUT_SECONDS
 TRANSPORT_RETRY_WAIT_SECONDS = 5
 IMAGE_MIME_TYPE = "image/jpeg"
+REQUEST_FUNCTION = "grading.grade_llama._post_nvidia"
+
+
+def _build_commit() -> str:
+    """Return the deployed source revision without making it a runtime dependency."""
+    for variable in ("STREAMLIT_GIT_COMMIT", "GITHUB_SHA", "COMMIT_SHA"):
+        value = os.getenv(variable, "").strip()
+        if value:
+            return value[:8]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short=8", "HEAD"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=2,
+        )
+        return result.stdout.strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+BUILD_COMMIT = _build_commit()
 
 CATEGORY_FIELDS = {
     "knowledge_acquisition": [
@@ -634,9 +659,32 @@ def _post_nvidia(
     client: dict[str, Any], payload: dict[str, Any], *, stream: bool = False,
     timeout: int | tuple[int, int] = TIMEOUT_SECONDS,
     progress_callback: Any | None = None,
+    stage: str = "initial_grading",
 ) -> NvidiaChatCompletion:
     endpoint = f"{BASE_URL}/chat/completions"
     started_at = time.monotonic()
+    connect_timeout = timeout[0] if isinstance(timeout, tuple) else timeout
+    read_timeout = timeout[1] if isinstance(timeout, tuple) else timeout
+    runtime_proof = {
+        "marker": "LLAMA_NVIDIA_REQUEST_ACTIVE",
+        "stage": stage,
+        "model": MODEL,
+        "connect_timeout_seconds": connect_timeout,
+        "read_timeout_seconds": read_timeout,
+        "request_function": REQUEST_FUNCTION,
+        "build_commit": BUILD_COMMIT,
+    }
+    print(
+        "LLAMA_NVIDIA_REQUEST_ACTIVE "
+        f"stage={stage} model={MODEL} connect_timeout={connect_timeout} "
+        f"read_timeout={read_timeout} request_function={REQUEST_FUNCTION} "
+        f"build_commit={BUILD_COMMIT}",
+        flush=True,
+    )
+    if progress_callback:
+        progress_callback(
+            f"Llama NVIDIA timeout: {read_timeout}s | Build: {BUILD_COMMIT}"
+        )
     headers = dict(client["headers"])
     if stream:
         headers["Accept"] = "text/event-stream"
@@ -710,8 +758,9 @@ def _post_nvidia(
         "elapsed_request_seconds": round(time.monotonic() - started_at, 3),
         "streaming_enabled": stream,
         "time_to_first_token_seconds": time_to_first_token,
-        "connect_timeout_seconds": timeout[0] if isinstance(timeout, tuple) else timeout,
-        "read_timeout_seconds": timeout[1] if isinstance(timeout, tuple) else timeout,
+        "connect_timeout_seconds": connect_timeout,
+        "read_timeout_seconds": read_timeout,
+        "runtime_proof": runtime_proof,
     }
     if not (200 <= int(getattr(response, "status_code", 0)) < 300):
         body = response_text.strip()
@@ -742,6 +791,7 @@ def request_grade(
         stream=True,
         timeout=timeout,
         progress_callback=progress_callback,
+        stage="initial_grading",
     )
 
 
@@ -751,6 +801,7 @@ def request_format_repair(
     *,
     response_format: bool,
     timeout: tuple[int, int] = (CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),
+    progress_callback: Any | None = None,
 ) -> NvidiaChatCompletion:
     repair_prompt = (
         "SYSTEM:\nYou are a deterministic JSON formatter. Convert the supplied completed evaluation "
@@ -787,6 +838,8 @@ def request_format_repair(
         ),
         stream=True,
         timeout=timeout,
+        progress_callback=progress_callback,
+        stage="format_repair",
     )
 
 
@@ -813,6 +866,7 @@ def request_complete_grading_retry(
         stream=True,
         timeout=timeout,
         progress_callback=progress_callback,
+        stage="complete_grading_retry",
     )
 
 
@@ -854,6 +908,9 @@ def _request_with_retry(
                     "stage": stage,
                     "provider": "nvidia",
                     "model": MODEL,
+                    "runtime_marker": "LLAMA_NVIDIA_REQUEST_ACTIVE",
+                    "request_function": REQUEST_FUNCTION,
+                    "build_commit": BUILD_COMMIT,
                     "attempt": attempt,
                     "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
                     "read_timeout_seconds": read_timeout,
@@ -880,6 +937,9 @@ def _request_with_retry(
                 "stage": stage,
                 "provider": "nvidia",
                 "model": MODEL,
+                "runtime_marker": "LLAMA_NVIDIA_REQUEST_ACTIVE",
+                "request_function": REQUEST_FUNCTION,
+                "build_commit": BUILD_COMMIT,
                 "attempt": attempt,
                 "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
                 "read_timeout_seconds": read_timeout,
@@ -904,6 +964,9 @@ def _request_with_retry(
             "stage": stage,
             "provider": "nvidia",
             "model": MODEL,
+            "runtime_marker": "LLAMA_NVIDIA_REQUEST_ACTIVE",
+            "request_function": REQUEST_FUNCTION,
+            "build_commit": BUILD_COMMIT,
             "request_count": 1,
             "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
             "read_timeout_seconds": READ_TIMEOUT_SECONDS,
@@ -921,6 +984,9 @@ def _request_with_retry(
                 "stage": stage,
                 "provider": "nvidia",
                 "model": MODEL,
+                "runtime_marker": "LLAMA_NVIDIA_REQUEST_ACTIVE",
+                "request_function": REQUEST_FUNCTION,
+                "build_commit": BUILD_COMMIT,
                 "request_count": 1,
                 "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
                 "read_timeout_seconds": READ_TIMEOUT_SECONDS,
@@ -943,6 +1009,9 @@ def _request_with_retry(
                 "stage": stage,
                 "provider": "nvidia",
                 "model": MODEL,
+                "runtime_marker": "LLAMA_NVIDIA_REQUEST_ACTIVE",
+                "request_function": REQUEST_FUNCTION,
+                "build_commit": BUILD_COMMIT,
                 "request_count": 2,
                 "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
                 "read_timeout_seconds": READ_TIMEOUT_SECONDS,
@@ -963,6 +1032,9 @@ def _request_with_retry(
             "stage": stage,
             "provider": "nvidia",
             "model": MODEL,
+            "runtime_marker": "LLAMA_NVIDIA_REQUEST_ACTIVE",
+            "request_function": REQUEST_FUNCTION,
+            "build_commit": BUILD_COMMIT,
             "request_count": 2,
             "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
             "read_timeout_seconds": READ_TIMEOUT_SECONDS,
@@ -1297,6 +1369,12 @@ def grade_pdf(
     debug_path = Path(f"{debug_prefix}_debug.json")
     debug: dict[str, Any] = {
         "provider": "nvidia", "model": MODEL, "base_url": BASE_URL,
+        "uploaded_filename": map_file,
+        "build_commit": BUILD_COMMIT,
+        "request_function": REQUEST_FUNCTION,
+        "effective_connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
+        "effective_read_timeout_seconds": READ_TIMEOUT_SECONDS,
+        "effective_retry_read_timeout_seconds": RETRY_READ_TIMEOUT_SECONDS,
         "pipeline": "single_pass_multimodal", "request_count": 1,
         "prompt_character_count": len(prompt), "max_tokens": MAX_TOKENS,
         "temperature": TEMPERATURE, "top_p": TOP_P, "image_mime_type": IMAGE_MIME_TYPE,
@@ -1583,6 +1661,7 @@ def grade_pdf(
                 raw_text,
                 response_format=debug.get("response_format_supported") is True,
                 timeout=timeout,
+                progress_callback=progress_callback,
             ),
             progress_callback,
             stage="format_repair",
