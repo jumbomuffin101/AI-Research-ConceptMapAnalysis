@@ -101,6 +101,8 @@ def _review_debug(
 ) -> dict[str, Any]:
     if result is None:
         metadata = getattr(error, "debug_metadata", {}) if error else {}
+        if not metadata and error is not None:
+            metadata = getattr(error, "attempts", {}) or {}
         return {
             "response": metadata.get("attempts"),
             "validation": {"valid": False, "error": str(error) if error else "not attempted"},
@@ -244,6 +246,7 @@ def run_consensus_pipeline(
                 initial_own=immutable_gemma,
                 initial_peer=immutable_llama,
                 initial_comparison=initial_comparison,
+                progress_callback=progress_callback,
             )
         except Exception as exc:
             gemma_review_error = exc
@@ -262,6 +265,7 @@ def run_consensus_pipeline(
                 initial_own=immutable_llama,
                 initial_peer=immutable_gemma,
                 initial_comparison=initial_comparison,
+                progress_callback=progress_callback,
             )
         except Exception as exc:
             llama_review_error = exc
@@ -338,6 +342,7 @@ def run_consensus_pipeline(
             llama_review=llama_review_payload,
             initial_comparison=initial_comparison,
             post_review_comparison=post_review,
+            progress_callback=progress_callback,
         )
         consensus = consensus_result.consensus
     except Exception as exc:
@@ -352,7 +357,10 @@ def run_consensus_pipeline(
     consensus_meta = (
         consensus_result.request_metadata
         if consensus_result
-        else getattr(consensus_error, "debug_metadata", {})
+        else (
+            getattr(consensus_error, "debug_metadata", {})
+            or getattr(consensus_error, "attempts", {})
+        )
     )
     consensus_attempts = consensus_meta.get("attempts", [])
     first_consensus_attempt = (

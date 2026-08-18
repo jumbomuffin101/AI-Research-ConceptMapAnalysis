@@ -261,6 +261,7 @@ def run_cross_review(
     initial_peer: Mapping[str, Any],
     initial_comparison: Mapping[str, Any],
     invoke: Callable[..., ProviderCallResult] = invoke_model,
+    progress_callback: Any | None = None,
 ) -> CrossReviewResult:
     disagreements = list(initial_comparison.get("disagreements", []))
     disagreement_paths = {str(item["path"]) for item in disagreements}
@@ -284,6 +285,8 @@ def run_cross_review(
         image_base64=image_base64,
         max_tokens=max_tokens,
         timeout_seconds=REVIEW_TIMEOUT_SECONDS,
+        stage="cross_review",
+        progress_callback=progress_callback,
     )
     first_debug = _attempt_debug(first, first.raw_text)
     attempts.append(first_debug)
@@ -343,6 +346,8 @@ def run_cross_review(
         image_base64=None if format_only else image_base64,
         max_tokens=max_tokens,
         timeout_seconds=REVIEW_TIMEOUT_SECONDS,
+        stage="cross_review",
+        progress_callback=progress_callback,
     )
     recovered_debug = _attempt_debug(recovered, recovered.raw_text)
     recovered_debug["recovery_type"] = "format_only" if format_only else "full_review_retry"

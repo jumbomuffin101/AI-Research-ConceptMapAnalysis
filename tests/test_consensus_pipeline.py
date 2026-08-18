@@ -5,7 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from consensus.adjudication import (
     AdjudicationResult,
@@ -25,6 +25,7 @@ from consensus.cross_review import (
     run_cross_review,
 )
 from consensus.providers import ProviderCallResult
+from consensus import providers as consensus_providers
 from consensus.schemas import (
     ConsensusResolutionConsistencyError,
     ConsensusValidationError,
@@ -33,6 +34,7 @@ from consensus.schemas import (
 )
 from consensus.service import run_consensus_pipeline
 from grading.grade_gemma import CATEGORY_FIELDS
+from grading import grade_llama
 
 
 def grading(score: int = 3, overall: str = "Yes") -> dict:
@@ -174,6 +176,53 @@ class ComparisonTests(unittest.TestCase):
         )
         self.assertEqual(score_item["absolute_difference"], 1)
         self.assertNotIn("consensus_value", result)
+
+
+class NvidiaConsensusTransportTests(unittest.TestCase):
+    def test_cross_review_uses_streaming_300_then_360_timeout(self) -> None:
+        class ReadTimeout(Exception):
+            pass
+
+        timeouts: list[tuple[int, int]] = []
+        completion = grade_llama.NvidiaChatCompletion(
+            data={
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": "{}"}}
+                ],
+                "usage": {"completion_tokens": 1},
+            },
+            http_response=object(),
+            transport={
+                "http_status": 200,
+                "streaming_enabled": True,
+                "elapsed_request_seconds": 8,
+                "time_to_first_token_seconds": 1,
+            },
+        )
+
+        def post(_client, _payload, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            if len(timeouts) == 1:
+                raise ReadTimeout("read timed out")
+            self.assertTrue(kwargs["stream"])
+            return completion
+
+        with patch.object(grade_llama, "create_client", return_value=object()), \
+             patch.object(grade_llama, "_post_nvidia", post), \
+             patch.object(grade_llama.time, "sleep"):
+            result = consensus_providers.invoke_model(
+                provider="NVIDIA NIM",
+                model_id=grade_llama.MODEL,
+                prompt="review",
+                image_base64="image",
+                max_tokens=100,
+                timeout_seconds=180,
+                stage="cross_review",
+            )
+        self.assertEqual(timeouts, [(30, 300), (30, 360)])
+        self.assertEqual(result.metadata["stage"], "cross_review")
+        self.assertTrue(result.metadata["streaming_enabled"])
+        self.assertTrue(result.metadata["retry_attempted"])
 
     def test_explanation_differences_do_not_count(self) -> None:
         gemma = grading()

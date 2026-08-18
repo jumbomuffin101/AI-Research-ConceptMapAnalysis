@@ -320,6 +320,7 @@ def run_adjudication(
     initial_comparison: Mapping[str, Any],
     post_review_comparison: Mapping[str, Any],
     invoke: Callable[..., ProviderCallResult] = invoke_model,
+    progress_callback: Any | None = None,
 ) -> AdjudicationResult:
     prompt = build_consensus_prompt(
         config=config,
@@ -338,6 +339,8 @@ def run_adjudication(
         image_base64=image_base64,
         max_tokens=CONSENSUS_MAX_TOKENS,
         timeout_seconds=CONSENSUS_TIMEOUT_SECONDS,
+        stage="consensus",
+        progress_callback=progress_callback,
     )
     disagreement_paths = {
         str(item["path"]) for item in initial_comparison.get("disagreements", [])
@@ -417,6 +420,8 @@ def run_adjudication(
             image_base64=None,
             max_tokens=CONSENSUS_MAX_TOKENS,
             timeout_seconds=CONSENSUS_TIMEOUT_SECONDS,
+            stage="consensus",
+            progress_callback=progress_callback,
         )
         repair_debug = _attempt_debug(repair, required_resolution_paths)
         repair_debug.update(
@@ -535,6 +540,8 @@ def run_adjudication(
         image_base64=None if format_only else image_base64,
         max_tokens=CONSENSUS_MAX_TOKENS,
         timeout_seconds=CONSENSUS_TIMEOUT_SECONDS,
+        stage="consensus",
+        progress_callback=progress_callback,
     )
     recovered_debug = _attempt_debug(recovered, required_resolution_paths)
     recovered_debug["recovery_type"] = "format_only" if format_only else "full_consensus_retry"

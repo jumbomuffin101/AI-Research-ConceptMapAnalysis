@@ -6,11 +6,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from grading import grade_gemma, grade_llama
 from interface import grading_runner
 from interface.grading_runner import EvaluationResult, MalformedResultError, parse_model_json, run_evaluation, selected_model_names
+from interface.consensus_integration import consensus_ready
 from scripts import generate_evaluation_report
 
 
@@ -149,8 +150,8 @@ class Llama32SinglePassTests(unittest.TestCase):
 
     def test_nvidia_payload_uses_image_and_expected_model(self) -> None:
         captured: dict = {}
-        def post(_client, payload):
-            captured["payload"] = payload
+        def post(_client, payload, **kwargs):
+            captured["payload"] = payload; captured["kwargs"] = kwargs
             return object()
         with patch.object(grade_llama, "_post_nvidia", post):
             grade_llama.request_grade(object(), "rubric", "encoded-image")
@@ -161,11 +162,14 @@ class Llama32SinglePassTests(unittest.TestCase):
         content = payload["messages"][0]["content"]
         self.assertEqual(content[0]["type"], "text")
         self.assertEqual(content[1]["image_url"]["url"], "data:image/jpeg;base64,encoded-image")
+        self.assertTrue(payload["stream"])
+        self.assertTrue(captured["kwargs"]["stream"])
+        self.assertEqual(captured["kwargs"]["timeout"], (30, 300))
 
     def test_format_repair_payload_is_text_only_and_uses_json_mode_setting(self) -> None:
         captured: dict = {}
-        def post(_client, payload):
-            captured["payload"] = payload
+        def post(_client, payload, **kwargs):
+            captured["payload"] = payload; captured["kwargs"] = kwargs
             return object()
         with patch.object(grade_llama, "_post_nvidia", post):
             grade_llama.request_format_repair(object(), "## Markdown evaluation", response_format=True)
@@ -175,6 +179,8 @@ class Llama32SinglePassTests(unittest.TestCase):
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertIsInstance(payload["messages"][0]["content"], str)
         self.assertNotIn("image_url", payload["messages"][0]["content"])
+        self.assertTrue(payload["stream"])
+        self.assertEqual(captured["kwargs"]["timeout"], (30, 300))
 
     def test_nvidia_key_and_compact_references_are_used(self) -> None:
         self.assertEqual(grade_llama.API_KEY_ENV, "NVIDIA_API_KEY")
@@ -336,10 +342,14 @@ class Llama32SinglePassTests(unittest.TestCase):
              patch.object(grade_llama, "request_grade", return_value=initial), \
              patch.object(grade_llama, "request_complete_grading_retry", side_effect=TimeoutError("read timed out")), \
              patch.object(grade_llama, "request_format_repair") as formatter:
-            with self.assertRaisesRegex(grade_llama.MalformedLlamaVisionJsonError, "timed out before NVIDIA") as caught:
+            with self.assertRaisesRegex(
+                grade_llama.LlamaNvidiaTimeoutError,
+                "did not return a response before the NVIDIA timeout limit",
+            ) as caught:
                 grade_llama.grade_pdf(Path(temp) / "map.pdf", "map.pdf", Path(temp) / "debug")
         formatter.assert_not_called()
-        self.assertEqual(caught.exception.attempts["full_retry_failure_type"], "timeout")
+        self.assertEqual(caught.exception.attempts["request_count"], 2)
+        self.assertEqual(caught.exception.attempts["retry_read_timeout_seconds"], 360)
 
     def test_streamlit_public_runner_uses_full_retry_for_summary_only_llama(self) -> None:
         summary = {
@@ -435,8 +445,172 @@ class Llama32SinglePassTests(unittest.TestCase):
         with patch.object(grade_llama.time, "sleep") as sleep:
             _, debug = grade_llama._request_with_retry(request)
         self.assertEqual(calls, 2)
-        sleep.assert_called_once_with(2)
+        sleep.assert_called_once_with(5)
         self.assertTrue(debug["retry_attempted"])
+
+    def test_read_timeout_retries_once_with_360_second_read_timeout(self) -> None:
+        class ReadTimeout(Exception):
+            pass
+
+        timeouts = []
+        response = grade_llama.NvidiaChatCompletion(
+            data={"choices": [{"finish_reason": "stop", "message": {"content": "{}"}}]},
+            http_response=HttpResponse(),
+            transport={
+                "http_status": 200,
+                "streaming_enabled": True,
+                "time_to_first_token_seconds": 2.5,
+                "elapsed_request_seconds": 15.0,
+            },
+        )
+
+        def request(timeout):
+            timeouts.append(timeout)
+            if len(timeouts) == 1:
+                raise ReadTimeout("read timed out")
+            return response
+
+        statuses = []
+        with patch.object(grade_llama.time, "sleep") as sleep:
+            _, debug = grade_llama._request_with_retry(
+                request,
+                statuses.append,
+                stage="initial_grading",
+            )
+        self.assertEqual(timeouts, [(30, 300), (30, 360)])
+        sleep.assert_called_once_with(5)
+        self.assertEqual(debug["request_count"], 2)
+        self.assertEqual(debug["retry_read_timeout_seconds"], 360)
+        self.assertEqual(len(debug["attempts"]), 2)
+        self.assertIn("Retrying Llama once", statuses[-1])
+
+    def test_second_read_timeout_uses_precise_failure_message(self) -> None:
+        class ReadTimeout(Exception):
+            pass
+
+        calls = 0
+
+        def request(_timeout):
+            nonlocal calls
+            calls += 1
+            raise ReadTimeout("read timed out")
+
+        with patch.object(grade_llama.time, "sleep"):
+            with self.assertRaises(grade_llama.LlamaNvidiaTimeoutError) as caught:
+                grade_llama._request_with_retry(request, stage="initial_grading")
+        self.assertEqual(calls, 2)
+        self.assertEqual(
+            str(caught.exception),
+            "Llama 3.2 90B Vision did not return a response before the NVIDIA timeout limit.",
+        )
+        self.assertEqual(len(caught.exception.attempts["attempts"]), 2)
+
+    def test_each_retryable_http_status_gets_exactly_one_retry(self) -> None:
+        for status in (429, 502, 503, 504):
+            with self.subTest(status=status):
+                calls = 0
+                response = grade_llama.NvidiaChatCompletion(
+                    data={"choices": []},
+                    http_response=HttpResponse(),
+                    transport={"http_status": 200},
+                )
+
+                def request(_timeout):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        raise grade_llama.NvidiaHttpError(
+                            f"NVIDIA NIM HTTP {status}", {"http_status": status}
+                        )
+                    return response
+
+                with patch.object(grade_llama.time, "sleep"):
+                    grade_llama._request_with_retry(request, stage="initial_grading")
+                self.assertEqual(calls, 2)
+
+    def test_schema_error_does_not_trigger_transport_retry(self) -> None:
+        calls = 0
+
+        def request(_timeout):
+            nonlocal calls
+            calls += 1
+            raise MalformedResultError("invalid score")
+
+        with self.assertRaises(MalformedResultError):
+            grade_llama._request_with_retry(request, stage="initial_grading")
+        self.assertEqual(calls, 1)
+
+    def test_successful_llama_transport_retry_preserves_gemma_and_is_consensus_ready(self) -> None:
+        class ReadTimeout(Exception):
+            pass
+
+        payload = valid_payload(3)
+        llama_response = grade_llama.NvidiaChatCompletion(
+            data={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": json.dumps(payload)},
+                    }
+                ],
+                "usage": {"completion_tokens": 100},
+            },
+            http_response=HttpResponse(),
+            transport={
+                "http_status": 200,
+                "streaming_enabled": True,
+                "elapsed_request_seconds": 10,
+                "time_to_first_token_seconds": 1,
+            },
+        )
+        llama_calls = 0
+
+        def llama_request(*_args, **_kwargs):
+            nonlocal llama_calls
+            llama_calls += 1
+            if llama_calls == 1:
+                raise ReadTimeout("read timed out")
+            return llama_response
+
+        def render(_pdf, output):
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"jpeg")
+            return {
+                "path": output,
+                "base64": "image",
+                "width": 10,
+                "height": 10,
+                "bytes": 4,
+            }
+
+        gemma_payload = valid_payload(3)
+        gemma_payload["model"] = grade_gemma.MODEL
+        gemma_grade = {
+            "cleaned_text": json.dumps(gemma_payload),
+            "response": {"gemma": True},
+            "debug": {},
+            "prompt_path": None,
+            "raw_path": None,
+            "image_path": None,
+        }
+        gemma_grader = Mock(return_value=gemma_grade)
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(grading_runner, "OUTPUT_DIR", Path(temp) / "outputs"), \
+             patch.object(grading_runner, "DEBUG_DIR", Path(temp) / "debug"), \
+             patch.object(grading_runner, "FAILURE_EVALUATION_DIR", Path(temp) / "failures"), \
+             patch.object(grade_gemma, "grade_pdf", gemma_grader), \
+             patch.object(grade_llama, "render_pdf_first_page", render), \
+             patch.object(grade_llama, "create_client", return_value=object()), \
+             patch.object(grade_llama, "request_grade", llama_request), \
+             patch.object(grade_llama.time, "sleep"):
+            results = run_evaluation(
+                Path(temp) / "map.pdf",
+                ["Gemma", "Llama 3.2 90B Vision"],
+                "map.pdf",
+            )
+        gemma_grader.assert_called_once()
+        self.assertEqual(llama_calls, 2)
+        self.assertTrue(consensus_ready(results))
 
     def test_gemma_is_unchanged(self) -> None:
         self.assertEqual(grade_gemma.MODEL, "google/gemma-4-26b-a4b-it:free")

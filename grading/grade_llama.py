@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import inspect
 import os
 import re
 import time
@@ -23,9 +24,12 @@ MAX_TOKENS = 1800
 FULL_RETRY_MAX_TOKENS = 2600
 TEMPERATURE = 0.2
 TOP_P = 0.9
-TIMEOUT_SECONDS = 120
 CONNECT_TIMEOUT_SECONDS = 30
-FULL_RETRY_READ_TIMEOUT_SECONDS = 300
+READ_TIMEOUT_SECONDS = 300
+RETRY_READ_TIMEOUT_SECONDS = 360
+TIMEOUT_SECONDS = READ_TIMEOUT_SECONDS
+FULL_RETRY_READ_TIMEOUT_SECONDS = READ_TIMEOUT_SECONDS
+TRANSPORT_RETRY_WAIT_SECONDS = 5
 IMAGE_MIME_TYPE = "image/jpeg"
 
 CATEGORY_FIELDS = {
@@ -94,6 +98,17 @@ class NvidiaHttpError(RuntimeError):
         self.raw_response = details
         self.status_code = details.get("http_status")
         self.attempts = {"nvidia_http_response": details}
+
+
+class LlamaNvidiaTimeoutError(RuntimeError):
+    """Both permitted NVIDIA transport attempts ended without a response."""
+
+    def __init__(self, attempts: dict[str, Any]) -> None:
+        super().__init__(
+            "Llama 3.2 90B Vision did not return a response before the NVIDIA timeout limit."
+        )
+        self.attempts = attempts
+        self.raw_response = attempts
 
 
 @dataclass
@@ -618,6 +633,7 @@ def _nvidia_payload(
 def _post_nvidia(
     client: dict[str, Any], payload: dict[str, Any], *, stream: bool = False,
     timeout: int | tuple[int, int] = TIMEOUT_SECONDS,
+    progress_callback: Any | None = None,
 ) -> NvidiaChatCompletion:
     endpoint = f"{BASE_URL}/chat/completions"
     started_at = time.monotonic()
@@ -634,6 +650,7 @@ def _post_nvidia(
         finish_reason: Any = None
         usage: Any = None
         time_to_first_token: float | None = None
+        slow_status_sent = False
         for raw_line in response.iter_lines(decode_unicode=True):
             if not raw_line:
                 continue
@@ -656,6 +673,15 @@ def _post_nvidia(
                 if isinstance(content, str) and content:
                     if time_to_first_token is None:
                         time_to_first_token = round(time.monotonic() - started_at, 3)
+                    if (
+                        progress_callback
+                        and not slow_status_sent
+                        and time.monotonic() - started_at >= 60
+                    ):
+                        progress_callback(
+                            "Llama is still processing the concept map. NVIDIA responses can occasionally take several minutes."
+                        )
+                        slow_status_sent = True
                     chunks.append(content)
                 finish_reason = choice.get("finish_reason") or finish_reason
             usage = event.get("usage") or usage
@@ -698,15 +724,33 @@ def _post_nvidia(
 
 
 def request_grade(
-    client: Any, prompt: str, image_base64: str, *, response_format: bool = True
+    client: Any,
+    prompt: str,
+    image_base64: str,
+    *,
+    response_format: bool = True,
+    timeout: tuple[int, int] = (CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),
+    progress_callback: Any | None = None,
 ) -> NvidiaChatCompletion:
     return _post_nvidia(
-        client, _nvidia_payload(_vision_messages(prompt, image_base64), response_format=response_format)
+        client,
+        _nvidia_payload(
+            _vision_messages(prompt, image_base64),
+            response_format=response_format,
+            stream=True,
+        ),
+        stream=True,
+        timeout=timeout,
+        progress_callback=progress_callback,
     )
 
 
 def request_format_repair(
-    client: Any, previous_response: str, *, response_format: bool
+    client: Any,
+    previous_response: str,
+    *,
+    response_format: bool,
+    timeout: tuple[int, int] = (CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),
 ) -> NvidiaChatCompletion:
     repair_prompt = (
         "SYSTEM:\nYou are a deterministic JSON formatter. Convert the supplied completed evaluation "
@@ -739,12 +783,24 @@ def request_format_repair(
             [{"role": "user", "content": repair_prompt}],
             response_format=response_format,
             temperature=0,
+            stream=True,
         ),
+        stream=True,
+        timeout=timeout,
     )
 
 
 def request_complete_grading_retry(
-    client: Any, retry_prompt: str, image_base64: str, *, response_format: bool
+    client: Any,
+    retry_prompt: str,
+    image_base64: str,
+    *,
+    response_format: bool,
+    timeout: tuple[int, int] = (
+        CONNECT_TIMEOUT_SECONDS,
+        FULL_RETRY_READ_TIMEOUT_SECONDS,
+    ),
+    progress_callback: Any | None = None,
 ) -> NvidiaChatCompletion:
     """One new multimodal evaluation when the first response omitted substantive rubric grading."""
     return _post_nvidia(
@@ -755,7 +811,8 @@ def request_complete_grading_retry(
             stream=True,
         ),
         stream=True,
-        timeout=(CONNECT_TIMEOUT_SECONDS, FULL_RETRY_READ_TIMEOUT_SECONDS),
+        timeout=timeout,
+        progress_callback=progress_callback,
     )
 
 
@@ -765,33 +822,163 @@ def _is_transient(error: Exception) -> bool:
 
 
 def _request_with_retry(
-    request: Any, progress_callback: Any | None = None, *, retry_timeouts: bool = True
+    request: Any,
+    progress_callback: Any | None = None,
+    *,
+    stage: str = "initial_grading",
+    retry_timeouts: bool = True,
 ) -> tuple[Any, dict[str, Any]]:
+    attempts: list[dict[str, Any]] = []
+
+    def run_attempt(attempt: int, read_timeout: int) -> Any:
+        started = time.monotonic()
+        try:
+            parameters = inspect.signature(request).parameters.values()
+            accepts_timeout = any(
+                parameter.kind
+                in {
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.VAR_POSITIONAL,
+                }
+                for parameter in parameters
+            )
+            response = (
+                request((CONNECT_TIMEOUT_SECONDS, read_timeout))
+                if accepts_timeout
+                else request()
+            )
+        except Exception as error:
+            attempts.append(
+                {
+                    "stage": stage,
+                    "provider": "nvidia",
+                    "model": MODEL,
+                    "attempt": attempt,
+                    "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
+                    "read_timeout_seconds": read_timeout,
+                    "streaming_enabled": True,
+                    "time_to_first_token_seconds": None,
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                    "http_status": getattr(error, "status_code", None),
+                    "finish_reason": None,
+                    "timeout_occurred": _is_timeout_error(error),
+                    "error": repr(error),
+                }
+            )
+            raise
+        transport = getattr(response, "transport", {})
+        choices = getattr(response, "choices", []) or []
+        first_choice = choices[0] if choices else {}
+        finish_reason = (
+            first_choice.get("finish_reason")
+            if isinstance(first_choice, dict)
+            else getattr(first_choice, "finish_reason", None)
+        )
+        attempts.append(
+            {
+                "stage": stage,
+                "provider": "nvidia",
+                "model": MODEL,
+                "attempt": attempt,
+                "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
+                "read_timeout_seconds": read_timeout,
+                "streaming_enabled": bool(transport.get("streaming_enabled")),
+                "time_to_first_token_seconds": transport.get(
+                    "time_to_first_token_seconds"
+                ),
+                "duration_seconds": transport.get(
+                    "elapsed_request_seconds",
+                    round(time.monotonic() - started, 3),
+                ),
+                "http_status": transport.get("http_status"),
+                "finish_reason": finish_reason,
+                "timeout_occurred": False,
+            }
+        )
+        return response
+
     try:
-        response = request()
-        return response, {"request_count": 1, "retry_attempted": False, "http_status": response.transport.get("http_status")}
+        response = run_attempt(1, READ_TIMEOUT_SECONDS)
+        return response, {
+            "stage": stage,
+            "provider": "nvidia",
+            "model": MODEL,
+            "request_count": 1,
+            "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
+            "read_timeout_seconds": READ_TIMEOUT_SECONDS,
+            "streaming_enabled": True,
+            "retry_attempted": False,
+            "retry_wait_seconds": 0,
+            "retry_read_timeout_seconds": None,
+            "http_status": response.transport.get("http_status"),
+            "attempts": attempts,
+        }
     except Exception as first_error:
-        is_timeout = "timeout" in first_error.__class__.__name__.lower() or "timed out" in str(first_error).lower()
+        is_timeout = _is_timeout_error(first_error)
         if not _is_transient(first_error) or (is_timeout and not retry_timeouts):
+            first_error.attempts = {
+                "stage": stage,
+                "provider": "nvidia",
+                "model": MODEL,
+                "request_count": 1,
+                "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
+                "read_timeout_seconds": READ_TIMEOUT_SECONDS,
+                "streaming_enabled": True,
+                "retry_attempted": False,
+                "attempts": attempts,
+            }
             raise
         if progress_callback:
-            progress_callback("Llama 3.2 90B Vision request failed transiently. Retrying once...")
-        time.sleep(2)
+            progress_callback(
+                "NVIDIA timed out before returning Llama's response. Retrying Llama once..."
+                if is_timeout
+                else "NVIDIA returned a transient error. Retrying Llama once..."
+            )
+        time.sleep(TRANSPORT_RETRY_WAIT_SECONDS)
         try:
-            response = request()
+            response = run_attempt(2, RETRY_READ_TIMEOUT_SECONDS)
         except Exception as retry_error:
-            retry_error.attempts = {
-                "request_count": 2, "retry_attempted": True,
+            retry_metadata = {
+                "stage": stage,
+                "provider": "nvidia",
+                "model": MODEL,
+                "request_count": 2,
+                "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
+                "read_timeout_seconds": READ_TIMEOUT_SECONDS,
+                "streaming_enabled": True,
+                "retry_attempted": True,
+                "retry_wait_seconds": TRANSPORT_RETRY_WAIT_SECONDS,
+                "retry_read_timeout_seconds": RETRY_READ_TIMEOUT_SECONDS,
                 "first_attempt_error": repr(first_error),
                 "retry_attempt_error": repr(retry_error),
                 "http_status": getattr(retry_error, "status_code", None),
+                "attempts": attempts,
             }
+            if is_timeout and _is_timeout_error(retry_error):
+                raise LlamaNvidiaTimeoutError(retry_metadata) from retry_error
+            retry_error.attempts = retry_metadata
             raise
         return response, {
-            "request_count": 2, "retry_attempted": True,
+            "stage": stage,
+            "provider": "nvidia",
+            "model": MODEL,
+            "request_count": 2,
+            "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
+            "read_timeout_seconds": READ_TIMEOUT_SECONDS,
+            "streaming_enabled": True,
+            "retry_attempted": True,
+            "retry_wait_seconds": TRANSPORT_RETRY_WAIT_SECONDS,
+            "retry_read_timeout_seconds": RETRY_READ_TIMEOUT_SECONDS,
             "first_attempt_error": repr(first_error),
             "http_status": response.transport.get("http_status"),
+            "attempts": attempts,
         }
+
+
+def _is_timeout_error(error: Exception) -> bool:
+    text = f"{error.__class__.__name__} {error}".lower()
+    return "timeout" in text or "timed out" in text
 
 
 def _response_dump(response: Any) -> Any:
@@ -1140,7 +1327,11 @@ def grade_pdf(
         "initial_request": {
             "prompt_character_count": len(prompt), "prompt_token_count": round(len(prompt) / 4),
             "max_tokens": MAX_TOKENS, "temperature": TEMPERATURE, "top_p": TOP_P,
-            "connect_timeout_seconds": TIMEOUT_SECONDS, "read_timeout_seconds": TIMEOUT_SECONDS,
+            "stage": "initial_grading",
+            "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
+            "read_timeout_seconds": READ_TIMEOUT_SECONDS,
+            "retry_read_timeout_seconds": RETRY_READ_TIMEOUT_SECONDS,
+            "streaming_enabled": True,
         },
     }
     debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
@@ -1150,7 +1341,16 @@ def grade_pdf(
     try:
         try:
             response, retry_debug = _request_with_retry(
-                lambda: request_grade(client, prompt, image_base64, response_format=True), progress_callback
+                lambda timeout: request_grade(
+                    client,
+                    prompt,
+                    image_base64,
+                    response_format=True,
+                    timeout=timeout,
+                    progress_callback=progress_callback,
+                ),
+                progress_callback,
+                stage="initial_grading",
             )
             debug["response_format_supported"] = True
         except Exception as format_error:
@@ -1161,7 +1361,16 @@ def grade_pdf(
             debug["response_format_supported"] = False
             debug["response_format_rejection"] = getattr(format_error, "raw_response", None)
             response, retry_debug = _request_with_retry(
-                lambda: request_grade(client, prompt, image_base64, response_format=False), progress_callback
+                lambda timeout: request_grade(
+                    client,
+                    prompt,
+                    image_base64,
+                    response_format=False,
+                    timeout=timeout,
+                    progress_callback=progress_callback,
+                ),
+                progress_callback,
+                stage="initial_grading",
             )
         attempts = {"first_attempt": _response_dump(response)}
         raw_text = response_text(response, attempts)
@@ -1178,6 +1387,9 @@ def grade_pdf(
     raw_path.write_text(raw_text, encoding="utf-8")
     debug.update({
         "request_count": retry_debug["request_count"], "retry_attempted": retry_debug["retry_attempted"],
+        "retry_wait_seconds": retry_debug.get("retry_wait_seconds", 0),
+        "retry_read_timeout_seconds": retry_debug.get("retry_read_timeout_seconds"),
+        "transport_attempts": retry_debug.get("attempts", []),
         "initial_http_status": diagnostics["http_status"], "initial_finish_reason": diagnostics["finish_reason"],
         "initial_content_length": len(raw_text), "initial_response": diagnostics,
         "raw_path": str(raw_path),
@@ -1253,12 +1465,14 @@ def grade_pdf(
         }
         try:
             retry_response, full_retry_debug = _request_with_retry(
-                lambda: request_complete_grading_retry(
+                lambda timeout: request_complete_grading_retry(
                     client, full_retry_prompt, image_base64,
                     response_format=debug.get("response_format_supported") is True,
+                    timeout=timeout,
+                    progress_callback=progress_callback,
                 ),
                 progress_callback,
-                retry_timeouts=False,
+                stage="full_retry",
             )
             full_retry_attempts = {"full_multimodal_retry": _response_dump(retry_response)}
             retry_text = response_text(retry_response, full_retry_attempts)
@@ -1267,6 +1481,18 @@ def grade_pdf(
             retry_raw_path.write_text(retry_text, encoding="utf-8")
             debug.update({
                 "full_multimodal_retry_request_count": full_retry_debug["request_count"],
+                "full_multimodal_retry_transport_attempts": full_retry_debug.get(
+                    "attempts", []
+                ),
+                "full_multimodal_retry_retry_attempted": full_retry_debug.get(
+                    "retry_attempted", False
+                ),
+                "full_multimodal_retry_retry_wait_seconds": full_retry_debug.get(
+                    "retry_wait_seconds", 0
+                ),
+                "full_multimodal_retry_retry_read_timeout_seconds": full_retry_debug.get(
+                    "retry_read_timeout_seconds"
+                ),
                 "full_multimodal_retry_http_status": retry_diagnostics["http_status"],
                 "full_multimodal_retry_finish_reason": retry_diagnostics["finish_reason"],
                 "full_retry_http_status": retry_diagnostics["http_status"],
@@ -1313,7 +1539,7 @@ def grade_pdf(
             error_text = str(full_retry_error).lower()
             if "timed out" in error_text or "timeout" in error_text:
                 failure_type = "timeout"
-                message = "Llama returned an incomplete evaluation. The complete grading retry timed out before NVIDIA returned a response."
+                message = str(full_retry_error)
             elif isinstance(full_retry_error, NvidiaHttpError):
                 failure_type = "http_error"
                 message = "Llama returned an incomplete evaluation. NVIDIA returned an error during the complete grading retry."
@@ -1330,6 +1556,8 @@ def grade_pdf(
                 "duration_seconds": round(time.monotonic() - started_at, 3), "final_result_source": "failure",
             })
             debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
+            if isinstance(full_retry_error, LlamaNvidiaTimeoutError):
+                raise full_retry_error
             raise MalformedLlamaVisionJsonError(
                 debug,
                 message,
@@ -1350,10 +1578,14 @@ def grade_pdf(
         progress_callback("Llama completed the grading but returned the wrong format. Converting it to the required JSON structure...")
     try:
         repair_response, repair_retry = _request_with_retry(
-            lambda: request_format_repair(
-                client, raw_text, response_format=debug.get("response_format_supported") is True
+            lambda timeout: request_format_repair(
+                client,
+                raw_text,
+                response_format=debug.get("response_format_supported") is True,
+                timeout=timeout,
             ),
             progress_callback,
+            stage="format_repair",
         )
         repair_attempts = {"repair_attempt": _response_dump(repair_response)}
         repair_text = response_text(repair_response, repair_attempts)
@@ -1363,6 +1595,11 @@ def grade_pdf(
         debug.update({
             "repair_request_count": repair_retry["request_count"],
             "repair_retry_attempted": repair_retry["retry_attempted"],
+            "repair_transport_attempts": repair_retry.get("attempts", []),
+            "repair_retry_wait_seconds": repair_retry.get("retry_wait_seconds", 0),
+            "repair_retry_read_timeout_seconds": repair_retry.get(
+                "retry_read_timeout_seconds"
+            ),
             "repair_http_status": repair_diagnostics["http_status"],
             "repair_finish_reason": repair_diagnostics["finish_reason"],
             "repair_content_length": len(repair_text), "repair_response": repair_diagnostics,
